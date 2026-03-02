@@ -1,0 +1,63 @@
+import Foundation
+import Testing
+@testable import CoreCache
+
+@Test func resourceKind_codableRoundTrip() throws {
+    let original: ResourceKind = .playlistM3U8
+    let encoded = try JSONEncoder().encode(original)
+    let decoded = try JSONDecoder().decode(ResourceKind.self, from: encoded)
+
+    #expect(decoded == original)
+}
+
+@Test func resourceID_makeResourceKey_isStableAndCanonicalizedForQueryOrder() throws {
+    let url1 = try #require(URL(string: "https://Example.com/media/seg.ts?b=2&a=1"))
+    let url2 = try #require(URL(string: "https://example.com/media/seg.ts?a=1&b=2"))
+    let url3 = try #require(URL(string: "https://example.com/media/seg.ts?a=1&b=3"))
+
+    let key1 = ResourceID.makeResourceKey(from: url1)
+    let key2 = ResourceID.makeResourceKey(from: url1)
+    let keyReordered = ResourceID.makeResourceKey(from: url2)
+    let keyDifferent = ResourceID.makeResourceKey(from: url3)
+
+    #expect(key1 == key2)
+    #expect(key1 == keyReordered)
+    #expect(key1 != keyDifferent)
+    #expect(key1.count == 64)
+    #expect(key1.allSatisfy { $0.isHexDigit && !$0.isUppercase })
+}
+
+@Test func resourceRecord_codableRoundTrip_preservesFieldsAndCompletedRanges() throws {
+    let firstRange = try #require(ByteRange(start: 0, endExclusive: 10))
+    let secondRange = try #require(ByteRange(start: 20, endExclusive: 30))
+
+    let intervalSet = IntervalSet([firstRange, secondRange])
+    let stamp = PluginStamp(id: "playlist-rewrite", version: "1.0.0")
+    let date = Date(timeIntervalSince1970: 1_700_000_000)
+
+    let original = ResourceRecord(
+        kind: .segment,
+        originalURL: URL(string: "https://cdn.example.com/video/segment.ts")!,
+        contentType: "video/mp2t",
+        expectedLength: 4096,
+        completedRanges: intervalSet,
+        pluginsApplied: [stamp],
+        lastUpdated: date
+    )
+
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    let data = try encoder.encode(original)
+
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let decoded = try decoder.decode(ResourceRecord.self, from: data)
+
+    #expect(decoded.kind == original.kind)
+    #expect(decoded.originalURL == original.originalURL)
+    #expect(decoded.contentType == original.contentType)
+    #expect(decoded.expectedLength == original.expectedLength)
+    #expect(decoded.completedRanges == original.completedRanges)
+    #expect(decoded.pluginsApplied == original.pluginsApplied)
+    #expect(decoded.lastUpdated == original.lastUpdated)
+}
