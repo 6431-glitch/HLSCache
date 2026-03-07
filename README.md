@@ -177,6 +177,13 @@ Each resource has:
 
 Manifests are written atomically (temp file + replace).
 
+### Alias Registry Persistence
+
+- Alias mappings are persisted at `BaseDirectory/alias_registry.json`.
+- Writes are atomic (`alias_registry.json.tmp` + replace), preventing partial JSON files.
+- `updateRemoteURL(alias:remoteURL:)` only rotates the remote URL metadata and preserves stable `AssetID`/`CacheKey` identity.
+- Registry access is synchronized for safe concurrent reads and mutations.
+
 ---
 
 ## Usage Example
