@@ -6,6 +6,8 @@ public enum ReadPlanPart: Equatable, Sendable {
 }
 
 public final class CoreCache: @unchecked Sendable {
+    // Single synchronization strategy for mutable CoreCache state.
+    // Reads use queue.sync; all mutations use barrier writes.
     private let queue = DispatchQueue(label: "CoreCache.CoreCache", attributes: .concurrent)
     private let diskStore: DiskStore
     private let manifestStore: ManifestStore
@@ -26,7 +28,7 @@ public final class CoreCache: @unchecked Sendable {
             }
 
             let missingRanges = record.completedRanges.missingSubranges(for: requested)
-            return planParts(requested: requested, missingRanges: missingRanges)
+            return validatedPlanParts(requested: requested, missingRanges: missingRanges)
         }
     }
 
@@ -80,6 +82,16 @@ public final class CoreCache: @unchecked Sendable {
         }
     }
 
+    private func validatedPlanParts(requested: ByteRange, missingRanges: [ByteRange]) -> [ReadPlanPart] {
+        let parts = planParts(requested: requested, missingRanges: missingRanges)
+        if isValidPlan(parts, within: requested) {
+            return parts
+        }
+
+        // Never emit invalid planning output; fallback is coherent and safe.
+        return [.network(requested)]
+    }
+
     private func planParts(requested: ByteRange, missingRanges: [ByteRange]) -> [ReadPlanPart] {
         guard !missingRanges.isEmpty else {
             return [.file(requested)]
@@ -102,5 +114,35 @@ public final class CoreCache: @unchecked Sendable {
         }
 
         return parts
+    }
+
+    private func isValidPlan(_ parts: [ReadPlanPart], within requested: ByteRange) -> Bool {
+        guard !parts.isEmpty else {
+            return requested.length == 0
+        }
+
+        var cursor = requested.start
+
+        for part in parts {
+            let range: ByteRange
+            switch part {
+            case let .file(value), let .network(value):
+                range = value
+            }
+
+            guard range.length > 0 else {
+                return false
+            }
+            guard range.start == cursor else {
+                return false
+            }
+            guard range.start >= requested.start, range.endExclusive <= requested.endExclusive else {
+                return false
+            }
+
+            cursor = range.endExclusive
+        }
+
+        return cursor == requested.endExclusive
     }
 }
