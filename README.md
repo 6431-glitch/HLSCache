@@ -213,6 +213,13 @@ let player = AVPlayer(url: url)
 player.play()
 ```
 
+Facade methods now available from `HLSCache`:
+- `startServer()` / `stopServer()`
+- `register(...)` / `updateRemoteURL(...)`
+- `proxyURL(for:)`
+- `cacheInfo(alias:)` / `clearCache(alias:)`
+- `setPlugins(_:)`
+
 ---
 
 ##Design Principles
