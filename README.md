@@ -12,6 +12,7 @@ The architecture cleanly separates playback proxying, storage, and background do
 - Range-aware disk caching with partial content support (206)
 - Optional disk quota with LRU eviction in `CoreCache`
 - Stable alias-based routing (`/MD0534`) and typed proxy resource routes (`/MD0534/seg|key|raw/<encoded-url>`)
+- Structured logging hooks across `CoreCache` and `HLSCacheFacade`
 - Background HLS offline downloading via `URLSessionConfiguration.background`
 - Streaming transformation plugin pipeline
 - Optional encrypt-at-rest layer

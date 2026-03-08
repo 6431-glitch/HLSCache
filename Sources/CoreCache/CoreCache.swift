@@ -12,11 +12,17 @@ public final class CoreCache: @unchecked Sendable {
     private let diskStore: DiskStore
     private let manifestStore: ManifestStore
     private let diskQuotaBytes: Int64?
+    private let logger: any StructuredLogger
 
-    public init(baseDirectory: URL, diskQuotaBytes: Int64? = nil) {
+    public init(
+        baseDirectory: URL,
+        diskQuotaBytes: Int64? = nil,
+        logger: any StructuredLogger = NoopStructuredLogger()
+    ) {
         self.diskStore = DiskStore(baseDirectory: baseDirectory)
         self.manifestStore = ManifestStore(baseDirectory: baseDirectory)
         self.diskQuotaBytes = diskQuotaBytes.map { max($0, 0) }
+        self.logger = logger
     }
 
     public func plan(resource: ResourceID, requested: ByteRange) throws -> [ReadPlanPart] {
@@ -26,11 +32,34 @@ public final class CoreCache: @unchecked Sendable {
             }
 
             guard let record = try manifestStore.load(resourceID: resource) else {
+                logger.log(
+                    StructuredLogEvent(
+                        subsystem: "CoreCache",
+                        operation: "plan",
+                        metadata: [
+                            "cacheKey": resource.cacheKey.rawValue,
+                            "kind": resource.kind.rawValue,
+                            "parts": "1"
+                        ]
+                    )
+                )
                 return [.network(requested)]
             }
 
             let missingRanges = record.completedRanges.missingSubranges(for: requested)
-            return validatedPlanParts(requested: requested, missingRanges: missingRanges)
+            let parts = validatedPlanParts(requested: requested, missingRanges: missingRanges)
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "CoreCache",
+                    operation: "plan",
+                    metadata: [
+                        "cacheKey": resource.cacheKey.rawValue,
+                        "kind": resource.kind.rawValue,
+                        "parts": String(parts.count)
+                    ]
+                )
+            )
+            return parts
         }
     }
 
@@ -58,6 +87,18 @@ public final class CoreCache: @unchecked Sendable {
             record.touch()
             try manifestStore.save(resourceID: resource, record: record)
             try enforceDiskQuotaIfNeeded()
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "CoreCache",
+                    operation: "write",
+                    metadata: [
+                        "cacheKey": resource.cacheKey.rawValue,
+                        "kind": resource.kind.rawValue,
+                        "bytes": String(data.count),
+                        "offset": String(offset)
+                    ]
+                )
+            )
             return writtenRange
         }
     }
@@ -76,6 +117,16 @@ public final class CoreCache: @unchecked Sendable {
             record.touch()
             try manifestStore.save(resourceID: resource, record: record)
             try enforceDiskQuotaIfNeeded()
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "CoreCache",
+                    operation: "finalizeWrite",
+                    metadata: [
+                        "cacheKey": resource.cacheKey.rawValue,
+                        "kind": resource.kind.rawValue
+                    ]
+                )
+            )
             return record
         }
     }
@@ -134,6 +185,17 @@ public final class CoreCache: @unchecked Sendable {
 
             try diskStore.remove(resourceID: resource)
             try manifestStore.delete(resourceID: resource)
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "CoreCache",
+                    operation: "evict",
+                    metadata: [
+                        "cacheKey": resource.cacheKey.rawValue,
+                        "kind": resource.kind.rawValue,
+                        "bytes": String(length)
+                    ]
+                )
+            )
 
             totalBytes -= length
         }

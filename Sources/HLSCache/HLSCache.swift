@@ -24,15 +24,17 @@ public final class HLSCacheFacade: @unchecked Sendable {
     private let fileManager: FileManager
     private let baseDirectory: URL
     private let aliasRegistry: AliasRegistry
+    private let logger: any StructuredLogger
     private let queue = DispatchQueue(label: "HLSCache.Facade", attributes: .concurrent)
 
     private var serverBaseURL: URL?
     private var pluginStamps: [PluginStamp] = []
 
-    public init(baseDirectory: URL) {
+    public init(baseDirectory: URL, logger: any StructuredLogger = NoopStructuredLogger()) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
         self.aliasRegistry = AliasRegistry(baseDirectory: baseDirectory)
+        self.logger = logger
     }
 
     @discardableResult
@@ -45,6 +47,13 @@ public final class HLSCacheFacade: @unchecked Sendable {
             let resolvedPort = port == 0 ? 8080 : port
             let resolvedURL = URL(string: "http://\(host):\(resolvedPort)")!
             serverBaseURL = resolvedURL
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "startServer",
+                    metadata: ["host": host, "port": String(resolvedPort)]
+                )
+            )
             return resolvedURL
         }
     }
@@ -52,6 +61,12 @@ public final class HLSCacheFacade: @unchecked Sendable {
     public func stopServer() {
         queue.sync(flags: .barrier) {
             serverBaseURL = nil
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "stopServer"
+                )
+            )
         }
     }
 
@@ -62,12 +77,28 @@ public final class HLSCacheFacade: @unchecked Sendable {
         remoteURL: URL,
         headers: [String: String]? = nil
     ) throws -> AssetRecord {
-        try aliasRegistry.register(alias: alias, assetID: assetID, remoteURL: remoteURL, headers: headers)
+        let record = try aliasRegistry.register(alias: alias, assetID: assetID, remoteURL: remoteURL, headers: headers)
+        logger.log(
+            StructuredLogEvent(
+                subsystem: "HLSCache",
+                operation: "register",
+                metadata: ["alias": alias, "assetID": assetID]
+            )
+        )
+        return record
     }
 
     @discardableResult
     public func updateRemoteURL(alias: Alias, remoteURL: URL) throws -> AssetRecord {
-        try aliasRegistry.updateRemoteURL(alias: alias, remoteURL: remoteURL)
+        let updated = try aliasRegistry.updateRemoteURL(alias: alias, remoteURL: remoteURL)
+        logger.log(
+            StructuredLogEvent(
+                subsystem: "HLSCache",
+                operation: "updateRemoteURL",
+                metadata: ["alias": alias]
+            )
+        )
+        return updated
     }
 
     public func proxyURL(for alias: Alias) throws -> URL {
@@ -81,6 +112,13 @@ public final class HLSCacheFacade: @unchecked Sendable {
         }
 
         let encodedAlias = alias.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? alias
+        logger.log(
+            StructuredLogEvent(
+                subsystem: "HLSCache",
+                operation: "proxyURL",
+                metadata: ["alias": alias]
+            )
+        )
         return base.appendingPathComponent(encodedAlias)
     }
 
@@ -116,6 +154,13 @@ public final class HLSCacheFacade: @unchecked Sendable {
             throw ProxyRouteError.invalidEncodedURL(remoteURL.absoluteString)
         }
 
+        logger.log(
+            StructuredLogEvent(
+                subsystem: "HLSCache",
+                operation: "proxyURLResource",
+                metadata: ["alias": alias, "kind": kind.rawValue]
+            )
+        )
         return url
     }
 
@@ -124,6 +169,13 @@ public final class HLSCacheFacade: @unchecked Sendable {
         guard aliasRegistry.resolve(alias: route.alias) != nil else {
             throw HLSCacheError.aliasNotFound(route.alias)
         }
+        logger.log(
+            StructuredLogEvent(
+                subsystem: "HLSCache",
+                operation: "decodeProxyRequestURL",
+                metadata: ["alias": route.alias, "kind": route.kind.rawValue]
+            )
+        )
         return route
     }
 
@@ -134,6 +186,13 @@ public final class HLSCacheFacade: @unchecked Sendable {
 
         let pluginCount = queue.sync { pluginStamps.count }
         let bytes = directorySize(at: cacheDirectory(for: record.cacheKey))
+        logger.log(
+            StructuredLogEvent(
+                subsystem: "HLSCache",
+                operation: "cacheInfo",
+                metadata: ["alias": alias, "bytes": String(bytes)]
+            )
+        )
 
         return CacheInfo(
             alias: record.alias,
@@ -152,10 +211,24 @@ public final class HLSCacheFacade: @unchecked Sendable {
                     throw HLSCacheError.aliasNotFound(alias)
                 }
                 try removeDirectoryIfPresent(at: cacheDirectory(for: record.cacheKey))
+                logger.log(
+                    StructuredLogEvent(
+                        subsystem: "HLSCache",
+                        operation: "clearCache",
+                        metadata: ["alias": alias]
+                    )
+                )
                 return
             }
 
             try removeDirectoryIfPresent(at: baseDirectory.appendingPathComponent("cache", isDirectory: true))
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "clearCache",
+                    metadata: ["alias": "all"]
+                )
+            )
         }
     }
 
@@ -163,6 +236,13 @@ public final class HLSCacheFacade: @unchecked Sendable {
     public func setPlugins(_ plugins: [any HLSCachePlugin]) -> [PluginStamp] {
         queue.sync(flags: .barrier) {
             pluginStamps = plugins.map { PluginStamp(id: $0.id, version: $0.version) }
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "setPlugins",
+                    metadata: ["count": String(pluginStamps.count)]
+                )
+            )
             return pluginStamps
         }
     }
