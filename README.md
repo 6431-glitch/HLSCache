@@ -10,7 +10,7 @@ The architecture cleanly separates playback proxying, storage, and background do
 
 - Local HTTP proxy server built with SwiftNIO
 - Range-aware disk caching with partial content support (206)
-- Stable alias-based routing (`/MD0534`) independent of rotating HLS URLs
+- Stable alias-based routing (`/MD0534`) and typed proxy resource routes (`/MD0534/seg|key|raw/<encoded-url>`)
 - Background HLS offline downloading via `URLSessionConfiguration.background`
 - Streaming transformation plugin pipeline
 - Optional encrypt-at-rest layer
@@ -94,13 +94,17 @@ Remote URLs are not used as identity because HLS URLs frequently change due to s
 
 1. AVPlayer requests `http://127.0.0.1:<port>/<alias>`.
 2. SwiftNIO ProxyServer receives the request.
-3. Proxy resolves alias → AssetRecord → CacheKey.
-4. CoreCache computes a read plan:
+3. Nested resource requests use route shape:
+   - `/<alias>/seg/<encoded-origin-url>`
+   - `/<alias>/key/<encoded-origin-url>`
+   - `/<alias>/raw/<encoded-origin-url>`
+4. Proxy resolves alias → AssetRecord → CacheKey.
+5. CoreCache computes a read plan:
    - `.file(range)` for cached bytes
    - `.network(range)` for missing bytes
-5. Proxy streams cached bytes directly.
-6. Missing ranges are fetched via URLSession and streamed while simultaneously written into cache.
-7. Subsequent seeks benefit from cached ranges.
+6. Proxy streams cached bytes directly.
+7. Missing ranges are fetched via URLSession and streamed while simultaneously written into cache.
+8. Subsequent seeks benefit from cached ranges.
 
 All HTTP responses follow correct Range semantics, including:
 
@@ -217,6 +221,8 @@ Facade methods now available from `HLSCache`:
 - `startServer()` / `stopServer()`
 - `register(...)` / `updateRemoteURL(...)`
 - `proxyURL(for:)`
+- `proxyURL(for:kind:remoteURL:)`
+- `decodeProxyRequestURL(_:)`
 - `cacheInfo(alias:)` / `clearCache(alias:)`
 - `setPlugins(_:)`
 
