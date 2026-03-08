@@ -60,6 +60,44 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(!record.completedRanges.contains(try br(8, 10)))
 }
 
+@Test func coreCache_quotaEviction_evictsLeastRecentlyUpdatedResource() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-quota")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let cache = CoreCache(baseDirectory: directory, diskQuotaBytes: 10)
+    let first = try makeCoreCacheResourceID(suffix: "lru-first.ts")
+    let second = try makeCoreCacheResourceID(suffix: "lru-second.ts")
+
+    _ = try cache.write(Data(repeating: 1, count: 6), resource: first, at: 0, expectedLength: 6)
+    _ = try cache.finalizeWrite(resource: first, expectedLength: 6)
+
+    Thread.sleep(forTimeInterval: 0.02)
+
+    _ = try cache.write(Data(repeating: 2, count: 6), resource: second, at: 0, expectedLength: 6)
+    _ = try cache.finalizeWrite(resource: second, expectedLength: 6)
+
+    #expect(try cache.resourceRecord(for: first) == nil)
+    #expect(try cache.resourceRecord(for: second) != nil)
+    #expect(try cache.plan(resource: first, requested: try br(0, 6)) == [.network(try br(0, 6))])
+}
+
+@Test func coreCache_withoutQuota_doesNotEvictResources() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-no-quota")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let cache = CoreCache(baseDirectory: directory)
+    let first = try makeCoreCacheResourceID(suffix: "keep-first.ts")
+    let second = try makeCoreCacheResourceID(suffix: "keep-second.ts")
+
+    _ = try cache.write(Data(repeating: 1, count: 6), resource: first, at: 0, expectedLength: 6)
+    _ = try cache.finalizeWrite(resource: first, expectedLength: 6)
+    _ = try cache.write(Data(repeating: 2, count: 6), resource: second, at: 0, expectedLength: 6)
+    _ = try cache.finalizeWrite(resource: second, expectedLength: 6)
+
+    #expect(try cache.resourceRecord(for: first) != nil)
+    #expect(try cache.resourceRecord(for: second) != nil)
+}
+
 @Test func coreCache_finalizeWrite_persistsManifestCrashSafelyAcrossInstances() throws {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-finalize")
     defer { try? FileManager.default.removeItem(at: directory) }

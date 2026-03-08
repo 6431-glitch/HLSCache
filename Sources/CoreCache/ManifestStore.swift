@@ -1,5 +1,15 @@
 import Foundation
 
+public struct StoredManifestRecord: Sendable {
+    public let resourceID: ResourceID
+    public let record: ResourceRecord
+
+    public init(resourceID: ResourceID, record: ResourceRecord) {
+        self.resourceID = resourceID
+        self.record = record
+    }
+}
+
 public final class ManifestStore: @unchecked Sendable {
     private let fileManager: FileManager
     private let baseDirectory: URL
@@ -69,6 +79,87 @@ public final class ManifestStore: @unchecked Sendable {
                 try? fileManager.removeItem(at: temporaryURL)
                 throw error
             }
+        }
+    }
+
+    public func delete(resourceID: ResourceID) throws {
+        try queue.sync(flags: .barrier) {
+            let fileURL = manifestFileURL(for: resourceID)
+            let temporaryURL = fileURL.appendingPathExtension("tmp")
+
+            if fileManager.fileExists(atPath: fileURL.path) {
+                try fileManager.removeItem(at: fileURL)
+            }
+            if fileManager.fileExists(atPath: temporaryURL.path) {
+                try? fileManager.removeItem(at: temporaryURL)
+            }
+        }
+    }
+
+    public func allRecords() -> [StoredManifestRecord] {
+        queue.sync {
+            let cacheDirectory = baseDirectory.appendingPathComponent("cache", isDirectory: true)
+            guard fileManager.fileExists(atPath: cacheDirectory.path) else {
+                return []
+            }
+
+            guard let enumerator = fileManager.enumerator(
+                at: cacheDirectory,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                return []
+            }
+
+            var records: [StoredManifestRecord] = []
+            let cacheComponents = cacheDirectory.resolvingSymlinksInPath().pathComponents
+
+            for case let fileURL as URL in enumerator {
+                guard fileURL.pathExtension == "json" else {
+                    continue
+                }
+
+                guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]),
+                      values.isRegularFile == true else {
+                    continue
+                }
+
+                let fileComponents = fileURL.resolvingSymlinksInPath().pathComponents
+                guard fileComponents.count >= cacheComponents.count,
+                      Array(fileComponents.prefix(cacheComponents.count)) == cacheComponents else {
+                    continue
+                }
+
+                let components = Array(fileComponents.dropFirst(cacheComponents.count))
+                guard components.count == 4,
+                      components[1] == "resources",
+                      let kind = ResourceKind(rawValue: components[2]) else {
+                    continue
+                }
+
+                let fileName = components[3]
+                let resourceKey = URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent
+                let resourceID = ResourceID(
+                    cacheKey: CacheKey(rawValue: components[0]),
+                    kind: kind,
+                    resourceKey: resourceKey
+                )
+
+                guard let data = try? Data(contentsOf: fileURL) else {
+                    continue
+                }
+
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+
+                guard let record = try? decoder.decode(ResourceRecord.self, from: data) else {
+                    continue
+                }
+
+                records.append(StoredManifestRecord(resourceID: resourceID, record: record))
+            }
+
+            return records
         }
     }
 }

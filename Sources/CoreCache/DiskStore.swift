@@ -96,6 +96,16 @@ public final class DiskStore: @unchecked Sendable {
         }
     }
 
+    public func remove(resourceID: ResourceID) throws {
+        try queue.sync(flags: .barrier) {
+            let fileURL = dataFileURL(for: resourceID)
+            guard fileManager.fileExists(atPath: fileURL.path) else {
+                return
+            }
+            try fileManager.removeItem(at: fileURL)
+        }
+    }
+
     private func readFromFileDescriptor(_ fd: Int32, startOffset: Int64, byteCount: Int) throws -> Data {
         var data = Data()
         data.reserveCapacity(min(byteCount, readChunkSize * 4))

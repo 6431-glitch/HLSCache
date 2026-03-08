@@ -11,10 +11,12 @@ public final class CoreCache: @unchecked Sendable {
     private let queue = DispatchQueue(label: "CoreCache.CoreCache", attributes: .concurrent)
     private let diskStore: DiskStore
     private let manifestStore: ManifestStore
+    private let diskQuotaBytes: Int64?
 
-    public init(baseDirectory: URL) {
+    public init(baseDirectory: URL, diskQuotaBytes: Int64? = nil) {
         self.diskStore = DiskStore(baseDirectory: baseDirectory)
         self.manifestStore = ManifestStore(baseDirectory: baseDirectory)
+        self.diskQuotaBytes = diskQuotaBytes.map { max($0, 0) }
     }
 
     public func plan(resource: ResourceID, requested: ByteRange) throws -> [ReadPlanPart] {
@@ -55,6 +57,7 @@ public final class CoreCache: @unchecked Sendable {
 
             record.touch()
             try manifestStore.save(resourceID: resource, record: record)
+            try enforceDiskQuotaIfNeeded()
             return writtenRange
         }
     }
@@ -72,6 +75,7 @@ public final class CoreCache: @unchecked Sendable {
 
             record.touch()
             try manifestStore.save(resourceID: resource, record: record)
+            try enforceDiskQuotaIfNeeded()
             return record
         }
     }
@@ -90,6 +94,49 @@ public final class CoreCache: @unchecked Sendable {
 
         // Never emit invalid planning output; fallback is coherent and safe.
         return [.network(requested)]
+    }
+
+    private func enforceDiskQuotaIfNeeded() throws {
+        guard let diskQuotaBytes else {
+            return
+        }
+
+        var entries = manifestStore.allRecords()
+        guard !entries.isEmpty else {
+            return
+        }
+
+        var bytesByResource: [ResourceID: Int64] = [:]
+        var totalBytes: Int64 = 0
+        for entry in entries {
+            let length = try diskStore.fileLength(for: entry.resourceID)
+            bytesByResource[entry.resourceID] = length
+            totalBytes += length
+        }
+
+        guard totalBytes > diskQuotaBytes else {
+            return
+        }
+
+        entries.sort { lhs, rhs in
+            if lhs.record.lastUpdated != rhs.record.lastUpdated {
+                return lhs.record.lastUpdated < rhs.record.lastUpdated
+            }
+            if lhs.resourceID.cacheKey.rawValue != rhs.resourceID.cacheKey.rawValue {
+                return lhs.resourceID.cacheKey.rawValue < rhs.resourceID.cacheKey.rawValue
+            }
+            return lhs.resourceID.resourceKey < rhs.resourceID.resourceKey
+        }
+
+        for entry in entries where totalBytes > diskQuotaBytes {
+            let resource = entry.resourceID
+            let length = bytesByResource[resource] ?? 0
+
+            try diskStore.remove(resourceID: resource)
+            try manifestStore.delete(resourceID: resource)
+
+            totalBytes -= length
+        }
     }
 
     private func planParts(requested: ByteRange, missingRanges: [ByteRange]) -> [ReadPlanPart] {
