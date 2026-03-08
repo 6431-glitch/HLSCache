@@ -43,6 +43,7 @@ The architecture cleanly separates playback proxying, storage, and background do
 - Disk storage (random access)
 - DiskStore seek-based IO for byte-range reads and offset writes
 - Read planning (file vs network)
+- CoreCache write/finalize pipeline with crash-safe manifest updates
 - Alias → Asset → CacheKey mapping
 - Server-agnostic
 
