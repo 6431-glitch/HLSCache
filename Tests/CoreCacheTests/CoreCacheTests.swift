@@ -4,6 +4,7 @@ import Testing
 
 private enum CoreCacheTestError: Error {
     case invalidPlanPartCount(Int)
+    case invalidPlanCoverage
 }
 
 private func makeCoreCacheTempDirectory(prefix: String = "core-cache-tests") throws -> URL {
@@ -119,4 +120,83 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     let record = try #require(try cache.resourceRecord(for: resource))
     #expect(record.expectedLength == totalLength)
     _ = try cache.finalizeWrite(resource: resource)
+}
+
+@Test func coreCache_concurrencySmoke_planWriteFinalize_keepsPlansCoherentAndManifestDecodable() async throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-hardening")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let cache = CoreCache(baseDirectory: directory)
+    let resource = try makeCoreCacheResourceID(suffix: "hardening.ts")
+    let totalLength: Int64 = 24 * 1024
+
+    _ = try cache.write(Data(repeating: 0, count: 512), resource: resource, at: 0, expectedLength: totalLength)
+
+    try await withThrowingTaskGroup(of: Void.self) { group in
+        for worker in 0..<5 {
+            group.addTask {
+                for iteration in 0..<250 {
+                    let start = Int64((worker * 59 + iteration * 37) % (Int(totalLength) - 512))
+                    let requested = try br(start, start + 512)
+                    let plan = try cache.plan(resource: resource, requested: requested)
+                    try assertPlanCoherent(plan, requested: requested)
+                }
+            }
+        }
+
+        group.addTask {
+            for iteration in 0..<250 {
+                let offset = Int64((iteration * 83) % (Int(totalLength) - 128))
+                let payload = Data(repeating: UInt8((iteration % 190) + 10), count: 128)
+                _ = try cache.write(payload, resource: resource, at: offset, expectedLength: totalLength)
+            }
+        }
+
+        group.addTask {
+            for _ in 0..<80 {
+                _ = try cache.finalizeWrite(resource: resource, expectedLength: totalLength)
+            }
+        }
+
+        try await group.waitForAll()
+    }
+
+    let finalized = try cache.finalizeWrite(resource: resource, expectedLength: totalLength)
+    #expect(finalized.expectedLength == totalLength)
+
+    let reloaded = CoreCache(baseDirectory: directory)
+    let restored = try #require(try reloaded.resourceRecord(for: resource))
+    #expect(restored.expectedLength == totalLength)
+
+    let normalized = restored.completedRanges.normalized
+    for index in 1..<normalized.count {
+        #expect(normalized[index - 1].endExclusive < normalized[index].start)
+    }
+}
+
+private func assertPlanCoherent(_ parts: [ReadPlanPart], requested: ByteRange) throws {
+    var cursor = requested.start
+    for part in parts {
+        let range: ByteRange
+        switch part {
+        case let .file(value), let .network(value):
+            range = value
+        }
+
+        guard range.length > 0 else {
+            throw CoreCacheTestError.invalidPlanCoverage
+        }
+        guard range.start == cursor else {
+            throw CoreCacheTestError.invalidPlanCoverage
+        }
+        guard range.start >= requested.start, range.endExclusive <= requested.endExclusive else {
+            throw CoreCacheTestError.invalidPlanCoverage
+        }
+
+        cursor = range.endExclusive
+    }
+
+    guard cursor == requested.endExclusive else {
+        throw CoreCacheTestError.invalidPlanCoverage
+    }
 }
