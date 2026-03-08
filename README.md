@@ -41,6 +41,7 @@ The architecture cleanly separates playback proxying, storage, and background do
 - Range index (interval set)
 - Manifest persistence
 - Disk storage (random access)
+- DiskStore seek-based IO for byte-range reads and offset writes
 - Read planning (file vs network)
 - Alias → Asset → CacheKey mapping
 - Server-agnostic
