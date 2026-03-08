@@ -84,6 +84,49 @@ public final class HLSCacheFacade: @unchecked Sendable {
         return base.appendingPathComponent(encodedAlias)
     }
 
+    public func proxyURL(for alias: Alias, kind: ProxyResourceKind, remoteURL: URL) throws -> URL {
+        let base = queue.sync { serverBaseURL }
+        guard let base else {
+            throw HLSCacheError.serverNotRunning
+        }
+
+        guard aliasRegistry.resolve(alias: alias) != nil else {
+            throw HLSCacheError.aliasNotFound(alias)
+        }
+
+        let route = ProxyRoute(alias: alias, kind: kind, remoteURL: remoteURL)
+        guard var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else {
+            throw ProxyRouteError.invalidEncodedURL(base.absoluteString)
+        }
+
+        let basePath = components.percentEncodedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let routePath = try [
+            route.encodedAlias(),
+            kind.rawValue,
+            route.encodedRemoteURL()
+        ].joined(separator: "/")
+
+        if basePath.isEmpty {
+            components.percentEncodedPath = "/" + routePath
+        } else {
+            components.percentEncodedPath = "/" + basePath + "/" + routePath
+        }
+
+        guard let url = components.url else {
+            throw ProxyRouteError.invalidEncodedURL(remoteURL.absoluteString)
+        }
+
+        return url
+    }
+
+    public func decodeProxyRequestURL(_ requestURL: URL) throws -> ProxyRoute {
+        let route = try ProxyRoute.from(url: requestURL)
+        guard aliasRegistry.resolve(alias: route.alias) != nil else {
+            throw HLSCacheError.aliasNotFound(route.alias)
+        }
+        return route
+    }
+
     public func cacheInfo(alias: Alias) throws -> CacheInfo {
         guard let record = aliasRegistry.resolve(alias: alias) else {
             throw HLSCacheError.aliasNotFound(alias)
@@ -187,6 +230,14 @@ public func updateRemoteURL(alias: Alias, remoteURL: URL) throws -> AssetRecord 
 
 public func proxyURL(for alias: Alias) throws -> URL {
     try sharedFacade.proxyURL(for: alias)
+}
+
+public func proxyURL(for alias: Alias, kind: ProxyResourceKind, remoteURL: URL) throws -> URL {
+    try sharedFacade.proxyURL(for: alias, kind: kind, remoteURL: remoteURL)
+}
+
+public func decodeProxyRequestURL(_ requestURL: URL) throws -> ProxyRoute {
+    try sharedFacade.decodeProxyRequestURL(requestURL)
 }
 
 public func cacheInfo(alias: Alias) throws -> CacheInfo {

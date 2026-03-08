@@ -53,6 +53,45 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(updated.currentRemoteURL.absoluteString == "https://cdn2.example.com/master.m3u8")
 }
 
+@Test func facade_proxyRouting_buildAndDecode_roundTripsEncodedRemoteURL() throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-proxy-routing")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    _ = try facade.register(
+        alias: "MD0534",
+        assetID: "asset-0534",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/master.m3u8"))
+    )
+    _ = facade.startServer(port: 18181)
+
+    let remoteURL = try #require(URL(string: "https://cdn.example.com/video/seg.ts?token=a/b==&part=1"))
+    let proxyURL = try facade.proxyURL(for: "MD0534", kind: .segment, remoteURL: remoteURL)
+    #expect(proxyURL.absoluteString.contains("/MD0534/seg/"))
+
+    let decoded = try facade.decodeProxyRequestURL(proxyURL)
+    #expect(decoded.alias == "MD0534")
+    #expect(decoded.kind == .segment)
+    #expect(decoded.remoteURL.absoluteString == remoteURL.absoluteString)
+}
+
+@Test func facade_decodeProxyRequestURL_unknownAlias_throwsAliasNotFound() throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-proxy-routing-missing")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    _ = facade.startServer(port: 18282)
+
+    let requestURL = try #require(URL(string: "http://127.0.0.1:18282/MISSING/seg/https%3A%2F%2Fcdn.example.com%2Fv.ts"))
+
+    do {
+        _ = try facade.decodeProxyRequestURL(requestURL)
+        #expect(Bool(false))
+    } catch let error as HLSCacheError {
+        #expect(error == .aliasNotFound("MISSING"))
+    }
+}
+
 @Test func facade_cacheInfoAndClearCache_reflectsUnderlyingDiskUsage() throws {
     let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-info")
     defer { try? FileManager.default.removeItem(at: directory) }
