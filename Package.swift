@@ -14,6 +14,10 @@ let package = Package(
         .library(
             name: "CoreCache",
             targets: ["CoreCache"]
+        ),
+        .executable(
+            name: "HLSCacheCLI",
+            targets: ["HLSCacheCLI"]
         )
     ],
     targets: [
@@ -26,6 +30,10 @@ let package = Package(
         .target(
             name: "CoreCache"
         ),
+        .executableTarget(
+            name: "HLSCacheCLI",
+            dependencies: ["HLSCache"]
+        ),
         .testTarget(
             name: "HLSCacheTests",
             dependencies: ["HLSCache"]
@@ -33,6 +41,10 @@ let package = Package(
         .testTarget(
             name: "CoreCacheTests",
             dependencies: ["CoreCache"]
+        ),
+        .testTarget(
+            name: "HLSCacheCLITests",
+            dependencies: ["HLSCacheCLI"]
         )
     ]
 )
