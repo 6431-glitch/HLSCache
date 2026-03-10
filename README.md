@@ -234,6 +234,20 @@ Baseline plugin available:
 Playlist rewrite helper available:
 - `HLSPlaylistRewriter.rewrite(_:alias:playlistURL:proxyURLBuilder:)`
 
+## CLI Scaffold
+
+A baseline executable target is available for interactive command-line workflows:
+
+```bash
+swift run HLSCacheCLI
+```
+
+Optional runtime flags:
+- `--base-directory <path>`
+- `--host <host>`
+- `--port <port>`
+- `--help`
+
 ---
 
 ##Design Principles
