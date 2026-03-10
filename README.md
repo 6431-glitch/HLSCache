@@ -227,9 +227,12 @@ Facade methods now available from `HLSCache`:
 - `decodeProxyRequestURL(_:)`
 - `cacheInfo(alias:)` / `clearCache(alias:)`
 - `setPlugins(_:)`
+- `makeTransformPipeline()`
 
 Baseline plugin available:
 - `NoopPlugin(version: "1.0.0")`
+- `ByteTransformer` / `ByteStreamTransformer` protocol pair for streaming chunk transforms
+- `TransformPipeline` and `TransformPipelineProcessor` for ordered plugin execution without full buffering
 
 Playlist rewrite helper available:
 - `HLSPlaylistRewriter.rewrite(_:alias:playlistURL:proxyURLBuilder:)`
