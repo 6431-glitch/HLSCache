@@ -8,6 +8,24 @@ private struct TestPlugin: HLSCachePlugin {
     let version: String
 }
 
+private final class RecordingStructuredLogger: StructuredLogger, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedEvents: [StructuredLogEvent] = []
+
+    func log(_ event: StructuredLogEvent) {
+        lock.lock()
+        storedEvents.append(event)
+        lock.unlock()
+    }
+
+    func events() -> [StructuredLogEvent] {
+        lock.lock()
+        let snapshot = storedEvents
+        lock.unlock()
+        return snapshot
+    }
+}
+
 private func makeHLSCacheTempDirectory(prefix: String = "hlscache-tests") throws -> URL {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(prefix)
@@ -90,6 +108,29 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     } catch let error as HLSCacheError {
         #expect(error == .aliasNotFound("MISSING"))
     }
+}
+
+@Test func facade_structuredLogging_emitsLifecycleEvents() throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-logging")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let logger = RecordingStructuredLogger()
+    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger)
+
+    _ = facade.startServer(port: 18383)
+    _ = try facade.register(
+        alias: "MDLOG",
+        assetID: "asset-log",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/log.m3u8"))
+    )
+    _ = try facade.proxyURL(for: "MDLOG")
+    _ = try facade.cacheInfo(alias: "MDLOG")
+
+    let operations = Set(logger.events().map(\.operation))
+    #expect(operations.contains("startServer"))
+    #expect(operations.contains("register"))
+    #expect(operations.contains("proxyURL"))
+    #expect(operations.contains("cacheInfo"))
 }
 
 @Test func facade_cacheInfoAndClearCache_reflectsUnderlyingDiskUsage() throws {

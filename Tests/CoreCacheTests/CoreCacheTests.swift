@@ -7,6 +7,24 @@ private enum CoreCacheTestError: Error {
     case invalidPlanCoverage
 }
 
+private final class RecordingStructuredLogger: StructuredLogger, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedEvents: [StructuredLogEvent] = []
+
+    func log(_ event: StructuredLogEvent) {
+        lock.lock()
+        storedEvents.append(event)
+        lock.unlock()
+    }
+
+    func events() -> [StructuredLogEvent] {
+        lock.lock()
+        let snapshot = storedEvents
+        lock.unlock()
+        return snapshot
+    }
+}
+
 private func makeCoreCacheTempDirectory(prefix: String = "core-cache-tests") throws -> URL {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(prefix)
@@ -64,7 +82,8 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-quota")
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let cache = CoreCache(baseDirectory: directory, diskQuotaBytes: 10)
+    let logger = RecordingStructuredLogger()
+    let cache = CoreCache(baseDirectory: directory, diskQuotaBytes: 10, logger: logger)
     let first = try makeCoreCacheResourceID(suffix: "lru-first.ts")
     let second = try makeCoreCacheResourceID(suffix: "lru-second.ts")
 
@@ -79,6 +98,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(try cache.resourceRecord(for: first) == nil)
     #expect(try cache.resourceRecord(for: second) != nil)
     #expect(try cache.plan(resource: first, requested: try br(0, 6)) == [.network(try br(0, 6))])
+    #expect(logger.events().contains { $0.operation == "evict" })
 }
 
 @Test func coreCache_withoutQuota_doesNotEvictResources() throws {
@@ -96,6 +116,24 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
 
     #expect(try cache.resourceRecord(for: first) != nil)
     #expect(try cache.resourceRecord(for: second) != nil)
+}
+
+@Test func coreCache_structuredLogging_emitsWritePlanAndFinalizeEvents() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-logging")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let logger = RecordingStructuredLogger()
+    let cache = CoreCache(baseDirectory: directory, logger: logger)
+    let resource = try makeCoreCacheResourceID(suffix: "logging.ts")
+
+    _ = try cache.write(Data(repeating: 7, count: 4), resource: resource, at: 0, expectedLength: 4)
+    _ = try cache.finalizeWrite(resource: resource, expectedLength: 4)
+    _ = try cache.plan(resource: resource, requested: try br(0, 4))
+
+    let operations = Set(logger.events().map(\.operation))
+    #expect(operations.contains("write"))
+    #expect(operations.contains("finalizeWrite"))
+    #expect(operations.contains("plan"))
 }
 
 @Test func coreCache_finalizeWrite_persistsManifestCrashSafelyAcrossInstances() throws {
