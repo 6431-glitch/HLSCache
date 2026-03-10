@@ -233,6 +233,7 @@ Baseline plugin available:
 
 Playlist rewrite helper available:
 - `HLSPlaylistRewriter.rewrite(_:alias:playlistURL:proxyURLBuilder:)`
+- `ProxyRangeResponse.make(rangeHeader:totalLength:)` for AVPlayer-compatible 200/206 range response metadata
 
 ## CLI Scaffold
 
