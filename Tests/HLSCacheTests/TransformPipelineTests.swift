@@ -136,3 +136,42 @@ private func makeTransformContext(kind: ResourceKind = .segment) -> TransformCon
     #expect(processor.pluginStamps == [PluginStamp(id: "noop", version: "1.0.0")])
     #expect(facade.activePlugins().count == 2)
 }
+
+@Test func encryptAtRestPlugin_roundTrip_encryptsOnWriteAndDecryptsOnRead() throws {
+    let key = Data("local-test-key".utf8)
+    let plugin = EncryptAtRestPlugin(key: key)
+    let pipeline = TransformPipeline(transformers: [plugin])
+    let context = makeTransformContext(kind: .segment)
+
+    let plaintext = Data("hello-transform-pipeline".utf8)
+    let writeProcessor = pipeline.makeProcessor(context: context, direction: .writeToCache)
+    let encrypted = try writeProcessor.process(plaintext, isFinal: true)
+
+    #expect(encrypted != plaintext)
+
+    let readProcessor = pipeline.makeProcessor(context: context, direction: .readFromCache)
+    let decrypted = try readProcessor.process(encrypted, isFinal: true)
+    #expect(decrypted == plaintext)
+}
+
+@Test func encryptAtRestPlugin_usesByteOffsetForDeterministicRangeDecryption() throws {
+    let key = Data("offset-aware-key".utf8)
+    let plugin = EncryptAtRestPlugin(key: key)
+    let pipeline = TransformPipeline(transformers: [plugin])
+
+    let fullContext = makeTransformContext(kind: .other)
+    let fullPlaintext = Data("0123456789abcdefghijklmnop".utf8)
+
+    let fullWrite = pipeline.makeProcessor(context: fullContext, direction: .writeToCache)
+    let encryptedFull = try fullWrite.process(fullPlaintext, isFinal: true)
+
+    let sliceStart: Int64 = 8
+    let sliceEnd: Int64 = 20
+    let encryptedSlice = Data(encryptedFull[Int(sliceStart)..<Int(sliceEnd)])
+    let sliceContext = TransformContext(resourceID: fullContext.resourceID, byteOffset: sliceStart)
+
+    let sliceRead = pipeline.makeProcessor(context: sliceContext, direction: .readFromCache)
+    let decryptedSlice = try sliceRead.process(encryptedSlice, isFinal: true)
+
+    #expect(decryptedSlice == Data(fullPlaintext[Int(sliceStart)..<Int(sliceEnd)]))
+}

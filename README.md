@@ -231,6 +231,7 @@ Facade methods now available from `HLSCache`:
 
 Baseline plugin available:
 - `NoopPlugin(version: "1.0.0")`
+- `EncryptAtRestPlugin(key:)` for reversible at-rest encryption/decryption in streaming mode
 - `ByteTransformer` / `ByteStreamTransformer` protocol pair for streaming chunk transforms
 - `TransformPipeline` and `TransformPipelineProcessor` for ordered plugin execution without full buffering
 

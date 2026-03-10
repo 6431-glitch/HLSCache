@@ -5,9 +5,18 @@ public protocol ByteStreamTransformer: Sendable {
     func transform(_ chunk: Data, isFinal: Bool) throws -> Data
 }
 
+public enum TransformDirection: Sendable, Equatable {
+    case writeToCache
+    case readFromCache
+}
+
 public protocol ByteTransformer: HLSCachePlugin {
     func supports(kind: ResourceKind) -> Bool
     func makeStreamTransformer(context: TransformContext) -> any ByteStreamTransformer
+}
+
+public protocol ReversibleByteTransformer: ByteTransformer {
+    func makeStreamTransformer(context: TransformContext, direction: TransformDirection) -> any ByteStreamTransformer
 }
 
 extension ByteTransformer {
@@ -18,9 +27,11 @@ extension ByteTransformer {
 
 public struct TransformContext: Sendable, Equatable {
     public let resourceID: ResourceID
+    public let byteOffset: Int64
 
-    public init(resourceID: ResourceID) {
+    public init(resourceID: ResourceID, byteOffset: Int64 = 0) {
         self.resourceID = resourceID
+        self.byteOffset = byteOffset
     }
 }
 
@@ -35,9 +46,17 @@ public final class TransformPipeline: @unchecked Sendable {
         self.init(transformers: [])
     }
 
-    public func makeProcessor(context: TransformContext) -> TransformPipelineProcessor {
+    public func makeProcessor(
+        context: TransformContext,
+        direction: TransformDirection = .writeToCache
+    ) -> TransformPipelineProcessor {
         let applicable = transformers.filter { $0.supports(kind: context.resourceID.kind) }
-        let streamTransformers = applicable.map { $0.makeStreamTransformer(context: context) }
+        let streamTransformers = applicable.map { plugin -> any ByteStreamTransformer in
+            if let reversible = plugin as? any ReversibleByteTransformer {
+                return reversible.makeStreamTransformer(context: context, direction: direction)
+            }
+            return plugin.makeStreamTransformer(context: context)
+        }
         let stamps = applicable.map { PluginStamp(id: $0.id, version: $0.version) }
         return TransformPipelineProcessor(streamTransformers: streamTransformers, pluginStamps: stamps)
     }

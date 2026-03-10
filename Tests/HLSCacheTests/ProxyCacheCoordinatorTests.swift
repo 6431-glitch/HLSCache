@@ -86,3 +86,55 @@ private func makeCoordinatorResourceID() throws -> ResourceID {
         #expect(error == .invalidNetworkChunkLength(expected: 100, actual: 50))
     }
 }
+
+@Test func proxyCacheCoordinator_encryptAtRest_storesEncryptedAndServesDecrypted() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-encrypt")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 512
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 253) })
+    let resourceID = try makeCoordinatorResourceID()
+
+    let cache = CoreCache(baseDirectory: directory)
+    let pipeline = TransformPipeline(transformers: [EncryptAtRestPlugin(key: Data("encrypt-key".utf8))])
+    let coordinator = ProxyCacheCoordinator(coreCache: cache, transformPipeline: pipeline)
+
+    var firstPayload = Data()
+    var firstFetches = 0
+    _ = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-255",
+        totalLength: totalLength,
+        fetchNetworkRange: { range in
+            firstFetches += 1
+            return Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        },
+        emit: { firstPayload.append($0) }
+    )
+
+    #expect(firstFetches == 1)
+    #expect(firstPayload == Data(originData[0..<256]))
+
+    let diskStore = DiskStore(baseDirectory: directory)
+    let storedData = try diskStore.read(resourceID: resourceID, range: try #require(ByteRange(start: 0, endExclusive: 256)))
+    #expect(storedData != Data(originData[0..<256]))
+
+    var secondPayload = Data()
+    var secondFetches = 0
+    _ = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-255",
+        totalLength: totalLength,
+        fetchNetworkRange: { _ in
+            secondFetches += 1
+            return Data()
+        },
+        emit: { secondPayload.append($0) }
+    )
+
+    #expect(secondFetches == 0)
+    #expect(secondPayload == Data(originData[0..<256]))
+}
