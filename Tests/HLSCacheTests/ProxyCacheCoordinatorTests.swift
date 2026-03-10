@@ -1,0 +1,88 @@
+import CoreCache
+import Foundation
+import Testing
+@testable import HLSCache
+
+private func makeCoordinatorResourceID() throws -> ResourceID {
+    let cacheKey = CacheKey.fromAssetID("asset-proxy-coordinator")
+    let remoteURL = try #require(URL(string: "https://cdn.example.com/video/proxy.mp4"))
+    return ResourceID(cacheKey: cacheKey, kind: .other, resourceKey: ResourceID.makeResourceKey(from: remoteURL))
+}
+
+@Test func proxyCacheCoordinator_corruptedCachedRange_fetchesMissingTailFromNetwork() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 1024
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 241) })
+    let resourceID = try makeCoordinatorResourceID()
+
+    let cache = CoreCache(baseDirectory: directory)
+    let coordinator = ProxyCacheCoordinator(coreCache: cache)
+
+    _ = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-511",
+        totalLength: totalLength,
+        fetchNetworkRange: { range in
+            Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        },
+        emit: { _ in }
+    )
+
+    let diskStore = DiskStore(baseDirectory: directory)
+    let fileURL = diskStore.dataFileURL(for: resourceID)
+    let fileHandle = try FileHandle(forWritingTo: fileURL)
+    try fileHandle.truncate(atOffset: 300)
+    try fileHandle.close()
+
+    var networkFetches = 0
+    var payload = Data()
+    let result = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=256-511",
+        totalLength: totalLength,
+        fetchNetworkRange: { range in
+            networkFetches += 1
+            return Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        },
+        emit: { payload.append($0) }
+    )
+
+    let cachedPrefix = try #require(ByteRange(start: 256, endExclusive: 300))
+    let missingTail = try #require(ByteRange(start: 300, endExclusive: 512))
+    #expect(result.chunks == [
+        ProxyStreamChunk(source: .cache, range: cachedPrefix, byteCount: 44),
+        ProxyStreamChunk(source: .network, range: missingTail, byteCount: 212)
+    ])
+    #expect(networkFetches == 1)
+    #expect(payload == Data(originData[256..<512]))
+}
+
+@Test func proxyCacheCoordinator_networkChunkLengthMismatch_throws() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-mismatch")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let cache = CoreCache(baseDirectory: directory)
+    let coordinator = ProxyCacheCoordinator(coreCache: cache)
+    let resourceID = try makeCoordinatorResourceID()
+
+    do {
+        _ = try coordinator.serve(
+            resourceID: resourceID,
+            rangeHeader: "bytes=0-99",
+            totalLength: 1000,
+            fetchNetworkRange: { _ in Data(repeating: 7, count: 50) },
+            emit: { _ in }
+        )
+        #expect(Bool(false))
+    } catch let error as ProxyCacheCoordinatorError {
+        #expect(error == .invalidNetworkChunkLength(expected: 100, actual: 50))
+    }
+}

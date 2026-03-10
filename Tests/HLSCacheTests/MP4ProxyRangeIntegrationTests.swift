@@ -34,37 +34,76 @@ private func makeMP4ResourceID(cacheKey: CacheKey, remoteURL: URL) -> ResourceID
     #expect(decodedProxyRoute.remoteURL == remoteURL)
 
     let totalLength: Int64 = 2048
-    let firstResponse = try ProxyRangeResponse.make(rangeHeader: "bytes=0-511", totalLength: totalLength)
-    let firstRequest = firstResponse.requestedRange
-    #expect(firstRequest.toHTTPHeaderValue(totalLength: totalLength) == "bytes=0-511")
-    #expect(firstResponse.statusCode == 206)
-    #expect(firstResponse.headers["Accept-Ranges"] == "bytes")
-    #expect(firstResponse.headers["Content-Range"] == "bytes 0-511/2048")
-    #expect(firstResponse.headers["Content-Length"] == "512")
-
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 251) })
     let cache = CoreCache(baseDirectory: directory)
+    let coordinator = ProxyCacheCoordinator(coreCache: cache)
     let resourceID = makeMP4ResourceID(cacheKey: record.cacheKey, remoteURL: remoteURL)
 
-    let firstPlan = try cache.plan(resource: resourceID, requested: firstRequest)
-    #expect(firstPlan == [.network(firstRequest)])
+    var fetchedRanges: [ByteRange] = []
+    var fetchCount = 0
 
-    _ = try cache.write(Data(repeating: 7, count: Int(firstRequest.length)), resource: resourceID, at: firstRequest.start)
-    _ = try cache.finalizeWrite(resource: resourceID, expectedLength: totalLength)
+    func makeFetcher() -> (ByteRange) -> Data {
+        { range in
+            fetchCount += 1
+            fetchedRanges.append(range)
+            return Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        }
+    }
 
-    let secondResponse = try ProxyRangeResponse.make(rangeHeader: "bytes=256-767", totalLength: totalLength)
-    let secondRequest = secondResponse.requestedRange
-    #expect(secondRequest.toHTTPHeaderValue(totalLength: totalLength) == "bytes=256-767")
-    #expect(secondResponse.statusCode == 206)
-    #expect(secondResponse.headers["Content-Range"] == "bytes 256-767/2048")
+    var firstPayload = Data()
+    let firstResult = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-511",
+        totalLength: totalLength,
+        contentType: "video/mp4",
+        fetchNetworkRange: makeFetcher(),
+        emit: { firstPayload.append($0) }
+    )
+    #expect(firstResult.response.statusCode == 206)
+    #expect(firstResult.response.headers["Accept-Ranges"] == "bytes")
+    #expect(firstResult.response.headers["Content-Range"] == "bytes 0-511/2048")
+    #expect(firstResult.response.headers["Content-Length"] == "512")
+    #expect(firstResult.chunks.count == 1)
+    #expect(firstResult.chunks[0].source == .network)
+    #expect(fetchCount == 1)
+    #expect(firstPayload == Data(originData[0..<512]))
 
+    var secondPayload = Data()
     let cachedSubrange = try #require(ByteRange(start: 256, endExclusive: 512))
     let missingSubrange = try #require(ByteRange(start: 512, endExclusive: 768))
-    let secondPlan = try cache.plan(resource: resourceID, requested: secondRequest)
-    #expect(secondPlan == [.file(cachedSubrange), .network(missingSubrange)])
+    let fullSecondRange = try #require(ByteRange(start: 256, endExclusive: 768))
+    let secondResult = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=256-767",
+        totalLength: totalLength,
+        contentType: "video/mp4",
+        fetchNetworkRange: makeFetcher(),
+        emit: { secondPayload.append($0) }
+    )
+    #expect(secondResult.response.statusCode == 206)
+    #expect(secondResult.response.headers["Content-Range"] == "bytes 256-767/2048")
+    #expect(secondResult.chunks == [
+        ProxyStreamChunk(source: .cache, range: cachedSubrange, byteCount: 256),
+        ProxyStreamChunk(source: .network, range: missingSubrange, byteCount: 256)
+    ])
+    #expect(fetchCount == 2)
+    #expect(secondPayload == Data(originData[256..<768]))
 
-    _ = try cache.write(Data(repeating: 9, count: Int(missingSubrange.length)), resource: resourceID, at: missingSubrange.start)
-    _ = try cache.finalizeWrite(resource: resourceID, expectedLength: totalLength)
-
-    let thirdPlan = try cache.plan(resource: resourceID, requested: secondRequest)
-    #expect(thirdPlan == [.file(secondRequest)])
+    var thirdPayload = Data()
+    let thirdResult = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=256-767",
+        totalLength: totalLength,
+        contentType: "video/mp4",
+        fetchNetworkRange: makeFetcher(),
+        emit: { thirdPayload.append($0) }
+    )
+    #expect(thirdResult.chunks == [
+        ProxyStreamChunk(source: .cache, range: fullSecondRange, byteCount: 512)
+    ])
+    #expect(fetchCount == 2)
+    #expect(thirdPayload == Data(originData[256..<768]))
+    let firstNetworkRange = try #require(ByteRange(start: 0, endExclusive: 512))
+    #expect(fetchedRanges.contains(firstNetworkRange))
+    #expect(fetchedRanges.contains(missingSubrange))
 }
