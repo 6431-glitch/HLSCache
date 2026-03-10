@@ -2,8 +2,12 @@ import Foundation
 
 enum CLIArgumentParseError: Error, Equatable {
     case missingValue(String)
+    case missingRequiredArgument(String)
     case invalidPort(String)
+    case invalidURL(String)
+    case invalidHeader(String)
     case unknownOption(String)
+    case unknownCommand(String)
 }
 
 extension CLIArgumentParseError: LocalizedError {
@@ -11,12 +15,32 @@ extension CLIArgumentParseError: LocalizedError {
         switch self {
         case let .missingValue(option):
             return "Missing value for option '\(option)'."
+        case let .missingRequiredArgument(argument):
+            return "Missing required argument '\(argument)'."
         case let .invalidPort(value):
             return "Invalid port '\(value)'. Port must be an integer between 1 and 65535."
+        case let .invalidURL(value):
+            return "Invalid URL '\(value)'. Please provide an absolute URL like https://example.com/video.m3u8."
+        case let .invalidHeader(value):
+            return "Invalid header '\(value)'. Use the format 'Header-Name: Header-Value'."
         case let .unknownOption(option):
             return "Unknown option '\(option)'."
+        case let .unknownCommand(command):
+            return "Unknown command '\(command)'."
         }
     }
+}
+
+enum CLICommand: Equatable {
+    case interactive
+    case register(RegisterAssetCommand)
+}
+
+struct RegisterAssetCommand: Equatable {
+    let alias: String
+    let assetID: String
+    let remoteURL: URL
+    let headers: [String: String]?
 }
 
 struct CLIArguments: Equatable {
@@ -27,17 +51,20 @@ struct CLIArguments: Equatable {
     let host: String
     let port: Int
     let showHelp: Bool
+    let command: CLICommand
 
     init(
         baseDirectory: URL? = nil,
         host: String = CLIArguments.defaultHost,
         port: Int = CLIArguments.defaultPort,
-        showHelp: Bool = false
+        showHelp: Bool = false,
+        command: CLICommand = .interactive
     ) {
         self.baseDirectory = baseDirectory
         self.host = host
         self.port = port
         self.showHelp = showHelp
+        self.command = command
     }
 
     static func parse(_ args: [String]) throws -> CLIArguments {
@@ -45,6 +72,7 @@ struct CLIArguments: Equatable {
         var host = defaultHost
         var port = defaultPort
         var showHelp = false
+        var command: CLICommand = .interactive
 
         var index = 0
         while index < args.count {
@@ -79,8 +107,15 @@ struct CLIArguments: Equatable {
                 }
                 port = parsed
                 index += 1
+            case "add", "register":
+                let commandArgs = Array(args[(index + 1)...])
+                command = try parseRegisterCommand(commandArgs)
+                index = args.count
             default:
-                throw CLIArgumentParseError.unknownOption(option)
+                if option.hasPrefix("-") {
+                    throw CLIArgumentParseError.unknownOption(option)
+                }
+                throw CLIArgumentParseError.unknownCommand(option)
             }
         }
 
@@ -88,19 +123,121 @@ struct CLIArguments: Equatable {
             baseDirectory: baseDirectory,
             host: host,
             port: port,
-            showHelp: showHelp
+            showHelp: showHelp,
+            command: command
         )
     }
 
     static var usage: String {
         """
-        Usage: swift run HLSCacheCLI [options]
+        Usage:
+          swift run HLSCacheCLI [options]
+          swift run HLSCacheCLI [options] add --alias <alias> --asset-id <asset-id> --url <remote-url> [--header "Name: Value"]
+          swift run HLSCacheCLI [options] register --alias <alias> --asset-id <asset-id> --url <remote-url> [--header "Name: Value"]
 
         Options:
           --base-directory <path>   Base directory for cache and settings storage.
           --host <host>             Proxy host (default: \(defaultHost)).
           --port <port>             Proxy port (default: \(defaultPort)).
           --help, -h                Show this help message.
+
+        Commands:
+          add, register             Add or update an alias mapping.
+                                   Required: --alias, --asset-id, --url
+                                   Optional: repeat --header "Name: Value"
         """
+    }
+
+    private static func parseRegisterCommand(_ args: [String]) throws -> CLICommand {
+        var alias: String?
+        var assetID: String?
+        var remoteURLString: String?
+        var headers: [String: String] = [:]
+
+        var index = 0
+        while index < args.count {
+            let option = args[index]
+            switch option {
+            case "--alias":
+                index += 1
+                guard index < args.count else {
+                    throw CLIArgumentParseError.missingValue(option)
+                }
+                alias = args[index]
+                index += 1
+            case "--asset-id":
+                index += 1
+                guard index < args.count else {
+                    throw CLIArgumentParseError.missingValue(option)
+                }
+                assetID = args[index]
+                index += 1
+            case "--url", "--remote-url":
+                index += 1
+                guard index < args.count else {
+                    throw CLIArgumentParseError.missingValue(option)
+                }
+                remoteURLString = args[index]
+                index += 1
+            case "--header":
+                index += 1
+                guard index < args.count else {
+                    throw CLIArgumentParseError.missingValue(option)
+                }
+                let (key, value) = try parseHeader(args[index])
+                headers[key] = value
+                index += 1
+            default:
+                if option.hasPrefix("-") {
+                    throw CLIArgumentParseError.unknownOption(option)
+                }
+                throw CLIArgumentParseError.unknownCommand(option)
+            }
+        }
+
+        guard let alias, !alias.isEmpty else {
+            throw CLIArgumentParseError.missingRequiredArgument("--alias")
+        }
+        guard let assetID, !assetID.isEmpty else {
+            throw CLIArgumentParseError.missingRequiredArgument("--asset-id")
+        }
+        guard let remoteURLString, !remoteURLString.isEmpty else {
+            throw CLIArgumentParseError.missingRequiredArgument("--url")
+        }
+
+        let remoteURL = try parseRemoteURL(remoteURLString)
+        return .register(
+            RegisterAssetCommand(
+                alias: alias,
+                assetID: assetID,
+                remoteURL: remoteURL,
+                headers: headers.isEmpty ? nil : headers
+            )
+        )
+    }
+
+    static func parseRemoteURL(_ raw: String) throws -> URL {
+        guard let url = URL(string: raw),
+              let scheme = url.scheme,
+              !scheme.isEmpty,
+              let host = url.host,
+              !host.isEmpty else {
+            throw CLIArgumentParseError.invalidURL(raw)
+        }
+        return url
+    }
+
+    static func parseHeader(_ raw: String) throws -> (String, String) {
+        let parts = raw.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2 else {
+            throw CLIArgumentParseError.invalidHeader(raw)
+        }
+
+        let key = String(parts[0]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, !value.isEmpty else {
+            throw CLIArgumentParseError.invalidHeader(raw)
+        }
+        return (key, value)
     }
 }

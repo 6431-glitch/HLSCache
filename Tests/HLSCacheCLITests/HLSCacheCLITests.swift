@@ -37,6 +37,7 @@ private func makeCLITempDirectory() throws -> URL {
     #expect(parsed.host == CLIArguments.defaultHost)
     #expect(parsed.port == CLIArguments.defaultPort)
     #expect(parsed.showHelp == false)
+    #expect(parsed.command == .interactive)
 }
 
 @Test func cliArguments_parsesBaseDirectoryHostPortAndHelp() throws {
@@ -52,6 +53,58 @@ private func makeCLITempDirectory() throws -> URL {
     #expect(parsed.host == "0.0.0.0")
     #expect(parsed.port == 9090)
     #expect(parsed.showHelp == true)
+}
+
+@Test func cliArguments_parseRegisterCommand_withHeaders() throws {
+    let parsed = try CLIArguments.parse([
+        "add",
+        "--alias", "MD0534",
+        "--asset-id", "asset-0534",
+        "--url", "https://cdn.example.com/master.m3u8",
+        "--header", "Authorization: Bearer abc",
+        "--header", "X-Region: us-east-1"
+    ])
+
+    let remoteURL = try #require(URL(string: "https://cdn.example.com/master.m3u8"))
+    let expected = CLICommand.register(
+        RegisterAssetCommand(
+            alias: "MD0534",
+            assetID: "asset-0534",
+            remoteURL: remoteURL,
+            headers: [
+                "Authorization": "Bearer abc",
+                "X-Region": "us-east-1"
+            ]
+        )
+    )
+    #expect(parsed.command == expected)
+}
+
+@Test func cliArguments_parseRegisterCommand_missingAlias_throws() throws {
+    do {
+        _ = try CLIArguments.parse([
+            "register",
+            "--asset-id", "asset-0534",
+            "--url", "https://cdn.example.com/master.m3u8"
+        ])
+        #expect(Bool(false))
+    } catch let error as CLIArgumentParseError {
+        #expect(error == .missingRequiredArgument("--alias"))
+    }
+}
+
+@Test func cliArguments_parseRegisterCommand_invalidURL_throws() throws {
+    do {
+        _ = try CLIArguments.parse([
+            "add",
+            "--alias", "MD0534",
+            "--asset-id", "asset-0534",
+            "--url", "not-a-url"
+        ])
+        #expect(Bool(false))
+    } catch let error as CLIArgumentParseError {
+        #expect(error == .invalidURL("not-a-url"))
+    }
 }
 
 @Test func cliArguments_unknownOption_throws() throws {
@@ -99,4 +152,57 @@ private func makeCLITempDirectory() throws -> URL {
     #expect(io.outputLines.contains { $0.contains("Settings file:") })
     #expect(io.outputLines.contains { $0.contains("Main Menu") })
     #expect(io.outputLines.contains { $0.contains("Goodbye.") })
+}
+
+@Test func cliRegisterCommand_registersAsset_andShowsSummary() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let command = RegisterAssetCommand(
+        alias: "MD9000",
+        assetID: "asset-9000",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/v/master.m3u8")),
+        headers: ["Authorization": "Bearer test"]
+    )
+
+    let exitCode = app.run(command: .register(command))
+    #expect(exitCode == 0)
+    #expect(io.outputLines.contains { $0.contains("Asset registered successfully.") })
+    #expect(io.outputLines.contains { $0.contains("Alias: MD9000") })
+    #expect(io.outputLines.contains { $0.contains("Cache Key:") })
+    #expect(io.outputLines.contains { $0.contains("Remote URL: https://cdn.example.com/v/master.m3u8") })
+}
+
+@Test func cliAssetManagement_registerFlow_handlesMissingAndInvalidInputs() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [
+        "1", // Asset management
+        "1", // Add/register asset
+        "", // Missing alias
+        "1", // Add/register asset again
+        "MD1001",
+        "asset-1001",
+        "invalid-url",
+        "1", // Add/register asset again with valid values
+        "MD1001",
+        "asset-1001",
+        "https://cdn.example.com/video.m3u8",
+        "Authorization: Bearer test",
+        "", // end headers
+        "0", // Back to main menu
+        "0" // Exit app
+    ])
+    let app = CLIApp(context: context, io: io)
+    app.runInteractive()
+
+    #expect(io.outputLines.contains { $0.contains("Alias is required.") })
+    #expect(io.outputLines.contains { $0.contains("Invalid URL 'invalid-url'") })
+    #expect(io.outputLines.contains { $0.contains("Asset registered successfully.") })
 }

@@ -15,7 +15,7 @@ do {
 
     let context = try CLIAppContext(arguments: arguments)
     let app = CLIApp(context: context)
-    app.runInteractive()
+    exit(app.run(command: arguments.command))
 } catch let error as CLIArgumentParseError {
     fputs("Argument error: \(error.localizedDescription)\n\n", stderr)
     fputs(CLIArguments.usage + "\n", stderr)
