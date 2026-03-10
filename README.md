@@ -231,6 +231,9 @@ Facade methods now available from `HLSCache`:
 Baseline plugin available:
 - `NoopPlugin(version: "1.0.0")`
 
+Playlist rewrite helper available:
+- `HLSPlaylistRewriter.rewrite(_:alias:playlistURL:proxyURLBuilder:)`
+
 ---
 
 ##Design Principles
