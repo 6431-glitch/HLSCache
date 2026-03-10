@@ -184,3 +184,17 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
         #expect(error == .serverNotRunning)
     }
 }
+
+@Test func noopPlugin_defaultsAndSetPlugins_recordsExpectedStamp() throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-noop")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    let plugin = NoopPlugin()
+
+    #expect(plugin.id == "noop")
+    #expect(plugin.version == "1.0.0")
+
+    let applied = facade.setPlugins([plugin])
+    #expect(applied == [PluginStamp(id: "noop", version: "1.0.0")])
+}

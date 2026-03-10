@@ -228,6 +228,9 @@ Facade methods now available from `HLSCache`:
 - `cacheInfo(alias:)` / `clearCache(alias:)`
 - `setPlugins(_:)`
 
+Baseline plugin available:
+- `NoopPlugin(version: "1.0.0")`
+
 ---
 
 ##Design Principles
