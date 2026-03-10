@@ -248,6 +248,16 @@ Optional runtime flags:
 - `--port <port>`
 - `--help`
 
+Add/register alias mapping from command line:
+
+```bash
+swift run HLSCacheCLI add \
+  --alias MD0534 \
+  --asset-id movie_534 \
+  --url "https://cdn.example.com/master.m3u8" \
+  --header "Authorization: Bearer <token>"
+```
+
 ---
 
 ##Design Principles
