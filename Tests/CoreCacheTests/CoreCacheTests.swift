@@ -78,6 +78,18 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(!record.completedRanges.contains(try br(8, 10)))
 }
 
+@Test func coreCache_read_returnsRequestedBytesFromDisk() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-read")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let cache = CoreCache(baseDirectory: directory)
+    let resource = try makeCoreCacheResourceID(suffix: "read.ts")
+
+    _ = try cache.write(Data("0123456789".utf8), resource: resource, at: 0)
+    let payload = try cache.read(resource: resource, range: try br(2, 7))
+    #expect(String(decoding: payload, as: UTF8.self) == "23456")
+}
+
 @Test func coreCache_quotaEviction_evictsLeastRecentlyUpdatedResource() throws {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-quota")
     defer { try? FileManager.default.removeItem(at: directory) }

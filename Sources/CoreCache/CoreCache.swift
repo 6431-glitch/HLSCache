@@ -103,6 +103,26 @@ public final class CoreCache: @unchecked Sendable {
         }
     }
 
+    public func read(resource: ResourceID, range: ByteRange) throws -> Data {
+        try queue.sync {
+            let data = try diskStore.read(resourceID: resource, range: range)
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "CoreCache",
+                    operation: "read",
+                    metadata: [
+                        "cacheKey": resource.cacheKey.rawValue,
+                        "kind": resource.kind.rawValue,
+                        "bytes": String(data.count),
+                        "start": String(range.start),
+                        "endExclusive": String(range.endExclusive)
+                    ]
+                )
+            )
+            return data
+        }
+    }
+
     @discardableResult
     public func finalizeWrite(resource: ResourceID, expectedLength: Int64? = nil) throws -> ResourceRecord {
         try queue.sync(flags: .barrier) {
