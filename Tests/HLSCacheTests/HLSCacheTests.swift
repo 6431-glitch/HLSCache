@@ -71,6 +71,53 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(updated.currentRemoteURL.absoluteString == "https://cdn2.example.com/master.m3u8")
 }
 
+@Test func facade_updateRemoteURL_preservesAliasProxyAndExistingCacheData() throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-remote-rotation")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    let initialRemoteURL = try #require(URL(string: "https://origin-a.example.com/master.m3u8"))
+    let record = try facade.register(
+        alias: "MDROT",
+        assetID: "asset-rotation",
+        remoteURL: initialRemoteURL
+    )
+
+    _ = facade.startServer(port: 18484)
+    let proxyBefore = try facade.proxyURL(for: "MDROT")
+
+    let coreCache = CoreCache(baseDirectory: directory)
+    let cachedSegmentID = ResourceID(
+        cacheKey: record.cacheKey,
+        kind: .segment,
+        resourceKey: ResourceID.makeResourceKey(from: "https://origin-a.example.com/seg-1.ts")
+    )
+    let payload = Data("cached-segment-payload".utf8)
+    _ = try coreCache.write(payload, resource: cachedSegmentID, at: 0)
+    _ = try coreCache.finalizeWrite(resource: cachedSegmentID, expectedLength: Int64(payload.count))
+
+    let infoBefore = try facade.cacheInfo(alias: "MDROT")
+    #expect(infoBefore.totalBytesOnDisk >= Int64(payload.count))
+    #expect(infoBefore.cacheKey == record.cacheKey)
+
+    let rotatedRemoteURL = try #require(URL(string: "https://origin-b.example.com/master.m3u8"))
+    let updated = try facade.updateRemoteURL(alias: "MDROT", remoteURL: rotatedRemoteURL)
+    #expect(updated.cacheKey == record.cacheKey)
+    #expect(updated.currentRemoteURL == rotatedRemoteURL)
+
+    let proxyAfter = try facade.proxyURL(for: "MDROT")
+    #expect(proxyAfter == proxyBefore)
+
+    let fullRange = try #require(ByteRange(start: 0, endExclusive: Int64(payload.count)))
+    let restoredPayload = try coreCache.read(resource: cachedSegmentID, range: fullRange)
+    #expect(restoredPayload == payload)
+
+    let infoAfter = try facade.cacheInfo(alias: "MDROT")
+    #expect(infoAfter.cacheKey == record.cacheKey)
+    #expect(infoAfter.currentRemoteURL == rotatedRemoteURL)
+    #expect(infoAfter.totalBytesOnDisk >= Int64(payload.count))
+}
+
 @Test func facade_proxyRouting_buildAndDecode_roundTripsEncodedRemoteURL() throws {
     let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-proxy-routing")
     defer { try? FileManager.default.removeItem(at: directory) }
