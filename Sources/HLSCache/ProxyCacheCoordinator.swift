@@ -37,9 +37,11 @@ public struct ProxyCacheServeResult: Equatable, Sendable {
 
 public final class ProxyCacheCoordinator: @unchecked Sendable {
     private let coreCache: CoreCache
+    private let transformPipeline: TransformPipeline
 
-    public init(coreCache: CoreCache) {
+    public init(coreCache: CoreCache, transformPipeline: TransformPipeline = TransformPipeline()) {
         self.coreCache = coreCache
+        self.transformPipeline = transformPipeline
     }
 
     @discardableResult
@@ -62,8 +64,13 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
             switch part {
             case let .network(range):
                 let networkData = try fetchAndValidate(range: range, fetchNetworkRange: fetchNetworkRange)
+                let writeProcessor = transformPipeline.makeProcessor(
+                    context: TransformContext(resourceID: resourceID, byteOffset: range.start),
+                    direction: .writeToCache
+                )
+                let cachePayload = try writeProcessor.process(networkData, isFinal: true)
                 _ = try coreCache.write(
-                    networkData,
+                    cachePayload,
                     resource: resourceID,
                     at: range.start,
                     contentType: contentType,
@@ -76,17 +83,23 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
 
             case let .file(range):
                 let cachedData = try coreCache.read(resource: resourceID, range: range)
+                let readProcessor = transformPipeline.makeProcessor(
+                    context: TransformContext(resourceID: resourceID, byteOffset: range.start),
+                    direction: .readFromCache
+                )
                 if cachedData.count >= Int(range.length) {
                     let expectedCount = Int(range.length)
                     let payload = Data(cachedData.prefix(expectedCount))
-                    try emit(payload)
+                    let decodedPayload = try readProcessor.process(payload, isFinal: true)
+                    try emit(decodedPayload)
                     chunks.append(ProxyStreamChunk(source: .cache, range: range, byteCount: expectedCount))
                     totalStreamed += Int64(expectedCount)
                     continue
                 }
 
                 if !cachedData.isEmpty {
-                    try emit(cachedData)
+                    let decodedPayload = try readProcessor.process(cachedData, isFinal: true)
+                    try emit(decodedPayload)
                     let availableRange = try requireRange(
                         start: range.start,
                         endExclusive: range.start + Int64(cachedData.count)
@@ -98,8 +111,13 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                 let missingStart = range.start + Int64(cachedData.count)
                 let missingRange = try requireRange(start: missingStart, endExclusive: range.endExclusive)
                 let networkData = try fetchAndValidate(range: missingRange, fetchNetworkRange: fetchNetworkRange)
+                let missingWriteProcessor = transformPipeline.makeProcessor(
+                    context: TransformContext(resourceID: resourceID, byteOffset: missingRange.start),
+                    direction: .writeToCache
+                )
+                let cachePayload = try missingWriteProcessor.process(networkData, isFinal: true)
                 _ = try coreCache.write(
-                    networkData,
+                    cachePayload,
                     resource: resourceID,
                     at: missingRange.start,
                     contentType: contentType,
