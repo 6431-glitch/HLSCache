@@ -28,7 +28,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
     private let queue = DispatchQueue(label: "HLSCache.Facade", attributes: .concurrent)
 
     private var serverBaseURL: URL?
-    private var pluginStamps: [PluginStamp] = []
+    private var plugins: [any HLSCachePlugin] = []
 
     public init(baseDirectory: URL, logger: any StructuredLogger = NoopStructuredLogger()) {
         self.fileManager = .default
@@ -184,7 +184,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
             throw HLSCacheError.aliasNotFound(alias)
         }
 
-        let pluginCount = queue.sync { pluginStamps.count }
+        let pluginCount = queue.sync { plugins.count }
         let bytes = directorySize(at: cacheDirectory(for: record.cacheKey))
         logger.log(
             StructuredLogEvent(
@@ -235,7 +235,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
     @discardableResult
     public func setPlugins(_ plugins: [any HLSCachePlugin]) -> [PluginStamp] {
         queue.sync(flags: .barrier) {
-            pluginStamps = plugins.map { PluginStamp(id: $0.id, version: $0.version) }
+            self.plugins = plugins
+            let pluginStamps = plugins.map { PluginStamp(id: $0.id, version: $0.version) }
             logger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
@@ -248,7 +249,16 @@ public final class HLSCacheFacade: @unchecked Sendable {
     }
 
     public func activePlugins() -> [PluginStamp] {
-        queue.sync { pluginStamps }
+        queue.sync {
+            plugins.map { PluginStamp(id: $0.id, version: $0.version) }
+        }
+    }
+
+    public func makeTransformPipeline() -> TransformPipeline {
+        queue.sync {
+            let transformers = plugins.compactMap { $0 as? any ByteTransformer }
+            return TransformPipeline(transformers: transformers)
+        }
     }
 
     private func cacheDirectory(for cacheKey: CacheKey) -> URL {
@@ -331,6 +341,10 @@ public func clearCache(alias: Alias? = nil) throws {
 @discardableResult
 public func setPlugins(_ plugins: [any HLSCachePlugin]) -> [PluginStamp] {
     sharedFacade.setPlugins(plugins)
+}
+
+public func makeTransformPipeline() -> TransformPipeline {
+    sharedFacade.makeTransformPipeline()
 }
 
 private func defaultBaseDirectory() -> URL {
