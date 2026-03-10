@@ -11,10 +11,6 @@ private func makeMP4ResourceID(cacheKey: CacheKey, remoteURL: URL) -> ResourceID
     )
 }
 
-private func contentRangeHeader(for range: ByteRange, totalLength: Int64) -> String {
-    "bytes \(range.start)-\(range.endExclusive - 1)/\(totalLength)"
-}
-
 @Test func mp4ProxyRangeCaching_smokeTest_networkThenFilePlanWithValid206Semantics() throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("hlscache-mp4-range-smoke")
@@ -38,13 +34,13 @@ private func contentRangeHeader(for range: ByteRange, totalLength: Int64) -> Str
     #expect(decodedProxyRoute.remoteURL == remoteURL)
 
     let totalLength: Int64 = 2048
-    let firstRequest = try #require(ByteRange.parseHTTPRange("bytes=0-511", totalLength: totalLength))
+    let firstResponse = try ProxyRangeResponse.make(rangeHeader: "bytes=0-511", totalLength: totalLength)
+    let firstRequest = firstResponse.requestedRange
     #expect(firstRequest.toHTTPHeaderValue(totalLength: totalLength) == "bytes=0-511")
-
-    // Smoke-check 206 header semantics expected by a proxy response path.
-    #expect(contentRangeHeader(for: firstRequest, totalLength: totalLength) == "bytes 0-511/2048")
-    let acceptRangesHeader = "bytes"
-    #expect(acceptRangesHeader == "bytes")
+    #expect(firstResponse.statusCode == 206)
+    #expect(firstResponse.headers["Accept-Ranges"] == "bytes")
+    #expect(firstResponse.headers["Content-Range"] == "bytes 0-511/2048")
+    #expect(firstResponse.headers["Content-Length"] == "512")
 
     let cache = CoreCache(baseDirectory: directory)
     let resourceID = makeMP4ResourceID(cacheKey: record.cacheKey, remoteURL: remoteURL)
@@ -55,9 +51,11 @@ private func contentRangeHeader(for range: ByteRange, totalLength: Int64) -> Str
     _ = try cache.write(Data(repeating: 7, count: Int(firstRequest.length)), resource: resourceID, at: firstRequest.start)
     _ = try cache.finalizeWrite(resource: resourceID, expectedLength: totalLength)
 
-    let secondRequest = try #require(ByteRange.parseHTTPRange("bytes=256-767", totalLength: totalLength))
+    let secondResponse = try ProxyRangeResponse.make(rangeHeader: "bytes=256-767", totalLength: totalLength)
+    let secondRequest = secondResponse.requestedRange
     #expect(secondRequest.toHTTPHeaderValue(totalLength: totalLength) == "bytes=256-767")
-    #expect(contentRangeHeader(for: secondRequest, totalLength: totalLength) == "bytes 256-767/2048")
+    #expect(secondResponse.statusCode == 206)
+    #expect(secondResponse.headers["Content-Range"] == "bytes 256-767/2048")
 
     let cachedSubrange = try #require(ByteRange(start: 256, endExclusive: 512))
     let missingSubrange = try #require(ByteRange(start: 512, endExclusive: 768))
