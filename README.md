@@ -237,6 +237,7 @@ Baseline plugin available:
 
 Playlist rewrite helper available:
 - `HLSPlaylistRewriter.rewrite(_:alias:playlistURL:proxyURLBuilder:)`
+- `HLSPlaylistParser.parse(_:playlistURL:)` to extract media segment and `EXT-X-KEY` remote URLs
 - `ProxyRangeResponse.make(rangeHeader:totalLength:)` for AVPlayer-compatible 200/206 range response metadata
 - `ProxyCacheCoordinator.serve(...)` for mixed cache/network streaming over `CoreCache` read plans
 
