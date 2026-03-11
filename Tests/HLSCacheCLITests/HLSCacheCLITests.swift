@@ -7,6 +7,7 @@ import Testing
 private final class FakeIO: CLIIO {
     private var inputQueue: [String?]
     private(set) var outputLines: [String] = []
+    private(set) var errorLines: [String] = []
 
     init(inputs: [String?]) {
         self.inputQueue = inputs
@@ -14,6 +15,10 @@ private final class FakeIO: CLIIO {
 
     func writeLine(_ text: String) {
         outputLines.append(text)
+    }
+
+    func writeErrorLine(_ text: String) {
+        errorLines.append(text)
     }
 
     func readLine() -> String? {
@@ -25,6 +30,7 @@ private final class FakeIO: CLIIO {
 
     func resetOutput() {
         outputLines.removeAll()
+        errorLines.removeAll()
     }
 }
 
@@ -201,6 +207,20 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
 @Test func cliArguments_parseDownloadCommand_withAlias() throws {
     let parsed = try CLIArguments.parse(["download", "--alias", "MDDL01"])
     #expect(parsed.command == .download(DownloadCommand(alias: "MDDL01")))
+}
+
+@Test func cliArguments_parseListCommand() throws {
+    let parsed = try CLIArguments.parse(["list"])
+    #expect(parsed.command == .listAliases)
+}
+
+@Test func cliArguments_parseListCommand_withUnexpectedArgument_throws() throws {
+    do {
+        _ = try CLIArguments.parse(["list", "--alias", "MDLISTFAIL"])
+        #expect(Bool(false))
+    } catch let error as CLIArgumentParseError {
+        #expect(error == .unknownOption("--alias"))
+    }
 }
 
 @Test func cliArguments_parseSettingsGetCommand() throws {
@@ -635,6 +655,39 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     #expect(listHeaderCount >= 2)
     #expect(io.outputLines.contains { $0.contains("Press Enter to refresh, or q to return.") })
     #expect(io.outputLines.contains { $0.contains("Goodbye.") })
+}
+
+@Test func cliListCommand_nonInteractive_printsAliasInventoryFields() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedCacheBytes(baseDirectory: directory, alias: "MDLISTCLI", assetID: "asset-list-cli")
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let exitCode = app.run(command: .listAliases)
+
+    #expect(exitCode == 0)
+    #expect(io.outputLines.contains { $0.contains("MDLISTCLI | assetID=asset-list-cli | bytes=") })
+    #expect(io.outputLines.contains { $0.contains("updated=") })
+    #expect(io.outputLines.contains { $0.contains("remote=https://cdn.example.com/MDLISTCLI.m3u8") })
+    #expect(io.errorLines.isEmpty)
+}
+
+@Test func cliListCommand_nonInteractive_whenNoAliases_printsEmptyState() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let exitCode = app.run(command: .listAliases)
+
+    #expect(exitCode == 0)
+    #expect(io.outputLines == ["(no aliases registered)"])
+    #expect(io.errorLines.isEmpty)
 }
 
 @Test func cliExportCommand_runsThroughCLIApp_andPrintsOutputSummary() throws {
