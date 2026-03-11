@@ -271,6 +271,23 @@ swift run HLSCacheCLI add \
   --header "Authorization: Bearer <token>"
 ```
 
+Persisted CLI settings commands:
+
+```bash
+swift run HLSCacheCLI settings get
+swift run HLSCacheCLI settings set default-user-agent "HLSCacheCLI/1.0"
+```
+
+Settings storage:
+- Path: `<base-directory>/cli_settings.json`
+- Format:
+
+```json
+{
+  "defaultUserAgent": "HLSCacheCLI/1.0"
+}
+```
+
 ---
 
 ##Design Principles

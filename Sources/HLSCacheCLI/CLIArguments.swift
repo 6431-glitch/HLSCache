@@ -6,6 +6,7 @@ enum CLIArgumentParseError: Error, Equatable {
     case invalidPort(String)
     case invalidURL(String)
     case invalidHeader(String)
+    case invalidSettingValue(String)
     case unknownOption(String)
     case unknownCommand(String)
 }
@@ -23,6 +24,8 @@ extension CLIArgumentParseError: LocalizedError {
             return "Invalid URL '\(value)'. Please provide an absolute URL like https://example.com/video.m3u8."
         case let .invalidHeader(value):
             return "Invalid header '\(value)'. Use the format 'Header-Name: Header-Value'."
+        case let .invalidSettingValue(name):
+            return "Invalid value for setting '\(name)'."
         case let .unknownOption(option):
             return "Unknown option '\(option)'."
         case let .unknownCommand(command):
@@ -34,6 +37,8 @@ extension CLIArgumentParseError: LocalizedError {
 enum CLICommand: Equatable {
     case interactive
     case register(RegisterAssetCommand)
+    case settingsGet
+    case settingsSetDefaultUserAgent(String)
 }
 
 struct RegisterAssetCommand: Equatable {
@@ -111,6 +116,10 @@ struct CLIArguments: Equatable {
                 let commandArgs = Array(args[(index + 1)...])
                 command = try parseRegisterCommand(commandArgs)
                 index = args.count
+            case "settings":
+                let commandArgs = Array(args[(index + 1)...])
+                command = try parseSettingsCommand(commandArgs)
+                index = args.count
             default:
                 if option.hasPrefix("-") {
                     throw CLIArgumentParseError.unknownOption(option)
@@ -134,6 +143,8 @@ struct CLIArguments: Equatable {
           swift run HLSCacheCLI [options]
           swift run HLSCacheCLI [options] add --alias <alias> --asset-id <asset-id> --url <remote-url> [--header "Name: Value"]
           swift run HLSCacheCLI [options] register --alias <alias> --asset-id <asset-id> --url <remote-url> [--header "Name: Value"]
+          swift run HLSCacheCLI [options] settings get
+          swift run HLSCacheCLI [options] settings set default-user-agent "<value>"
 
         Options:
           --base-directory <path>   Base directory for cache and settings storage.
@@ -145,6 +156,9 @@ struct CLIArguments: Equatable {
           add, register             Add or update an alias mapping.
                                    Required: --alias, --asset-id, --url
                                    Optional: repeat --header "Name: Value"
+          settings get              Show persisted CLI settings.
+          settings set default-user-agent "<value>"
+                                   Persist global default User-Agent.
         """
     }
 
@@ -239,5 +253,37 @@ struct CLIArguments: Equatable {
             throw CLIArgumentParseError.invalidHeader(raw)
         }
         return (key, value)
+    }
+
+    private static func parseSettingsCommand(_ args: [String]) throws -> CLICommand {
+        guard let subcommand = args.first else {
+            throw CLIArgumentParseError.missingRequiredArgument("settings <get|set>")
+        }
+
+        switch subcommand {
+        case "get":
+            if args.count != 1 {
+                throw CLIArgumentParseError.unknownCommand(args[1])
+            }
+            return .settingsGet
+        case "set":
+            guard args.count >= 3 else {
+                throw CLIArgumentParseError.missingRequiredArgument("settings set default-user-agent <value>")
+            }
+
+            let key = args[1]
+            guard key == "default-user-agent" else {
+                throw CLIArgumentParseError.unknownCommand(key)
+            }
+
+            let rawValue = args.dropFirst(2).joined(separator: " ")
+            let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else {
+                throw CLIArgumentParseError.invalidSettingValue("default-user-agent")
+            }
+            return .settingsSetDefaultUserAgent(value)
+        default:
+            throw CLIArgumentParseError.unknownCommand(subcommand)
+        }
     }
 }

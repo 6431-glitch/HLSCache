@@ -107,6 +107,25 @@ private func makeCLITempDirectory() throws -> URL {
     }
 }
 
+@Test func cliArguments_parseSettingsGetCommand() throws {
+    let parsed = try CLIArguments.parse(["settings", "get"])
+    #expect(parsed.command == .settingsGet)
+}
+
+@Test func cliArguments_parseSettingsSetDefaultUserAgentCommand() throws {
+    let parsed = try CLIArguments.parse(["settings", "set", "default-user-agent", "Mozilla/5.0 (HLSCacheCLI)"])
+    #expect(parsed.command == .settingsSetDefaultUserAgent("Mozilla/5.0 (HLSCacheCLI)"))
+}
+
+@Test func cliArguments_parseSettingsSetDefaultUserAgent_missingValue_throws() throws {
+    do {
+        _ = try CLIArguments.parse(["settings", "set", "default-user-agent"])
+        #expect(Bool(false))
+    } catch let error as CLIArgumentParseError {
+        #expect(error == .missingRequiredArgument("settings set default-user-agent <value>"))
+    }
+}
+
 @Test func cliArguments_unknownOption_throws() throws {
     do {
         _ = try CLIArguments.parse(["--wat"])
@@ -175,6 +194,42 @@ private func makeCLITempDirectory() throws -> URL {
     #expect(io.outputLines.contains { $0.contains("Alias: MD9000") })
     #expect(io.outputLines.contains { $0.contains("Cache Key:") })
     #expect(io.outputLines.contains { $0.contains("Remote URL: https://cdn.example.com/v/master.m3u8") })
+}
+
+@Test func cliSettingsCommands_setAndGet_persistAcrossContextRestarts() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let firstContext = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let firstIO = FakeIO(inputs: [])
+    let firstApp = CLIApp(context: firstContext, io: firstIO)
+
+    let setExitCode = firstApp.run(command: .settingsSetDefaultUserAgent("MyCLI/1.0"))
+    #expect(setExitCode == 0)
+    #expect(firstIO.outputLines.contains { $0.contains("Settings updated.") })
+    #expect(firstIO.outputLines.contains { $0.contains("defaultUserAgent: MyCLI/1.0") })
+
+    let secondContext = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let secondIO = FakeIO(inputs: [])
+    let secondApp = CLIApp(context: secondContext, io: secondIO)
+    let getExitCode = secondApp.run(command: .settingsGet)
+
+    #expect(getExitCode == 0)
+    #expect(secondIO.outputLines.contains { $0.contains("Settings file:") })
+    #expect(secondIO.outputLines.contains { $0.contains("defaultUserAgent: MyCLI/1.0") })
+}
+
+@Test func cliSettingsSetCommand_emptyValue_printsValidationError() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let exitCode = app.run(command: .settingsSetDefaultUserAgent("   "))
+    #expect(exitCode == 1)
+    #expect(io.outputLines.contains { $0.contains("Invalid value for default-user-agent") })
 }
 
 @Test func cliAssetManagement_registerFlow_handlesMissingAndInvalidInputs() throws {
