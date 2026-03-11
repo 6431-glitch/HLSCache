@@ -90,6 +90,55 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(String(decoding: payload, as: UTF8.self) == "23456")
 }
 
+@Test func coreCache_metrics_tracksHitRatioDiskUsageAndPerAssetCompletion() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-metrics")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let cache = CoreCache(baseDirectory: directory)
+
+    let assetAFirst = try makeCoreCacheResourceID(assetID: "asset-metrics-a", suffix: "metrics-a-1.ts")
+    let assetASecond = try makeCoreCacheResourceID(assetID: "asset-metrics-a", suffix: "metrics-a-2.ts")
+    let assetBFirst = try makeCoreCacheResourceID(assetID: "asset-metrics-b", suffix: "metrics-b-1.ts")
+    let missing = try makeCoreCacheResourceID(assetID: "asset-metrics-missing", suffix: "metrics-missing.ts")
+
+    _ = try cache.write(Data(repeating: 1, count: 8), resource: assetAFirst, at: 0, expectedLength: 16)
+    _ = try cache.finalizeWrite(resource: assetAFirst, expectedLength: 16)
+    _ = try cache.write(Data(repeating: 2, count: 4), resource: assetASecond, at: 0, expectedLength: 4)
+    _ = try cache.finalizeWrite(resource: assetASecond, expectedLength: 4)
+    _ = try cache.write(Data(repeating: 3, count: 2), resource: assetBFirst, at: 0, expectedLength: 2)
+    _ = try cache.finalizeWrite(resource: assetBFirst, expectedLength: 2)
+
+    _ = try cache.plan(resource: assetAFirst, requested: try br(0, 8))
+    _ = try cache.plan(resource: assetAFirst, requested: try br(0, 16))
+    _ = try cache.plan(resource: missing, requested: try br(0, 10))
+
+    let metrics = try cache.metrics()
+
+    #expect(metrics.totalRequests == 3)
+    #expect(metrics.fullHitRequests == 1)
+    #expect(metrics.partialHitRequests == 1)
+    #expect(metrics.missRequests == 1)
+    #expect(metrics.requestedBytes == 34)
+    #expect(metrics.bytesPlannedFromCache == 16)
+    #expect(metrics.bytesPlannedFromNetwork == 18)
+    #expect(abs(metrics.hitRatio - (16.0 / 34.0)) < 0.000_000_1)
+    #expect(metrics.totalBytesOnDisk == 14)
+    #expect(metrics.assets.count == 2)
+
+    let byAsset = Dictionary(uniqueKeysWithValues: metrics.assets.map { ($0.cacheKey, $0) })
+    let assetAMetric = try #require(byAsset[CacheKey.fromAssetID("asset-metrics-a")])
+    #expect(assetAMetric.resourceCount == 2)
+    #expect(assetAMetric.completedBytes == 12)
+    #expect(assetAMetric.expectedBytes == 20)
+    #expect(abs(assetAMetric.completionRatio - 0.6) < 0.000_000_1)
+
+    let assetBMetric = try #require(byAsset[CacheKey.fromAssetID("asset-metrics-b")])
+    #expect(assetBMetric.resourceCount == 1)
+    #expect(assetBMetric.completedBytes == 2)
+    #expect(assetBMetric.expectedBytes == 2)
+    #expect(assetBMetric.completionRatio == 1.0)
+}
+
 @Test func coreCache_quotaEviction_evictsLeastRecentlyUpdatedAsset() throws {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-quota")
     defer { try? FileManager.default.removeItem(at: directory) }
