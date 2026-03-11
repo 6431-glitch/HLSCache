@@ -230,7 +230,8 @@ Facade methods now available from `HLSCache`:
 - `proxyURL(for:)`
 - `proxyURL(for:kind:remoteURL:)`
 - `decodeProxyRequestURL(_:)`
-- `cacheInfo(alias:)` / `clearCache(alias:)`
+- `cacheInfo(alias:)` / `listAliases()` / `clearCache(alias:)`
+- `removeAlias(alias:)` / `removeAllAliases()`
 - `setPlugins(_:)`
 - `makeTransformPipeline()`
 
@@ -271,6 +272,15 @@ swift run HLSCacheCLI add \
   --header "Authorization: Bearer <token>"
 ```
 
+Clear cache data from command line (`--yes` is required for non-interactive destructive execution):
+
+```bash
+swift run HLSCacheCLI clear --alias MD0534 --yes
+swift run HLSCacheCLI clear --alias MD0534 --delete-alias --yes
+swift run HLSCacheCLI clear --all --yes
+swift run HLSCacheCLI clear --all --delete-alias --yes
+```
+
 Persisted CLI settings commands:
 
 ```bash
@@ -291,6 +301,13 @@ Settings storage:
 Header precedence for `add`/`register`:
 - If `defaultUserAgent` is set and no `User-Agent` header is provided, the default is applied automatically.
 - If a per-alias `User-Agent` header is provided, it overrides the global default for that alias.
+
+Interactive cache operations:
+- Main menu -> `4) Cache operations`
+- `1) Clear cache by alias` or `2) Clear all cache`
+- Optional prompt to delete alias metadata
+- Destructive confirmation prompt (`--yes`/`yes`) before execution
+- Post-clear verification output includes alias state/count and resulting cache bytes
 
 ---
 

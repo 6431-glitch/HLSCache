@@ -213,6 +213,30 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(after.totalBytesOnDisk == 0)
 }
 
+@Test func facade_removeAliasAndRemoveAllAliases_updateRegistryState() throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-remove-alias")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    _ = try facade.register(
+        alias: "MDRM1",
+        assetID: "asset-rm-1",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/remove-1.m3u8"))
+    )
+    _ = try facade.register(
+        alias: "MDRM2",
+        assetID: "asset-rm-2",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/remove-2.m3u8"))
+    )
+
+    _ = try facade.removeAlias(alias: "MDRM1")
+    #expect(facade.listAliases().map(\.alias) == ["MDRM2"])
+
+    let removedCount = try facade.removeAllAliases()
+    #expect(removedCount == 1)
+    #expect(facade.listAliases().isEmpty)
+}
+
 @Test func facade_setPluginsAndStopServer_behavesAsExpected() throws {
     let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-plugins")
     defer { try? FileManager.default.removeItem(at: directory) }

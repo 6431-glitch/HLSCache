@@ -228,6 +228,21 @@ public final class HLSCacheFacade: @unchecked Sendable {
         )
     }
 
+    public func listAliases() -> [AssetRecord] {
+        let correlationID = UUID().uuidString
+        let records = aliasRegistry.allRecords()
+        logger.log(
+            StructuredLogEvent(
+                subsystem: "HLSCache",
+                operation: "listAliases",
+                level: .debug,
+                correlationID: correlationID,
+                metadata: ["count": String(records.count)]
+            )
+        )
+        return records
+    }
+
     public func clearCache(alias: Alias? = nil) throws {
         let correlationID = UUID().uuidString
         try queue.sync(flags: .barrier) {
@@ -259,6 +274,45 @@ public final class HLSCacheFacade: @unchecked Sendable {
                 )
             )
         }
+    }
+
+    @discardableResult
+    public func removeAlias(alias: Alias) throws -> AssetRecord {
+        let correlationID = UUID().uuidString
+        do {
+            let removed = try aliasRegistry.unregister(alias: alias)
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "removeAlias",
+                    level: .warning,
+                    correlationID: correlationID,
+                    metadata: ["alias": alias]
+                )
+            )
+            return removed
+        } catch let error as AliasRegistryError {
+            switch error {
+            case let .aliasNotFound(missingAlias):
+                throw HLSCacheError.aliasNotFound(missingAlias)
+            }
+        }
+    }
+
+    @discardableResult
+    public func removeAllAliases() throws -> Int {
+        let correlationID = UUID().uuidString
+        let removedCount = try aliasRegistry.unregisterAll()
+        logger.log(
+            StructuredLogEvent(
+                subsystem: "HLSCache",
+                operation: "removeAllAliases",
+                level: .warning,
+                correlationID: correlationID,
+                metadata: ["count": String(removedCount)]
+            )
+        )
+        return removedCount
     }
 
     @discardableResult
@@ -366,8 +420,22 @@ public func cacheInfo(alias: Alias) throws -> CacheInfo {
     try sharedFacade.cacheInfo(alias: alias)
 }
 
+public func listAliases() -> [AssetRecord] {
+    sharedFacade.listAliases()
+}
+
 public func clearCache(alias: Alias? = nil) throws {
     try sharedFacade.clearCache(alias: alias)
+}
+
+@discardableResult
+public func removeAlias(alias: Alias) throws -> AssetRecord {
+    try sharedFacade.removeAlias(alias: alias)
+}
+
+@discardableResult
+public func removeAllAliases() throws -> Int {
+    try sharedFacade.removeAllAliases()
 }
 
 @discardableResult

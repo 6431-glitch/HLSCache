@@ -7,6 +7,7 @@ enum CLIArgumentParseError: Error, Equatable {
     case invalidURL(String)
     case invalidHeader(String)
     case invalidSettingValue(String)
+    case invalidArgument(String)
     case unknownOption(String)
     case unknownCommand(String)
 }
@@ -26,6 +27,8 @@ extension CLIArgumentParseError: LocalizedError {
             return "Invalid header '\(value)'. Use the format 'Header-Name: Header-Value'."
         case let .invalidSettingValue(name):
             return "Invalid value for setting '\(name)'."
+        case let .invalidArgument(value):
+            return "Invalid argument '\(value)'."
         case let .unknownOption(option):
             return "Unknown option '\(option)'."
         case let .unknownCommand(command):
@@ -37,6 +40,7 @@ extension CLIArgumentParseError: LocalizedError {
 enum CLICommand: Equatable {
     case interactive
     case register(RegisterAssetCommand)
+    case clearData(ClearDataCommand)
     case settingsGet
     case settingsSetDefaultUserAgent(String)
 }
@@ -46,6 +50,17 @@ struct RegisterAssetCommand: Equatable {
     let assetID: String
     let remoteURL: URL
     let headers: [String: String]?
+}
+
+enum ClearDataScope: Equatable {
+    case alias(String)
+    case all
+}
+
+struct ClearDataCommand: Equatable {
+    let scope: ClearDataScope
+    let removeAliasMetadata: Bool
+    let bypassConfirmation: Bool
 }
 
 struct CLIArguments: Equatable {
@@ -116,6 +131,10 @@ struct CLIArguments: Equatable {
                 let commandArgs = Array(args[(index + 1)...])
                 command = try parseRegisterCommand(commandArgs)
                 index = args.count
+            case "clear":
+                let commandArgs = Array(args[(index + 1)...])
+                command = try parseClearDataCommand(commandArgs)
+                index = args.count
             case "settings":
                 let commandArgs = Array(args[(index + 1)...])
                 command = try parseSettingsCommand(commandArgs)
@@ -143,6 +162,8 @@ struct CLIArguments: Equatable {
           swift run HLSCacheCLI [options]
           swift run HLSCacheCLI [options] add --alias <alias> --asset-id <asset-id> --url <remote-url> [--header "Name: Value"]
           swift run HLSCacheCLI [options] register --alias <alias> --asset-id <asset-id> --url <remote-url> [--header "Name: Value"]
+          swift run HLSCacheCLI [options] clear --alias <alias> [--delete-alias] --yes
+          swift run HLSCacheCLI [options] clear --all [--delete-alias] --yes
           swift run HLSCacheCLI [options] settings get
           swift run HLSCacheCLI [options] settings set default-user-agent "<value>"
 
@@ -156,6 +177,10 @@ struct CLIArguments: Equatable {
           add, register             Add or update an alias mapping.
                                    Required: --alias, --asset-id, --url
                                    Optional: repeat --header "Name: Value"
+          clear                     Clear cache bytes by alias or all aliases.
+                                   Required: one of --alias <alias> or --all
+                                   Optional: --delete-alias to remove alias metadata
+                                   Required for non-interactive use: --yes
           settings get              Show persisted CLI settings.
           settings set default-user-agent "<value>"
                                    Persist global default User-Agent.
@@ -253,6 +278,62 @@ struct CLIArguments: Equatable {
             throw CLIArgumentParseError.invalidHeader(raw)
         }
         return (key, value)
+    }
+
+    private static func parseClearDataCommand(_ args: [String]) throws -> CLICommand {
+        var alias: String?
+        var clearAll = false
+        var removeAliasMetadata = false
+        var bypassConfirmation = false
+
+        var index = 0
+        while index < args.count {
+            let option = args[index]
+            switch option {
+            case "--alias":
+                index += 1
+                guard index < args.count else {
+                    throw CLIArgumentParseError.missingValue(option)
+                }
+                alias = args[index]
+                index += 1
+            case "--all":
+                clearAll = true
+                index += 1
+            case "--delete-alias":
+                removeAliasMetadata = true
+                index += 1
+            case "--yes":
+                bypassConfirmation = true
+                index += 1
+            default:
+                if option.hasPrefix("-") {
+                    throw CLIArgumentParseError.unknownOption(option)
+                }
+                throw CLIArgumentParseError.unknownCommand(option)
+            }
+        }
+
+        guard !clearAll || alias == nil else {
+            throw CLIArgumentParseError.invalidArgument("use either --alias <alias> or --all, not both")
+        }
+
+        let scope: ClearDataScope
+        if let alias, !alias.isEmpty {
+            scope = .alias(alias)
+        } else if clearAll {
+            scope = .all
+        } else {
+            throw CLIArgumentParseError.missingRequiredArgument("--alias <alias> or --all")
+        }
+
+        return .clearData(
+            ClearDataCommand(
+                scope: scope,
+                removeAliasMetadata: removeAliasMetadata,
+                bypassConfirmation: bypassConfirmation
+            )
+        )
     }
 
     private static func parseSettingsCommand(_ args: [String]) throws -> CLICommand {

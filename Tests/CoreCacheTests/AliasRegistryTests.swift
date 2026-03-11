@@ -177,6 +177,42 @@ private func makeTempDirectory(prefix: String = "alias-registry-tests") throws -
     #expect(restored.cacheKey == CacheKey.fromAssetID("asset-4000"))
 }
 
+@Test func aliasRegistry_unregister_removesSingleAliasAndPersists() throws {
+    let directory = try makeTempDirectory(prefix: "alias-registry-unregister")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let registry = AliasRegistry(baseDirectory: directory)
+    let remoteURL = try #require(URL(string: "https://cdn.example.com/unregister.m3u8"))
+    _ = try registry.register(alias: "MDDEL1", assetID: "asset-del-1", remoteURL: remoteURL, headers: nil)
+    _ = try registry.register(alias: "MDDEL2", assetID: "asset-del-2", remoteURL: remoteURL, headers: nil)
+
+    let removed = try registry.unregister(alias: "MDDEL1")
+    #expect(removed.alias == "MDDEL1")
+    #expect(registry.resolve(alias: "MDDEL1") == nil)
+    #expect(registry.resolve(alias: "MDDEL2") != nil)
+
+    let reloaded = AliasRegistry(baseDirectory: directory)
+    #expect(reloaded.resolve(alias: "MDDEL1") == nil)
+    #expect(reloaded.resolve(alias: "MDDEL2") != nil)
+}
+
+@Test func aliasRegistry_unregisterAll_clearsAllAliasesAndPersists() throws {
+    let directory = try makeTempDirectory(prefix: "alias-registry-unregister-all")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let registry = AliasRegistry(baseDirectory: directory)
+    let remoteURL = try #require(URL(string: "https://cdn.example.com/unregister-all.m3u8"))
+    _ = try registry.register(alias: "MDALL1", assetID: "asset-all-1", remoteURL: remoteURL, headers: nil)
+    _ = try registry.register(alias: "MDALL2", assetID: "asset-all-2", remoteURL: remoteURL, headers: nil)
+
+    let removedCount = try registry.unregisterAll()
+    #expect(removedCount == 2)
+    #expect(registry.allRecords().isEmpty)
+
+    let reloaded = AliasRegistry(baseDirectory: directory)
+    #expect(reloaded.allRecords().isEmpty)
+}
+
 private extension JSONDecoder {
     static var withISO8601: JSONDecoder {
         let decoder = JSONDecoder()

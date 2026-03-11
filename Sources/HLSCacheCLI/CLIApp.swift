@@ -1,4 +1,5 @@
 import Foundation
+import HLSCache
 
 struct CLIApp {
     private let context: CLIAppContext
@@ -17,6 +18,8 @@ struct CLIApp {
             return 0
         case let .register(command):
             return runRegisterCommand(command)
+        case let .clearData(command):
+            return runClearDataCommand(command, allowPrompt: false)
         case .settingsGet:
             return runSettingsGetCommand()
         case let .settingsSetDefaultUserAgent(value):
@@ -54,13 +57,7 @@ struct CLIApp {
             case "3":
                 runSettingsSubflow()
             case "4":
-                runSubflow(
-                    title: "Cache Operations",
-                    options: [
-                        "1) Show cache summary (coming soon)",
-                        "2) Clear cache by alias (coming soon)"
-                    ]
-                )
+                runCacheOperationsSubflow()
             case "0", "q", "quit", "exit":
                 shouldExit = true
             default:
@@ -136,6 +133,34 @@ struct CLIApp {
                     continue
                 }
                 _ = runSettingsSetDefaultUserAgentCommand(value)
+            default:
+                io.writeLine("Invalid selection '\(selection)'. Enter 0 to go back.")
+            }
+        }
+    }
+
+    private func runCacheOperationsSubflow() {
+        var shouldReturn = false
+        while !shouldReturn {
+            io.writeLine("")
+            io.writeLine("[Cache Operations]")
+            io.writeLine("1) Clear cache by alias")
+            io.writeLine("2) Clear all cache")
+            io.writeLine("0) Back")
+            io.writeLine("Choose an option:")
+
+            guard let selection = normalizedInput() else {
+                io.writeLine("Input stream closed. Returning to main menu.")
+                return
+            }
+
+            switch selection.lowercased() {
+            case "0", "b", "back":
+                shouldReturn = true
+            case "1":
+                runInteractiveClearDataFlow(scope: .alias(""))
+            case "2":
+                runInteractiveClearDataFlow(scope: .all)
             default:
                 io.writeLine("Invalid selection '\(selection)'. Enter 0 to go back.")
             }
@@ -261,6 +286,118 @@ struct CLIApp {
         }
     }
 
+    private func runInteractiveClearDataFlow(scope: ClearDataScope) {
+        let resolvedScope: ClearDataScope
+        switch scope {
+        case .alias:
+            io.writeLine("Alias to clear (required):")
+            guard let alias = requireNonEmptyInput(fieldName: "Alias") else {
+                return
+            }
+            resolvedScope = .alias(alias)
+        case .all:
+            resolvedScope = .all
+        }
+
+        io.writeLine("Delete alias metadata too? (y/N):")
+        let shouldDeleteAliasMetadata = readYesNoInput(defaultValue: false)
+        let command = ClearDataCommand(
+            scope: resolvedScope,
+            removeAliasMetadata: shouldDeleteAliasMetadata,
+            bypassConfirmation: false
+        )
+        _ = runClearDataCommand(command, allowPrompt: true)
+    }
+
+    private func runClearDataCommand(_ command: ClearDataCommand, allowPrompt: Bool) -> Int32 {
+        guard command.bypassConfirmation || allowPrompt else {
+            io.writeLine("Refusing destructive clear command without confirmation. Re-run with --yes.")
+            return 1
+        }
+
+        if !command.bypassConfirmation {
+            io.writeLine("This operation is destructive.")
+            io.writeLine("Type '--yes' to confirm, or anything else to cancel:")
+            guard let confirmation = normalizedInput() else {
+                io.writeLine("Input stream closed. Clear operation cancelled.")
+                return 1
+            }
+            guard confirmation == "--yes" || confirmation.caseInsensitiveCompare("yes") == .orderedSame else {
+                io.writeLine("Clear operation cancelled.")
+                return 1
+            }
+        }
+
+        do {
+            switch command.scope {
+            case let .alias(alias):
+                return try runClearByAlias(alias: alias, removeAliasMetadata: command.removeAliasMetadata)
+            case .all:
+                return try runClearAll(removeAliasMetadata: command.removeAliasMetadata)
+            }
+        } catch let error as HLSCacheError {
+            switch error {
+            case let .aliasNotFound(alias):
+                io.writeLine("Alias '\(alias)' was not found.")
+                return 1
+            case .serverNotRunning:
+                io.writeLine("Proxy server is not running.")
+                return 1
+            }
+        } catch {
+            io.writeLine("Failed to clear data: \(error.localizedDescription)")
+            return 1
+        }
+    }
+
+    private func runClearByAlias(alias: String, removeAliasMetadata: Bool) throws -> Int32 {
+        try context.facade.clearCache(alias: alias)
+        io.writeLine("Cleared cache for alias '\(alias)'.")
+
+        if removeAliasMetadata {
+            _ = try context.facade.removeAlias(alias: alias)
+            io.writeLine("Alias metadata removed for '\(alias)'.")
+        }
+
+        let stillPresent = context.facade.listAliases().contains { $0.alias == alias }
+        io.writeLine("Post-clear verification:")
+        io.writeLine("Alias state: \(stillPresent ? "present" : "removed")")
+
+        if stillPresent {
+            let info = try context.facade.cacheInfo(alias: alias)
+            io.writeLine("Cache bytes: \(info.totalBytesOnDisk)")
+        }
+
+        return 0
+    }
+
+    private func runClearAll(removeAliasMetadata: Bool) throws -> Int32 {
+        let aliasesBefore = context.facade.listAliases()
+        try context.facade.clearCache()
+        io.writeLine("Cleared cache for all aliases.")
+
+        if removeAliasMetadata {
+            let removedCount = try context.facade.removeAllAliases()
+            io.writeLine("Removed alias metadata for \(removedCount) aliases.")
+        }
+
+        let aliasesAfter = context.facade.listAliases()
+        io.writeLine("Post-clear verification:")
+        io.writeLine("Alias count: \(aliasesAfter.count)")
+
+        if !removeAliasMetadata {
+            var totalBytes: Int64 = 0
+            for record in aliasesBefore {
+                if aliasesAfter.contains(where: { $0.alias == record.alias }) {
+                    totalBytes += try context.facade.cacheInfo(alias: record.alias).totalBytesOnDisk
+                }
+            }
+            io.writeLine("Total cache bytes across aliases: \(totalBytes)")
+        }
+
+        return 0
+    }
+
     private func mergedHeadersWithDefaultUserAgent(_ providedHeaders: [String: String]?) -> [String: String]? {
         var headers = providedHeaders ?? [:]
         let settings = context.settingsStore.current()
@@ -308,6 +445,20 @@ struct CLIApp {
             return nil
         }
         return value
+    }
+
+    private func readYesNoInput(defaultValue: Bool) -> Bool {
+        guard let value = normalizedInput(), !value.isEmpty else {
+            return defaultValue
+        }
+        switch value.lowercased() {
+        case "y", "yes":
+            return true
+        case "n", "no":
+            return false
+        default:
+            return defaultValue
+        }
     }
 
     private func normalizedInput() -> String? {
