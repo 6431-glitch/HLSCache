@@ -144,14 +144,14 @@ struct CLIApp {
             }
 
             switch selection.lowercased() {
-            case "0", "b", "back":
+            case "0", "q", "b", "back":
                 shouldReturn = true
             case "1":
                 runProxyStatusAction()
             case "2":
                 runProxyRestartAction()
             default:
-                io.writeLine("Invalid selection '\(selection)'. Enter 0 to go back.")
+                io.writeLine("Invalid selection '\(selection)'. Enter 0, q, or back to go back.")
             }
         }
     }
