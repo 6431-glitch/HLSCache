@@ -54,6 +54,73 @@ private func seedCacheBytes(baseDirectory: URL, alias: String, assetID: String) 
     _ = try coreCache.finalizeWrite(resource: resource, expectedLength: 256)
 }
 
+private func makeFullCoverageRanges(length: Int64) -> IntervalSet {
+    var ranges = IntervalSet()
+    if let range = ByteRange(start: 0, endExclusive: length) {
+        ranges.insert(range)
+    }
+    return ranges
+}
+
+private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID: String) throws {
+    let facade = HLSCacheFacade(baseDirectory: baseDirectory)
+    let playlistURL = try #require(URL(string: "https://cdn.example.com/\(alias)/media.m3u8"))
+    let record = try facade.register(alias: alias, assetID: assetID, remoteURL: playlistURL)
+
+    let playlist = """
+    #EXTM3U
+    #EXT-X-VERSION:3
+    #EXT-X-TARGETDURATION:8
+    #EXTINF:8.0,
+    seg-1.ts
+    #EXTINF:8.0,
+    seg-2.ts
+    #EXT-X-ENDLIST
+    """
+
+    let manifestStore = ManifestStore(baseDirectory: baseDirectory)
+    let diskStore = DiskStore(baseDirectory: baseDirectory)
+
+    let playlistResourceID = ResourceID(
+        cacheKey: record.cacheKey,
+        kind: .playlistM3U8,
+        resourceKey: ResourceID.makeResourceKey(from: playlistURL)
+    )
+    let playlistData = Data(playlist.utf8)
+    _ = try diskStore.write(playlistData, for: playlistResourceID, at: 0)
+    try manifestStore.save(
+        resourceID: playlistResourceID,
+        record: ResourceRecord(
+            kind: .playlistM3U8,
+            originalURL: playlistURL,
+            contentType: "application/vnd.apple.mpegurl",
+            expectedLength: Int64(playlistData.count),
+            completedRanges: makeFullCoverageRanges(length: Int64(playlistData.count))
+        )
+    )
+
+    for (index, segmentName) in ["seg-1.ts", "seg-2.ts"].enumerated() {
+        let segmentURL = playlistURL.deletingLastPathComponent().appendingPathComponent(segmentName)
+        let payload = Data(repeating: UInt8(0x20 + index), count: 188)
+        let resourceID = ResourceID(
+            cacheKey: record.cacheKey,
+            kind: .segment,
+            resourceKey: ResourceID.makeResourceKey(from: segmentURL)
+        )
+        _ = try diskStore.write(payload, for: resourceID, at: 0)
+        try manifestStore.save(
+            resourceID: resourceID,
+            record: ResourceRecord(
+                kind: .segment,
+                originalURL: segmentURL,
+                contentType: "video/mp2t",
+                expectedLength: Int64(payload.count),
+                completedRanges: makeFullCoverageRanges(length: Int64(payload.count))
+            )
+        )
+    }
+}
+
 @Test func cliArguments_defaults_whenNoOptionsProvided() throws {
     let parsed = try CLIArguments.parse([])
 
@@ -169,6 +236,15 @@ private func seedCacheBytes(baseDirectory: URL, alias: String, assetID: String) 
         #expect(Bool(false))
     } catch let error as CLIArgumentParseError {
         #expect(error == .missingRequiredArgument("--alias <alias> or --all"))
+    }
+}
+
+@Test func cliArguments_parseClearDataCommand_aliasAndAll_throws() throws {
+    do {
+        _ = try CLIArguments.parse(["clear", "--alias", "MDCONFLICT", "--all", "--yes"])
+        #expect(Bool(false))
+    } catch let error as CLIArgumentParseError {
+        #expect(error == .invalidArgument("use either --alias <alias> or --all, not both"))
     }
 }
 
@@ -527,4 +603,88 @@ private func seedCacheBytes(baseDirectory: URL, alias: String, assetID: String) 
     #expect(listHeaderCount >= 2)
     #expect(io.outputLines.contains { $0.contains("Press Enter to refresh, or q to return.") })
     #expect(io.outputLines.contains { $0.contains("Goodbye.") })
+}
+
+@Test func cliExportCommand_runsThroughCLIApp_andPrintsOutputSummary() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedExportableMediaCache(baseDirectory: directory, alias: "MDEXPCLI", assetID: "asset-exp-cli")
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let outputURL = directory.appendingPathComponent("out/video.mp4")
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(
+        context: context,
+        io: io,
+        makeExporter: { appContext in
+            CLIExporter(
+                baseDirectory: appContext.baseDirectory,
+                facade: appContext.facade,
+                remuxRunner: { _, outputURL in
+                    try FileManager.default.createDirectory(
+                        at: outputURL.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    try Data("mp4bytes".utf8).write(to: outputURL)
+                }
+            )
+        }
+    )
+
+    let exitCode = app.run(
+        command: .exportMP4(
+            ExportMP4Command(alias: "MDEXPCLI", outputURL: outputURL)
+        )
+    )
+
+    #expect(exitCode == 0)
+    #expect(io.outputLines.contains { $0.contains("Export completed successfully.") })
+    #expect(io.outputLines.contains { $0.contains("Alias: MDEXPCLI") })
+    #expect(io.outputLines.contains { $0.contains("Output: \(outputURL.path)") })
+    #expect(io.outputLines.contains { $0.contains("Output size: 8 bytes") })
+}
+
+@Test func cliInteractive_quickstartFlow_coversCoreCommandsAndNavigation() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [
+        "1", // Asset management
+        "1", // Add/register asset
+        "MDFLOW1",
+        "asset-flow-1",
+        "https://cdn.example.com/flow/master.m3u8",
+        "", // No headers
+        "2", // List aliases
+        "q", // Return from list via q
+        "0", // Back to main menu
+        "3", // Settings
+        "2", // Set default User-Agent
+        "FlowUA/1.0",
+        "1", // Show settings
+        "0", // Back to main menu
+        "4", // Cache operations
+        "1", // Clear cache by alias
+        "MDFLOW1",
+        "n", // Keep alias metadata
+        "--yes", // Confirm destructive operation
+        "0", // Back to main menu
+        "0" // Exit
+    ])
+    let app = CLIApp(context: context, io: io)
+    app.runInteractive()
+
+    #expect(io.outputLines.contains { $0.contains("Asset registered successfully.") })
+    #expect(io.outputLines.contains { $0.contains("[Alias List]") })
+    #expect(io.outputLines.contains { $0.contains("MDFLOW1 | assetID=asset-flow-1") })
+    #expect(io.outputLines.contains { $0.contains("[Settings]") })
+    #expect(io.outputLines.contains { $0.contains("defaultUserAgent: FlowUA/1.0") })
+    #expect(io.outputLines.contains { $0.contains("[Cache Operations]") })
+    #expect(io.outputLines.contains { $0.contains("Type '--yes' to confirm") })
+    #expect(io.outputLines.contains { $0.contains("Cleared cache for alias 'MDFLOW1'.") })
+    #expect(io.outputLines.contains { $0.contains("Alias state: present") })
+
+    let info = try context.facade.cacheInfo(alias: "MDFLOW1")
+    #expect(info.totalBytesOnDisk == 0)
 }

@@ -325,6 +325,45 @@ Export behavior:
 - Returns actionable error when cache is incomplete
 - Uses `ffmpeg` for remux and reports output path + size on success
 
+CLI quickstart (add/list/clear/settings/export):
+
+```bash
+# 1) Register an alias
+swift run HLSCacheCLI add \
+  --alias MD0534 \
+  --asset-id movie_534 \
+  --url "https://cdn.example.com/master.m3u8"
+
+# 2) Open interactive mode to list aliases (press q to return)
+swift run HLSCacheCLI
+# Main Menu -> 1) Asset management -> 2) List aliases
+
+# 3) Configure default User-Agent
+swift run HLSCacheCLI settings set default-user-agent "HLSCacheCLI/1.0"
+swift run HLSCacheCLI settings get
+
+# 4) Clear cache safely
+swift run HLSCacheCLI clear --alias MD0534 --yes
+
+# 5) Export cached media to MP4
+swift run HLSCacheCLI export --alias MD0534 --output /tmp/MD0534.mp4
+```
+
+Export prerequisites:
+- `ffmpeg` must be installed and available in `PATH`.
+- Alias must exist and point to a cached media playlist.
+- Required segment data must be fully cached (incomplete cache fails fast).
+- AES-128 encrypted playlists are currently not supported by CLI export.
+
+Export troubleshooting:
+- `ffmpeg is unavailable`: install ffmpeg and verify with `ffmpeg -version`.
+- `No cached media playlist was found`: ensure the alias was registered and playlist bytes were cached.
+- `Cache is incomplete`: warm cache by playing/downloading until required segments are fully written.
+- `MP4 remux failed`: inspect playlist/segment integrity and retry export after refreshing cache.
+
+Validation command for local CLI changes:
+- `swift test`
+
 ---
 
 ##Design Principles
