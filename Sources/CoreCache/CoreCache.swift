@@ -33,9 +33,13 @@ public struct CoreCacheMetrics: Equatable, Sendable {
     public let partialHitRequests: Int64
     public let missRequests: Int64
     public let requestedBytes: Int64
+    public let bytesServedFromDisk: Int64
+    public let bytesServedFromNetwork: Int64
     public let bytesPlannedFromCache: Int64
     public let bytesPlannedFromNetwork: Int64
     public let hitRatio: Double
+    public let diskServeRatio: Double
+    public let networkServeRatio: Double
     public let totalBytesOnDisk: Int64
     public let assets: [AssetCacheCompletionMetric]
 
@@ -45,9 +49,13 @@ public struct CoreCacheMetrics: Equatable, Sendable {
         partialHitRequests: Int64,
         missRequests: Int64,
         requestedBytes: Int64,
+        bytesServedFromDisk: Int64,
+        bytesServedFromNetwork: Int64,
         bytesPlannedFromCache: Int64,
         bytesPlannedFromNetwork: Int64,
         hitRatio: Double,
+        diskServeRatio: Double,
+        networkServeRatio: Double,
         totalBytesOnDisk: Int64,
         assets: [AssetCacheCompletionMetric]
     ) {
@@ -56,9 +64,13 @@ public struct CoreCacheMetrics: Equatable, Sendable {
         self.partialHitRequests = partialHitRequests
         self.missRequests = missRequests
         self.requestedBytes = requestedBytes
+        self.bytesServedFromDisk = bytesServedFromDisk
+        self.bytesServedFromNetwork = bytesServedFromNetwork
         self.bytesPlannedFromCache = bytesPlannedFromCache
         self.bytesPlannedFromNetwork = bytesPlannedFromNetwork
         self.hitRatio = hitRatio
+        self.diskServeRatio = diskServeRatio
+        self.networkServeRatio = networkServeRatio
         self.totalBytesOnDisk = totalBytesOnDisk
         self.assets = assets
     }
@@ -174,8 +186,13 @@ public final class CoreCache: @unchecked Sendable {
             }
             .sorted { $0.cacheKey.rawValue < $1.cacheKey.rawValue }
 
-            let hitRatio = planSnapshot.requestedBytes > 0
-                ? Double(planSnapshot.bytesPlannedFromCache) / Double(planSnapshot.requestedBytes)
+            let bytesServedFromDisk = planSnapshot.bytesPlannedFromCache
+            let bytesServedFromNetwork = planSnapshot.bytesPlannedFromNetwork
+            let diskServeRatio = planSnapshot.requestedBytes > 0
+                ? Double(bytesServedFromDisk) / Double(planSnapshot.requestedBytes)
+                : 0
+            let networkServeRatio = planSnapshot.requestedBytes > 0
+                ? Double(bytesServedFromNetwork) / Double(planSnapshot.requestedBytes)
                 : 0
 
             return CoreCacheMetrics(
@@ -184,9 +201,13 @@ public final class CoreCache: @unchecked Sendable {
                 partialHitRequests: planSnapshot.partialHitRequests,
                 missRequests: planSnapshot.missRequests,
                 requestedBytes: planSnapshot.requestedBytes,
+                bytesServedFromDisk: bytesServedFromDisk,
+                bytesServedFromNetwork: bytesServedFromNetwork,
                 bytesPlannedFromCache: planSnapshot.bytesPlannedFromCache,
                 bytesPlannedFromNetwork: planSnapshot.bytesPlannedFromNetwork,
-                hitRatio: hitRatio,
+                hitRatio: diskServeRatio,
+                diskServeRatio: diskServeRatio,
+                networkServeRatio: networkServeRatio,
                 totalBytesOnDisk: totalBytesOnDisk,
                 assets: assets
             )
