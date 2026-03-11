@@ -102,11 +102,49 @@ struct CLIApp {
             case "1":
                 runInteractiveRegisterAssetFlow()
             case "2":
-                io.writeLine("Option 2 in Asset Management is not implemented yet.")
+                runAliasListMonitor()
             default:
                 io.writeLine("Invalid selection '\(selection)'. Enter 0 to go back.")
             }
         }
+    }
+
+    private func runAliasListMonitor() {
+        var shouldReturn = false
+        while !shouldReturn {
+            io.writeLine("")
+            io.writeLine("[Alias List]")
+
+            let aliases = context.facade.listAliases()
+            if aliases.isEmpty {
+                io.writeLine("(no aliases registered)")
+            } else {
+                for record in aliases {
+                    let cacheBytes = (try? context.facade.cacheInfo(alias: record.alias).totalBytesOnDisk) ?? 0
+                    let updated = formattedListDate(record.lastUpdated)
+                    io.writeLine(
+                        "- \(record.alias) | assetID=\(record.assetID) | bytes=\(cacheBytes) | updated=\(updated)"
+                    )
+                    io.writeLine("  remote=\(record.currentRemoteURL.absoluteString)")
+                }
+            }
+
+            io.writeLine("Press Enter to refresh, or q to return.")
+            guard let selection = normalizedInput() else {
+                io.writeLine("Input stream closed. Returning to Asset Management menu.")
+                shouldReturn = true
+                continue
+            }
+
+            if selection.lowercased() == "q" {
+                shouldReturn = true
+            }
+        }
+    }
+
+    private func formattedListDate(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        return formatter.string(from: date)
     }
 
     private func runSettingsSubflow() {
