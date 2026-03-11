@@ -408,6 +408,51 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     #expect(io.outputLines.contains { $0.contains("Goodbye.") })
 }
 
+@Test func cliProxyMenu_restartAction_reportsBeforeAndAfterStatusContext() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: ["2", "2", "0", "0"])
+    let app = CLIApp(
+        context: context,
+        io: io,
+        environmentProvider: { ["HLSCACHECLI_PROXY_RESTART_ACTION": "1"] }
+    )
+    app.runInteractive()
+
+    #expect(io.outputLines.contains { $0.contains("Restarting proxy server...") })
+    #expect(io.outputLines.contains { $0.contains("Before restart:") })
+    #expect(io.outputLines.contains { $0.contains("After restart:") })
+    #expect(io.outputLines.contains { $0.contains("Proxy server restarted.") })
+    #expect(io.outputLines.contains { $0.contains("Resolved base URL: http://127.0.0.1:8080") })
+
+    let runningStateCount = io.outputLines.filter { $0 == "State: running" }.count
+    #expect(runningStateCount >= 2)
+}
+
+@Test func cliProxyMenu_restartAction_whenInitiallyStopped_showsStoppedThenRunning() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    context.facade.stopServer()
+
+    let io = FakeIO(inputs: ["2", "2", "0", "0"])
+    let app = CLIApp(
+        context: context,
+        io: io,
+        environmentProvider: { ["HLSCACHECLI_PROXY_RESTART_ACTION": "1"] }
+    )
+    app.runInteractive()
+
+    #expect(io.outputLines.contains { $0.contains("Before restart:") })
+    #expect(io.outputLines.contains { $0.contains("State: stopped") })
+    #expect(io.outputLines.contains { $0.contains("After restart:") })
+    #expect(io.outputLines.contains { $0.contains("State: running") })
+    #expect(io.outputLines.contains { $0.contains("Resolved base URL: http://127.0.0.1:8080") })
+}
+
 @Test func cliInteractive_containsNoPlaceholderText() throws {
     let directory = try makeCLITempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
