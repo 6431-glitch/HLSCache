@@ -341,7 +341,7 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     #expect(io.outputLines.contains { $0.contains("Goodbye.") })
 }
 
-@Test func cliProxyMenu_withoutFlags_showsExplicitFeatureGateMessage() throws {
+@Test func cliProxyMenu_showsRuntimeActionsByDefault() throws {
     let directory = try makeCLITempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
 
@@ -351,8 +351,9 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     app.runInteractive()
 
     #expect(io.outputLines.contains { $0.contains("[Proxy Server]") })
-    #expect(io.outputLines.contains { $0.contains("Proxy actions are disabled by feature flags.") })
-    #expect(io.outputLines.contains { $0.contains("HLSCACHECLI_PROXY_STATUS_ACTION=1") })
+    #expect(io.outputLines.contains { $0.contains("1) Show proxy status") })
+    #expect(io.outputLines.contains { $0.contains("2) Restart proxy server") })
+    #expect(!io.outputLines.contains { $0.contains("disabled by feature flags") })
 }
 
 @Test func cliProxyMenu_statusAction_reportsRuntimeMetadataWhenRunning() throws {
@@ -367,11 +368,7 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     )
 
     let io = FakeIO(inputs: ["2", "1", "0", "0"])
-    let app = CLIApp(
-        context: context,
-        io: io,
-        environmentProvider: { ["HLSCACHECLI_PROXY_STATUS_ACTION": "1"] }
-    )
+    let app = CLIApp(context: context, io: io)
     app.runInteractive()
 
     #expect(io.outputLines.contains { $0.contains("[Proxy Server]") })
@@ -391,11 +388,7 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     context.facade.stopServer()
 
     let io = FakeIO(inputs: ["2", "1", "0", "0"])
-    let app = CLIApp(
-        context: context,
-        io: io,
-        environmentProvider: { ["HLSCACHECLI_PROXY_STATUS_ACTION": "1"] }
-    )
+    let app = CLIApp(context: context, io: io)
     app.runInteractive()
 
     #expect(io.outputLines.contains { $0.contains("Proxy base URL: (unavailable)") })
@@ -414,11 +407,7 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
 
     let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
     let io = FakeIO(inputs: ["2", "2", "0", "0"])
-    let app = CLIApp(
-        context: context,
-        io: io,
-        environmentProvider: { ["HLSCACHECLI_PROXY_RESTART_ACTION": "1"] }
-    )
+    let app = CLIApp(context: context, io: io)
     app.runInteractive()
 
     #expect(io.outputLines.contains { $0.contains("Restarting proxy server...") })
@@ -439,11 +428,7 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     context.facade.stopServer()
 
     let io = FakeIO(inputs: ["2", "2", "0", "0"])
-    let app = CLIApp(
-        context: context,
-        io: io,
-        environmentProvider: { ["HLSCACHECLI_PROXY_RESTART_ACTION": "1"] }
-    )
+    let app = CLIApp(context: context, io: io)
     app.runInteractive()
 
     #expect(io.outputLines.contains { $0.contains("Before restart:") })
