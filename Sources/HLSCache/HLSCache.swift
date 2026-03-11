@@ -15,6 +15,20 @@ public struct CacheInfo: Sendable, Equatable {
     public let activePluginCount: Int
 }
 
+public struct ProxyServerStatus: Sendable, Equatable {
+    public let isRunning: Bool
+    public let host: String?
+    public let port: Int?
+    public let baseURL: URL?
+
+    public init(isRunning: Bool, host: String?, port: Int?, baseURL: URL?) {
+        self.isRunning = isRunning
+        self.host = host
+        self.port = port
+        self.baseURL = baseURL
+    }
+}
+
 public enum HLSCacheError: Error, Equatable, Sendable {
     case serverNotRunning
     case aliasNotFound(Alias)
@@ -74,6 +88,43 @@ public final class HLSCacheFacade: @unchecked Sendable {
                 )
             )
         }
+    }
+
+    public func proxyStatus() -> ProxyServerStatus {
+        let correlationID = UUID().uuidString
+        let status = queue.sync {
+            if let serverBaseURL {
+                return ProxyServerStatus(
+                    isRunning: true,
+                    host: serverBaseURL.host,
+                    port: serverBaseURL.port,
+                    baseURL: serverBaseURL
+                )
+            }
+
+            return ProxyServerStatus(
+                isRunning: false,
+                host: nil,
+                port: nil,
+                baseURL: nil
+            )
+        }
+
+        logger.log(
+            StructuredLogEvent(
+                subsystem: "HLSCache",
+                operation: "proxyStatus",
+                level: .debug,
+                correlationID: correlationID,
+                metadata: [
+                    "running": String(status.isRunning),
+                    "host": status.host ?? "",
+                    "port": status.port.map(String.init) ?? ""
+                ]
+            )
+        )
+
+        return status
     }
 
     @discardableResult
@@ -387,6 +438,10 @@ public func startServer(host: String = "127.0.0.1", port: Int = 8080) -> URL {
 
 public func stopServer() {
     sharedFacade.stopServer()
+}
+
+public func proxyStatus() -> ProxyServerStatus {
+    sharedFacade.proxyStatus()
 }
 
 @discardableResult
