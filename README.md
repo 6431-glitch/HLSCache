@@ -13,7 +13,7 @@ The architecture cleanly separates playback proxying, storage, and background do
 - Optional disk quota with per-asset LRU eviction in `CoreCache`
 - Stable alias-based routing (`/MD0534`) and typed proxy resource routes (`/MD0534/seg|key|raw/<encoded-url>`)
 - Structured logging hooks across `CoreCache` and `HLSCacheFacade` with log levels and correlation IDs
-- Core cache metrics snapshot (`hitRatio`, disk usage, per-asset completion)
+- Core cache metrics snapshot (hit/miss, bytes served from disk/network, disk/network ratios, disk usage, per-asset completion)
 - Background HLS offline downloading via `URLSessionConfiguration.background`
 - Streaming transformation plugin pipeline
 - Optional encrypt-at-rest layer

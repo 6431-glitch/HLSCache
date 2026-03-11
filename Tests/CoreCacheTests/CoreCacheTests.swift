@@ -119,9 +119,13 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(metrics.partialHitRequests == 1)
     #expect(metrics.missRequests == 1)
     #expect(metrics.requestedBytes == 34)
+    #expect(metrics.bytesServedFromDisk == 16)
+    #expect(metrics.bytesServedFromNetwork == 18)
     #expect(metrics.bytesPlannedFromCache == 16)
     #expect(metrics.bytesPlannedFromNetwork == 18)
     #expect(abs(metrics.hitRatio - (16.0 / 34.0)) < 0.000_000_1)
+    #expect(abs(metrics.diskServeRatio - (16.0 / 34.0)) < 0.000_000_1)
+    #expect(abs(metrics.networkServeRatio - (18.0 / 34.0)) < 0.000_000_1)
     #expect(metrics.totalBytesOnDisk == 14)
     #expect(metrics.assets.count == 2)
 
