@@ -232,11 +232,12 @@ struct CLIApp {
 
     private func runRegisterCommand(_ command: RegisterAssetCommand) -> Int32 {
         do {
+            let effectiveHeaders = mergedHeadersWithDefaultUserAgent(command.headers)
             let record = try context.facade.register(
                 alias: command.alias,
                 assetID: command.assetID,
                 remoteURL: command.remoteURL,
-                headers: command.headers
+                headers: effectiveHeaders
             )
 
             io.writeLine("Asset registered successfully.")
@@ -258,6 +259,19 @@ struct CLIApp {
             io.writeLine("Failed to register asset: \(error.localizedDescription)")
             return 1
         }
+    }
+
+    private func mergedHeadersWithDefaultUserAgent(_ providedHeaders: [String: String]?) -> [String: String]? {
+        var headers = providedHeaders ?? [:]
+        let settings = context.settingsStore.current()
+
+        if let defaultUserAgent = settings.defaultUserAgent,
+           !defaultUserAgent.isEmpty,
+           !headers.keys.contains(where: { $0.caseInsensitiveCompare("User-Agent") == .orderedSame }) {
+            headers["User-Agent"] = defaultUserAgent
+        }
+
+        return headers.isEmpty ? nil : headers
     }
 
     private func runSettingsGetCommand() -> Int32 {

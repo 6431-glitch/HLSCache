@@ -288,6 +288,10 @@ Settings storage:
 }
 ```
 
+Header precedence for `add`/`register`:
+- If `defaultUserAgent` is set and no `User-Agent` header is provided, the default is applied automatically.
+- If a per-alias `User-Agent` header is provided, it overrides the global default for that alias.
+
 ---
 
 ##Design Principles
