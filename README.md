@@ -286,6 +286,12 @@ swift run HLSCacheCLI clear --all --yes
 swift run HLSCacheCLI clear --all --delete-alias --yes
 ```
 
+Export cached HLS media to MP4:
+
+```bash
+swift run HLSCacheCLI export --alias MD0534 --output /tmp/MD0534.mp4
+```
+
 Persisted CLI settings commands:
 
 ```bash
@@ -313,6 +319,11 @@ Interactive cache operations:
 - Optional prompt to delete alias metadata
 - Destructive confirmation prompt (`--yes`/`yes`) before execution
 - Post-clear verification output includes alias state/count and resulting cache bytes
+
+Export behavior:
+- Validates cached media playlist + segment completeness before remux
+- Returns actionable error when cache is incomplete
+- Uses `ffmpeg` for remux and reports output path + size on success
 
 ---
 
