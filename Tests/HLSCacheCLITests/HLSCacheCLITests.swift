@@ -321,6 +321,33 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     #expect(io.outputLines.contains { $0.contains("Goodbye.") })
 }
 
+@Test func cliProxyMenu_withoutFlags_showsExplicitFeatureGateMessage() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: ["2", "0", "0"])
+    let app = CLIApp(context: context, io: io)
+    app.runInteractive()
+
+    #expect(io.outputLines.contains { $0.contains("[Proxy Server]") })
+    #expect(io.outputLines.contains { $0.contains("Proxy actions are disabled by feature flags.") })
+    #expect(io.outputLines.contains { $0.contains("HLSCACHECLI_PROXY_STATUS_ACTION=1") })
+}
+
+@Test func cliInteractive_containsNoPlaceholderText() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: ["1", "0", "2", "0", "4", "0", "0"])
+    let app = CLIApp(context: context, io: io)
+    app.runInteractive()
+
+    #expect(!io.outputLines.contains { $0.localizedCaseInsensitiveContains("coming soon") })
+    #expect(!io.outputLines.contains { $0.localizedCaseInsensitiveContains("not implemented yet") })
+}
+
 @Test func cliRegisterCommand_registersAsset_andShowsSummary() throws {
     let directory = try makeCLITempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
