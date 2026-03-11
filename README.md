@@ -272,6 +272,11 @@ swift run HLSCacheCLI add \
   --header "Authorization: Bearer <token>"
 ```
 
+Alias monitor screen (interactive):
+- Open `Asset management -> List aliases`.
+- Displays alias, assetID, remote URL, cache bytes, and last-updated timestamp.
+- Press `Enter` to refresh progressively and `q` to return to menu.
+
 Clear cache data from command line (`--yes` is required for non-interactive destructive execution):
 
 ```bash
