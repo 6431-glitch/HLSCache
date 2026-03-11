@@ -4,10 +4,18 @@ import HLSCache
 struct CLIApp {
     private let context: CLIAppContext
     private let io: any CLIIO
+    private let makeExporter: (CLIAppContext) -> CLIExporter
 
-    init(context: CLIAppContext, io: any CLIIO = StandardIO()) {
+    init(
+        context: CLIAppContext,
+        io: any CLIIO = StandardIO(),
+        makeExporter: @escaping (CLIAppContext) -> CLIExporter = { context in
+            CLIExporter(baseDirectory: context.baseDirectory, facade: context.facade)
+        }
+    ) {
         self.context = context
         self.io = io
+        self.makeExporter = makeExporter
     }
 
     @discardableResult
@@ -20,6 +28,8 @@ struct CLIApp {
             return runRegisterCommand(command)
         case let .clearData(command):
             return runClearDataCommand(command, allowPrompt: false)
+        case let .exportMP4(command):
+            return runExportMP4Command(command)
         case .settingsGet:
             return runSettingsGetCommand()
         case let .settingsSetDefaultUserAgent(value):
@@ -434,6 +444,21 @@ struct CLIApp {
         }
 
         return 0
+    }
+
+    private func runExportMP4Command(_ command: ExportMP4Command) -> Int32 {
+        do {
+            let exporter = makeExporter(context)
+            let result = try exporter.export(alias: command.alias, outputURL: command.outputURL)
+            io.writeLine("Export completed successfully.")
+            io.writeLine("Alias: \(command.alias)")
+            io.writeLine("Output: \(result.outputURL.path)")
+            io.writeLine("Output size: \(result.outputBytes) bytes")
+            return 0
+        } catch {
+            io.writeLine(error.localizedDescription)
+            return 1
+        }
     }
 
     private func mergedHeadersWithDefaultUserAgent(_ providedHeaders: [String: String]?) -> [String: String]? {

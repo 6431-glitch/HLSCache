@@ -41,6 +41,7 @@ enum CLICommand: Equatable {
     case interactive
     case register(RegisterAssetCommand)
     case clearData(ClearDataCommand)
+    case exportMP4(ExportMP4Command)
     case settingsGet
     case settingsSetDefaultUserAgent(String)
 }
@@ -61,6 +62,11 @@ struct ClearDataCommand: Equatable {
     let scope: ClearDataScope
     let removeAliasMetadata: Bool
     let bypassConfirmation: Bool
+}
+
+struct ExportMP4Command: Equatable {
+    let alias: String
+    let outputURL: URL
 }
 
 struct CLIArguments: Equatable {
@@ -135,6 +141,10 @@ struct CLIArguments: Equatable {
                 let commandArgs = Array(args[(index + 1)...])
                 command = try parseClearDataCommand(commandArgs)
                 index = args.count
+            case "export":
+                let commandArgs = Array(args[(index + 1)...])
+                command = try parseExportCommand(commandArgs)
+                index = args.count
             case "settings":
                 let commandArgs = Array(args[(index + 1)...])
                 command = try parseSettingsCommand(commandArgs)
@@ -164,6 +174,7 @@ struct CLIArguments: Equatable {
           swift run HLSCacheCLI [options] register --alias <alias> --asset-id <asset-id> --url <remote-url> [--header "Name: Value"]
           swift run HLSCacheCLI [options] clear --alias <alias> [--delete-alias] --yes
           swift run HLSCacheCLI [options] clear --all [--delete-alias] --yes
+          swift run HLSCacheCLI [options] export --alias <alias> --output <file.mp4>
           swift run HLSCacheCLI [options] settings get
           swift run HLSCacheCLI [options] settings set default-user-agent "<value>"
 
@@ -181,6 +192,8 @@ struct CLIArguments: Equatable {
                                    Required: one of --alias <alias> or --all
                                    Optional: --delete-alias to remove alias metadata
                                    Required for non-interactive use: --yes
+          export                    Export cached HLS media to MP4.
+                                   Required: --alias, --output <file.mp4>
           settings get              Show persisted CLI settings.
           settings set default-user-agent "<value>"
                                    Persist global default User-Agent.
@@ -332,6 +345,51 @@ struct CLIArguments: Equatable {
                 scope: scope,
                 removeAliasMetadata: removeAliasMetadata,
                 bypassConfirmation: bypassConfirmation
+            )
+        )
+    }
+
+    private static func parseExportCommand(_ args: [String]) throws -> CLICommand {
+        var alias: String?
+        var output: String?
+
+        var index = 0
+        while index < args.count {
+            let option = args[index]
+            switch option {
+            case "--alias":
+                index += 1
+                guard index < args.count else {
+                    throw CLIArgumentParseError.missingValue(option)
+                }
+                alias = args[index]
+                index += 1
+            case "--output":
+                index += 1
+                guard index < args.count else {
+                    throw CLIArgumentParseError.missingValue(option)
+                }
+                output = args[index]
+                index += 1
+            default:
+                if option.hasPrefix("-") {
+                    throw CLIArgumentParseError.unknownOption(option)
+                }
+                throw CLIArgumentParseError.unknownCommand(option)
+            }
+        }
+
+        guard let alias, !alias.isEmpty else {
+            throw CLIArgumentParseError.missingRequiredArgument("--alias")
+        }
+        guard let output, !output.isEmpty else {
+            throw CLIArgumentParseError.missingRequiredArgument("--output")
+        }
+
+        return .exportMP4(
+            ExportMP4Command(
+                alias: alias,
+                outputURL: URL(fileURLWithPath: output).standardizedFileURL
             )
         )
     }

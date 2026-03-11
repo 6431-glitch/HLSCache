@@ -172,6 +172,27 @@ private func seedCacheBytes(baseDirectory: URL, alias: String, assetID: String) 
     }
 }
 
+@Test func cliArguments_parseExportCommand_withAliasAndOutput() throws {
+    let parsed = try CLIArguments.parse(["export", "--alias", "MDEXPORT", "--output", "/tmp/output.mp4"])
+    #expect(
+        parsed.command == .exportMP4(
+            ExportMP4Command(
+                alias: "MDEXPORT",
+                outputURL: URL(fileURLWithPath: "/tmp/output.mp4").standardizedFileURL
+            )
+        )
+    )
+}
+
+@Test func cliArguments_parseExportCommand_missingOutput_throws() throws {
+    do {
+        _ = try CLIArguments.parse(["export", "--alias", "MDEXPORT"])
+        #expect(Bool(false))
+    } catch let error as CLIArgumentParseError {
+        #expect(error == .missingRequiredArgument("--output"))
+    }
+}
+
 @Test func cliArguments_unknownOption_throws() throws {
     do {
         _ = try CLIArguments.parse(["--wat"])
