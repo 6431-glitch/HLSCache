@@ -5,17 +5,22 @@ struct CLIApp {
     private let context: CLIAppContext
     private let io: any CLIIO
     private let makeExporter: (CLIAppContext) -> CLIExporter
+    private let makeDownloader: (CLIAppContext) -> CLIHLSDownloader
 
     init(
         context: CLIAppContext,
         io: any CLIIO = StandardIO(),
         makeExporter: @escaping (CLIAppContext) -> CLIExporter = { context in
             CLIExporter(baseDirectory: context.baseDirectory, facade: context.facade)
+        },
+        makeDownloader: @escaping (CLIAppContext) -> CLIHLSDownloader = { context in
+            CLIHLSDownloader(baseDirectory: context.baseDirectory, facade: context.facade)
         }
     ) {
         self.context = context
         self.io = io
         self.makeExporter = makeExporter
+        self.makeDownloader = makeDownloader
     }
 
     @discardableResult
@@ -26,6 +31,8 @@ struct CLIApp {
             return 0
         case let .register(command):
             return runRegisterCommand(command)
+        case let .download(command):
+            return runDownloadCommand(command)
         case let .clearData(command):
             return runClearDataCommand(command, allowPrompt: false)
         case let .exportMP4(command):
@@ -454,6 +461,24 @@ struct CLIApp {
             io.writeLine("Alias: \(command.alias)")
             io.writeLine("Output: \(result.outputURL.path)")
             io.writeLine("Output size: \(result.outputBytes) bytes")
+            return 0
+        } catch {
+            io.writeLine(error.localizedDescription)
+            return 1
+        }
+    }
+
+    private func runDownloadCommand(_ command: DownloadCommand) -> Int32 {
+        do {
+            let downloader = makeDownloader(context)
+            let result = try downloader.download(alias: command.alias)
+            io.writeLine("Download completed successfully.")
+            io.writeLine("Alias: \(result.alias)")
+            io.writeLine("Playlists cached: \(result.playlistCount)")
+            io.writeLine("Media playlists: \(result.mediaPlaylistCount)")
+            io.writeLine("Segments cached: \(result.segmentCount)")
+            io.writeLine("Keys cached: \(result.keyCount)")
+            io.writeLine("Bytes written: \(result.bytesWritten)")
             return 0
         } catch {
             io.writeLine(error.localizedDescription)

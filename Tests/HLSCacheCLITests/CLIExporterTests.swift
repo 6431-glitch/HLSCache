@@ -24,7 +24,8 @@ private func seedCachedMediaPlaylist(
     baseDirectory: URL,
     alias: String,
     completeCache: Bool,
-    includeKeyTag: Bool
+    includeKeyTag: Bool,
+    includeKeyData: Bool = false
 ) throws {
     let facade = HLSCacheFacade(baseDirectory: baseDirectory)
     let playlistURL = try #require(URL(string: "https://cdn.example.com/video/media.m3u8"))
@@ -36,6 +37,7 @@ private func seedCachedMediaPlaylist(
 
     let segment1URL = try #require(URL(string: "https://cdn.example.com/video/seg-1.ts"))
     let segment2URL = try #require(URL(string: "https://cdn.example.com/video/seg-2.ts"))
+    let keyURL = try #require(URL(string: "https://cdn.example.com/video/enc.key"))
 
     var playlistLines = [
         "#EXTM3U",
@@ -123,6 +125,26 @@ private func seedCachedMediaPlaylist(
             )
         )
     }
+
+    if includeKeyTag, includeKeyData {
+        let keyData = Data(repeating: 0xAB, count: 16)
+        let keyResourceID = ResourceID(
+            cacheKey: registered.cacheKey,
+            kind: .key,
+            resourceKey: ResourceID.makeResourceKey(from: keyURL)
+        )
+        _ = try diskStore.write(keyData, for: keyResourceID, at: 0)
+        try manifestStore.save(
+            resourceID: keyResourceID,
+            record: ResourceRecord(
+                kind: .key,
+                originalURL: keyURL,
+                contentType: "application/octet-stream",
+                expectedLength: Int64(keyData.count),
+                completedRanges: makeCompletedRanges(Int64(keyData.count))
+            )
+        )
+    }
 }
 
 @Test func exporter_exportCompleteCache_invokesRemuxAndReturnsOutputSize() throws {
@@ -204,9 +226,46 @@ private func seedCachedMediaPlaylist(
     } catch let error as CLIExportError {
         switch error {
         case let .incompleteCache(reason):
-            #expect(reason.contains("encrypted"))
+            #expect(reason.contains("missing or incomplete key"))
         default:
             #expect(Bool(false))
         }
     }
+}
+
+@Test func exporter_exportEncryptedPlaylistWithCachedKey_invokesRemuxAndReturnsOutputSize() throws {
+    let directory = try makeExporterTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedCachedMediaPlaylist(
+        baseDirectory: directory,
+        alias: "MDEXPORT4",
+        completeCache: true,
+        includeKeyTag: true,
+        includeKeyData: true
+    )
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    let outputURL = directory.appendingPathComponent("out/video.mp4")
+    var remuxInvoked = false
+
+    let exporter = CLIExporter(
+        baseDirectory: directory,
+        facade: facade,
+        remuxRunner: { playlistURL, outputURL in
+            remuxInvoked = true
+            let playlistText = try String(contentsOf: playlistURL, encoding: .utf8)
+            #expect(playlistText.contains("key-00000"))
+            #expect(playlistText.contains("segment-00000"))
+            try FileManager.default.createDirectory(
+                at: outputURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data("fake-mp4".utf8).write(to: outputURL)
+        }
+    )
+
+    let result = try exporter.export(alias: "MDEXPORT4", outputURL: outputURL)
+    #expect(remuxInvoked)
+    #expect(result.outputURL == outputURL)
+    #expect(result.outputBytes == 8)
 }
