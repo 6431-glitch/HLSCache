@@ -159,7 +159,15 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(try cache.resourceRecord(for: first) == nil)
     #expect(try cache.resourceRecord(for: second) != nil)
     #expect(try cache.plan(resource: first, requested: try br(0, 6)) == [.network(try br(0, 6))])
-    #expect(logger.events().contains { $0.operation == "evict" })
+    let events = logger.events()
+    let evictEvent = try #require(events.first { $0.operation == "evict" })
+    #expect(evictEvent.level == .warning)
+    #expect(!evictEvent.correlationID.isEmpty)
+    #expect(events.contains {
+        $0.operation == "write"
+            && $0.metadata["cacheKey"] == second.cacheKey.rawValue
+            && $0.correlationID == evictEvent.correlationID
+    })
 }
 
 @Test func coreCache_quotaEviction_evictsWholeAssetGroupNotSingleResource() throws {
@@ -215,10 +223,16 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     _ = try cache.finalizeWrite(resource: resource, expectedLength: 4)
     _ = try cache.plan(resource: resource, requested: try br(0, 4))
 
-    let operations = Set(logger.events().map(\.operation))
-    #expect(operations.contains("write"))
-    #expect(operations.contains("finalizeWrite"))
-    #expect(operations.contains("plan"))
+    let events = logger.events()
+    #expect(events.allSatisfy { !$0.correlationID.isEmpty })
+
+    let writeEvent = try #require(events.first { $0.operation == "write" })
+    let finalizeEvent = try #require(events.first { $0.operation == "finalizeWrite" })
+    let planEvent = try #require(events.first { $0.operation == "plan" })
+
+    #expect(writeEvent.level == .info)
+    #expect(finalizeEvent.level == .info)
+    #expect(planEvent.level == .debug)
 }
 
 @Test func coreCache_finalizeWrite_persistsManifestCrashSafelyAcrossInstances() throws {

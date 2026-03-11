@@ -39,7 +39,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
 
     @discardableResult
     public func startServer(host: String = "127.0.0.1", port: Int = 8080) -> URL {
-        queue.sync(flags: .barrier) {
+        let correlationID = UUID().uuidString
+        return queue.sync(flags: .barrier) {
             if let existing = serverBaseURL {
                 return existing
             }
@@ -51,6 +52,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "startServer",
+                    level: .info,
+                    correlationID: correlationID,
                     metadata: ["host": host, "port": String(resolvedPort)]
                 )
             )
@@ -59,12 +62,15 @@ public final class HLSCacheFacade: @unchecked Sendable {
     }
 
     public func stopServer() {
+        let correlationID = UUID().uuidString
         queue.sync(flags: .barrier) {
             serverBaseURL = nil
             logger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
-                    operation: "stopServer"
+                    operation: "stopServer",
+                    level: .info,
+                    correlationID: correlationID
                 )
             )
         }
@@ -77,11 +83,14 @@ public final class HLSCacheFacade: @unchecked Sendable {
         remoteURL: URL,
         headers: [String: String]? = nil
     ) throws -> AssetRecord {
+        let correlationID = UUID().uuidString
         let record = try aliasRegistry.register(alias: alias, assetID: assetID, remoteURL: remoteURL, headers: headers)
         logger.log(
             StructuredLogEvent(
                 subsystem: "HLSCache",
                 operation: "register",
+                level: .info,
+                correlationID: correlationID,
                 metadata: ["alias": alias, "assetID": assetID]
             )
         )
@@ -90,11 +99,14 @@ public final class HLSCacheFacade: @unchecked Sendable {
 
     @discardableResult
     public func updateRemoteURL(alias: Alias, remoteURL: URL) throws -> AssetRecord {
+        let correlationID = UUID().uuidString
         let updated = try aliasRegistry.updateRemoteURL(alias: alias, remoteURL: remoteURL)
         logger.log(
             StructuredLogEvent(
                 subsystem: "HLSCache",
                 operation: "updateRemoteURL",
+                level: .info,
+                correlationID: correlationID,
                 metadata: ["alias": alias]
             )
         )
@@ -102,6 +114,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
     }
 
     public func proxyURL(for alias: Alias) throws -> URL {
+        let correlationID = UUID().uuidString
         let base = queue.sync { serverBaseURL }
         guard let base else {
             throw HLSCacheError.serverNotRunning
@@ -116,6 +129,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
             StructuredLogEvent(
                 subsystem: "HLSCache",
                 operation: "proxyURL",
+                level: .debug,
+                correlationID: correlationID,
                 metadata: ["alias": alias]
             )
         )
@@ -123,6 +138,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
     }
 
     public func proxyURL(for alias: Alias, kind: ProxyResourceKind, remoteURL: URL) throws -> URL {
+        let correlationID = UUID().uuidString
         let base = queue.sync { serverBaseURL }
         guard let base else {
             throw HLSCacheError.serverNotRunning
@@ -158,6 +174,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
             StructuredLogEvent(
                 subsystem: "HLSCache",
                 operation: "proxyURLResource",
+                level: .debug,
+                correlationID: correlationID,
                 metadata: ["alias": alias, "kind": kind.rawValue]
             )
         )
@@ -165,6 +183,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
     }
 
     public func decodeProxyRequestURL(_ requestURL: URL) throws -> ProxyRoute {
+        let correlationID = UUID().uuidString
         let route = try ProxyRoute.from(url: requestURL)
         guard aliasRegistry.resolve(alias: route.alias) != nil else {
             throw HLSCacheError.aliasNotFound(route.alias)
@@ -173,6 +192,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
             StructuredLogEvent(
                 subsystem: "HLSCache",
                 operation: "decodeProxyRequestURL",
+                level: .debug,
+                correlationID: correlationID,
                 metadata: ["alias": route.alias, "kind": route.kind.rawValue]
             )
         )
@@ -180,6 +201,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
     }
 
     public func cacheInfo(alias: Alias) throws -> CacheInfo {
+        let correlationID = UUID().uuidString
         guard let record = aliasRegistry.resolve(alias: alias) else {
             throw HLSCacheError.aliasNotFound(alias)
         }
@@ -190,6 +212,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
             StructuredLogEvent(
                 subsystem: "HLSCache",
                 operation: "cacheInfo",
+                level: .debug,
+                correlationID: correlationID,
                 metadata: ["alias": alias, "bytes": String(bytes)]
             )
         )
@@ -205,6 +229,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
     }
 
     public func clearCache(alias: Alias? = nil) throws {
+        let correlationID = UUID().uuidString
         try queue.sync(flags: .barrier) {
             if let alias {
                 guard let record = aliasRegistry.resolve(alias: alias) else {
@@ -215,6 +240,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
                     StructuredLogEvent(
                         subsystem: "HLSCache",
                         operation: "clearCache",
+                        level: .warning,
+                        correlationID: correlationID,
                         metadata: ["alias": alias]
                     )
                 )
@@ -226,6 +253,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "clearCache",
+                    level: .warning,
+                    correlationID: correlationID,
                     metadata: ["alias": "all"]
                 )
             )
@@ -234,13 +263,16 @@ public final class HLSCacheFacade: @unchecked Sendable {
 
     @discardableResult
     public func setPlugins(_ plugins: [any HLSCachePlugin]) -> [PluginStamp] {
-        queue.sync(flags: .barrier) {
+        let correlationID = UUID().uuidString
+        return queue.sync(flags: .barrier) {
             self.plugins = plugins
             let pluginStamps = plugins.map { PluginStamp(id: $0.id, version: $0.version) }
             logger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "setPlugins",
+                    level: .info,
+                    correlationID: correlationID,
                     metadata: ["count": String(pluginStamps.count)]
                 )
             )

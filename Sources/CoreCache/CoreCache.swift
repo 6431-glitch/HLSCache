@@ -97,7 +97,8 @@ public final class CoreCache: @unchecked Sendable {
     }
 
     public func plan(resource: ResourceID, requested: ByteRange) throws -> [ReadPlanPart] {
-        try queue.sync {
+        let correlationID = UUID().uuidString
+        return try queue.sync {
             guard requested.length > 0 else {
                 return []
             }
@@ -115,6 +116,8 @@ public final class CoreCache: @unchecked Sendable {
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "plan",
+                    level: .debug,
+                    correlationID: correlationID,
                     metadata: [
                         "cacheKey": resource.cacheKey.rawValue,
                         "kind": resource.kind.rawValue,
@@ -199,7 +202,8 @@ public final class CoreCache: @unchecked Sendable {
         expectedLength: Int64? = nil,
         pluginsApplied: [PluginStamp]? = nil
     ) throws -> ByteRange {
-        try queue.sync(flags: .barrier) {
+        let correlationID = UUID().uuidString
+        return try queue.sync(flags: .barrier) {
             let writtenRange = try diskStore.write(data, for: resource, at: offset)
 
             var record = try manifestStore.load(resourceID: resource) ?? ResourceRecord(kind: resource.kind)
@@ -217,11 +221,13 @@ public final class CoreCache: @unchecked Sendable {
 
             record.touch()
             try manifestStore.save(resourceID: resource, record: record)
-            try enforceDiskQuotaIfNeeded()
+            try enforceDiskQuotaIfNeeded(correlationID: correlationID)
             logger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "write",
+                    level: .info,
+                    correlationID: correlationID,
                     metadata: [
                         "cacheKey": resource.cacheKey.rawValue,
                         "kind": resource.kind.rawValue,
@@ -235,12 +241,15 @@ public final class CoreCache: @unchecked Sendable {
     }
 
     public func read(resource: ResourceID, range: ByteRange) throws -> Data {
-        try queue.sync {
+        let correlationID = UUID().uuidString
+        return try queue.sync {
             let data = try diskStore.read(resourceID: resource, range: range)
             logger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "read",
+                    level: .debug,
+                    correlationID: correlationID,
                     metadata: [
                         "cacheKey": resource.cacheKey.rawValue,
                         "kind": resource.kind.rawValue,
@@ -260,7 +269,8 @@ public final class CoreCache: @unchecked Sendable {
         expectedLength: Int64? = nil,
         pluginsApplied: [PluginStamp]? = nil
     ) throws -> ResourceRecord {
-        try queue.sync(flags: .barrier) {
+        let correlationID = UUID().uuidString
+        return try queue.sync(flags: .barrier) {
             var record = try manifestStore.load(resourceID: resource) ?? ResourceRecord(kind: resource.kind)
 
             if let expectedLength {
@@ -274,11 +284,13 @@ public final class CoreCache: @unchecked Sendable {
 
             record.touch()
             try manifestStore.save(resourceID: resource, record: record)
-            try enforceDiskQuotaIfNeeded()
+            try enforceDiskQuotaIfNeeded(correlationID: correlationID)
             logger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "finalizeWrite",
+                    level: .info,
+                    correlationID: correlationID,
                     metadata: [
                         "cacheKey": resource.cacheKey.rawValue,
                         "kind": resource.kind.rawValue
@@ -336,7 +348,7 @@ public final class CoreCache: @unchecked Sendable {
         }
     }
 
-    private func enforceDiskQuotaIfNeeded() throws {
+    private func enforceDiskQuotaIfNeeded(correlationID: String) throws {
         guard let diskQuotaBytes else {
             return
         }
@@ -406,6 +418,8 @@ public final class CoreCache: @unchecked Sendable {
                     StructuredLogEvent(
                         subsystem: "CoreCache",
                         operation: "evict",
+                        level: .warning,
+                        correlationID: correlationID,
                         metadata: [
                             "cacheKey": resource.cacheKey.rawValue,
                             "kind": resource.kind.rawValue,
