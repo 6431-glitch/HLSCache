@@ -32,6 +32,8 @@ private func makeCoordinatorResourceID() throws -> ResourceID {
         },
         emit: { _ in }
     )
+    let initialRecord = try #require(try cache.resourceRecord(for: resourceID))
+    #expect(initialRecord.pluginsApplied.isEmpty)
 
     let diskStore = DiskStore(baseDirectory: directory)
     let fileURL = diskStore.dataFileURL(for: resourceID)
@@ -117,6 +119,9 @@ private func makeCoordinatorResourceID() throws -> ResourceID {
 
     #expect(firstFetches == 1)
     #expect(firstPayload == Data(originData[0..<256]))
+    let stamp = PluginStamp(id: "encrypt-at-rest", version: "1.0.0")
+    let firstRecord = try #require(try cache.resourceRecord(for: resourceID))
+    #expect(firstRecord.pluginsApplied == [stamp])
 
     let diskStore = DiskStore(baseDirectory: directory)
     let storedData = try diskStore.read(resourceID: resourceID, range: try #require(ByteRange(start: 0, endExclusive: 256)))
@@ -137,4 +142,6 @@ private func makeCoordinatorResourceID() throws -> ResourceID {
 
     #expect(secondFetches == 0)
     #expect(secondPayload == Data(originData[0..<256]))
+    let secondRecord = try #require(try cache.resourceRecord(for: resourceID))
+    #expect(secondRecord.pluginsApplied == [stamp])
 }

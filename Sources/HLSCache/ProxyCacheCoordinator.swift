@@ -74,7 +74,8 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                     resource: resourceID,
                     at: range.start,
                     contentType: contentType,
-                    expectedLength: totalLength
+                    expectedLength: totalLength,
+                    pluginsApplied: writeProcessor.pluginStamps
                 )
                 try emit(networkData)
                 chunks.append(ProxyStreamChunk(source: .network, range: range, byteCount: networkData.count))
@@ -121,7 +122,8 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                     resource: resourceID,
                     at: missingRange.start,
                     contentType: contentType,
-                    expectedLength: totalLength
+                    expectedLength: totalLength,
+                    pluginsApplied: missingWriteProcessor.pluginStamps
                 )
                 try emit(networkData)
                 chunks.append(ProxyStreamChunk(source: .network, range: missingRange, byteCount: networkData.count))

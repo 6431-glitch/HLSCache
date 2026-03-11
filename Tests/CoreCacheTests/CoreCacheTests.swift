@@ -154,12 +154,20 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
 
     let first = CoreCache(baseDirectory: directory)
     let resource = try makeCoreCacheResourceID(suffix: "persisted.ts")
+    let stamp = PluginStamp(id: "encrypt-at-rest", version: "1.0.0")
 
-    _ = try first.write(Data("01234567".utf8), resource: resource, at: 0, contentType: "video/mp2t")
-    let finalized = try first.finalizeWrite(resource: resource, expectedLength: 20)
+    _ = try first.write(
+        Data("01234567".utf8),
+        resource: resource,
+        at: 0,
+        contentType: "video/mp2t",
+        pluginsApplied: [stamp]
+    )
+    let finalized = try first.finalizeWrite(resource: resource, expectedLength: 20, pluginsApplied: [stamp])
 
     #expect(finalized.expectedLength == 20)
     #expect(finalized.completedRanges.contains(try br(0, 8)))
+    #expect(finalized.pluginsApplied == [stamp])
 
     let second = CoreCache(baseDirectory: directory)
     let restored = try #require(try second.resourceRecord(for: resource))
@@ -167,6 +175,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(restored.expectedLength == 20)
     #expect(restored.contentType == "video/mp2t")
     #expect(restored.completedRanges.contains(try br(0, 8)))
+    #expect(restored.pluginsApplied == [stamp])
 }
 
 @Test func coreCache_concurrencySmoke_planAndWriteAreThreadSafe() async throws {
