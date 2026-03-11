@@ -183,6 +183,7 @@ BaseDirectory/
 Each resource has:
 - Binary data file
 - JSON manifest (ResourceRecord)
+  Includes `pluginsApplied` stamps (`id` + `version`) for transform compatibility tracking.
 
 Manifests are written atomically (temp file + replace).
 

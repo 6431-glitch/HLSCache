@@ -69,7 +69,8 @@ public final class CoreCache: @unchecked Sendable {
         resource: ResourceID,
         at offset: Int64,
         contentType: String? = nil,
-        expectedLength: Int64? = nil
+        expectedLength: Int64? = nil,
+        pluginsApplied: [PluginStamp]? = nil
     ) throws -> ByteRange {
         try queue.sync(flags: .barrier) {
             let writtenRange = try diskStore.write(data, for: resource, at: offset)
@@ -82,6 +83,9 @@ public final class CoreCache: @unchecked Sendable {
             }
             if let contentType {
                 record.contentType = contentType
+            }
+            if let pluginsApplied {
+                record.pluginsApplied = pluginsApplied
             }
 
             record.touch()
@@ -124,7 +128,11 @@ public final class CoreCache: @unchecked Sendable {
     }
 
     @discardableResult
-    public func finalizeWrite(resource: ResourceID, expectedLength: Int64? = nil) throws -> ResourceRecord {
+    public func finalizeWrite(
+        resource: ResourceID,
+        expectedLength: Int64? = nil,
+        pluginsApplied: [PluginStamp]? = nil
+    ) throws -> ResourceRecord {
         try queue.sync(flags: .barrier) {
             var record = try manifestStore.load(resourceID: resource) ?? ResourceRecord(kind: resource.kind)
 
@@ -132,6 +140,9 @@ public final class CoreCache: @unchecked Sendable {
                 record.expectedLength = expectedLength
             } else if record.expectedLength == nil {
                 record.expectedLength = try diskStore.fileLength(for: resource)
+            }
+            if let pluginsApplied {
+                record.pluginsApplied = pluginsApplied
             }
 
             record.touch()
