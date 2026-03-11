@@ -6,7 +6,6 @@ struct CLIApp {
     private let io: any CLIIO
     private let makeExporter: (CLIAppContext) -> CLIExporter
     private let makeDownloader: (CLIAppContext) -> CLIHLSDownloader
-    private let environmentProvider: () -> [String: String]
 
     init(
         context: CLIAppContext,
@@ -16,14 +15,12 @@ struct CLIApp {
         },
         makeDownloader: @escaping (CLIAppContext) -> CLIHLSDownloader = { context in
             CLIHLSDownloader(baseDirectory: context.baseDirectory, facade: context.facade)
-        },
-        environmentProvider: @escaping () -> [String: String] = { ProcessInfo.processInfo.environment }
+        }
     ) {
         self.context = context
         self.io = io
         self.makeExporter = makeExporter
         self.makeDownloader = makeDownloader
-        self.environmentProvider = environmentProvider
     }
 
     @discardableResult
@@ -127,6 +124,7 @@ struct CLIApp {
         while !shouldReturn {
             io.writeLine("")
             io.writeLine("[Proxy Server]")
+            // Decision path for HLS-90: runtime is ready, so proxy actions stay visible by default.
             let runtimeStatus = context.facade.proxyStatus()
             if let baseURL = runtimeStatus.baseURL {
                 io.writeLine("Proxy base URL: \(baseURL.absoluteString)")
@@ -134,19 +132,8 @@ struct CLIApp {
                 io.writeLine("Proxy base URL: (unavailable)")
             }
 
-            let statusEnabled = isFeatureFlagEnabled("HLSCACHECLI_PROXY_STATUS_ACTION")
-            let restartEnabled = isFeatureFlagEnabled("HLSCACHECLI_PROXY_RESTART_ACTION")
-
-            if statusEnabled {
-                io.writeLine("1) Show proxy status")
-            }
-            if restartEnabled {
-                io.writeLine("2) Restart proxy server")
-            }
-            if !statusEnabled, !restartEnabled {
-                io.writeLine("Proxy actions are disabled by feature flags.")
-                io.writeLine("Set HLSCACHECLI_PROXY_STATUS_ACTION=1 and/or HLSCACHECLI_PROXY_RESTART_ACTION=1 to enable.")
-            }
+            io.writeLine("1) Show proxy status")
+            io.writeLine("2) Restart proxy server")
 
             io.writeLine("0) Back")
             io.writeLine("Choose an option:")
@@ -159,9 +146,9 @@ struct CLIApp {
             switch selection.lowercased() {
             case "0", "b", "back":
                 shouldReturn = true
-            case "1" where statusEnabled:
+            case "1":
                 runProxyStatusAction()
-            case "2" where restartEnabled:
+            case "2":
                 runProxyRestartAction()
             default:
                 io.writeLine("Invalid selection '\(selection)'. Enter 0 to go back.")
@@ -640,20 +627,6 @@ struct CLIApp {
             return false
         default:
             return defaultValue
-        }
-    }
-
-    private func isFeatureFlagEnabled(_ name: String) -> Bool {
-        guard let raw = environmentProvider()[name]?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !raw.isEmpty else {
-            return false
-        }
-
-        switch raw.lowercased() {
-        case "1", "true", "yes", "on":
-            return true
-        default:
-            return false
         }
     }
 
