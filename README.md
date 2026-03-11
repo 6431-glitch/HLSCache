@@ -129,8 +129,10 @@ All HTTP responses follow correct Range semantics, including:
 4. On completion:
    - Files are atomically moved into CoreCache storage
    - Manifest is updated
+   - Completed task mapping is removed from persistent task registry
 5. On relaunch:
-   - Incomplete downloads resume automatically
+   - Active task mappings are restored from persistent task registry
+   - Stale task mappings are pruned
 
 ProxyServer is not required to remain active during background downloading.
 
