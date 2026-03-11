@@ -355,6 +355,59 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     #expect(io.outputLines.contains { $0.contains("HLSCACHECLI_PROXY_STATUS_ACTION=1") })
 }
 
+@Test func cliProxyMenu_statusAction_reportsRuntimeMetadataWhenRunning() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    _ = try context.facade.register(
+        alias: "MDPROXY1",
+        assetID: "asset-proxy-1",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/proxy-1.m3u8"))
+    )
+
+    let io = FakeIO(inputs: ["2", "1", "0", "0"])
+    let app = CLIApp(
+        context: context,
+        io: io,
+        environmentProvider: { ["HLSCACHECLI_PROXY_STATUS_ACTION": "1"] }
+    )
+    app.runInteractive()
+
+    #expect(io.outputLines.contains { $0.contains("[Proxy Server]") })
+    #expect(io.outputLines.contains { $0.contains("Proxy status:") })
+    #expect(io.outputLines.contains { $0.contains("State: running") })
+    #expect(io.outputLines.contains { $0.contains("Host: 127.0.0.1") })
+    #expect(io.outputLines.contains { $0.contains("Port: 8080") })
+    #expect(io.outputLines.contains { $0.contains("Base URL: http://127.0.0.1:8080") })
+    #expect(io.outputLines.contains { $0.contains("Registered aliases: 1") })
+}
+
+@Test func cliProxyMenu_statusAction_whenProxyUnavailable_isExplicitAndNonCrashing() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    context.facade.stopServer()
+
+    let io = FakeIO(inputs: ["2", "1", "0", "0"])
+    let app = CLIApp(
+        context: context,
+        io: io,
+        environmentProvider: { ["HLSCACHECLI_PROXY_STATUS_ACTION": "1"] }
+    )
+    app.runInteractive()
+
+    #expect(io.outputLines.contains { $0.contains("Proxy base URL: (unavailable)") })
+    #expect(io.outputLines.contains { $0.contains("Proxy status:") })
+    #expect(io.outputLines.contains { $0.contains("State: stopped") })
+    #expect(io.outputLines.contains { $0.contains("Host: (unavailable)") })
+    #expect(io.outputLines.contains { $0.contains("Port: (unavailable)") })
+    #expect(io.outputLines.contains { $0.contains("Base URL: (unavailable)") })
+    #expect(io.outputLines.contains { $0.contains("Proxy server is not running.") })
+    #expect(io.outputLines.contains { $0.contains("Goodbye.") })
+}
+
 @Test func cliInteractive_containsNoPlaceholderText() throws {
     let directory = try makeCLITempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }

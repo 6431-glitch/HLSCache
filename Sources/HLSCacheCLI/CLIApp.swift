@@ -6,6 +6,7 @@ struct CLIApp {
     private let io: any CLIIO
     private let makeExporter: (CLIAppContext) -> CLIExporter
     private let makeDownloader: (CLIAppContext) -> CLIHLSDownloader
+    private let environmentProvider: () -> [String: String]
 
     init(
         context: CLIAppContext,
@@ -15,12 +16,14 @@ struct CLIApp {
         },
         makeDownloader: @escaping (CLIAppContext) -> CLIHLSDownloader = { context in
             CLIHLSDownloader(baseDirectory: context.baseDirectory, facade: context.facade)
-        }
+        },
+        environmentProvider: @escaping () -> [String: String] = { ProcessInfo.processInfo.environment }
     ) {
         self.context = context
         self.io = io
         self.makeExporter = makeExporter
         self.makeDownloader = makeDownloader
+        self.environmentProvider = environmentProvider
     }
 
     @discardableResult
@@ -124,7 +127,12 @@ struct CLIApp {
         while !shouldReturn {
             io.writeLine("")
             io.writeLine("[Proxy Server]")
-            io.writeLine("Proxy base URL: \(context.serverBaseURL.absoluteString)")
+            let runtimeStatus = context.facade.proxyStatus()
+            if let baseURL = runtimeStatus.baseURL {
+                io.writeLine("Proxy base URL: \(baseURL.absoluteString)")
+            } else {
+                io.writeLine("Proxy base URL: (unavailable)")
+            }
 
             let statusEnabled = isFeatureFlagEnabled("HLSCACHECLI_PROXY_STATUS_ACTION")
             let restartEnabled = isFeatureFlagEnabled("HLSCACHECLI_PROXY_RESTART_ACTION")
@@ -291,10 +299,16 @@ struct CLIApp {
     }
 
     private func runProxyStatusAction() {
+        let status = context.facade.proxyStatus()
         let aliasCount = context.facade.listAliases().count
         io.writeLine("Proxy status:")
-        io.writeLine("State: running")
-        io.writeLine("Base URL: \(context.serverBaseURL.absoluteString)")
+        io.writeLine("State: \(status.isRunning ? "running" : "stopped")")
+        io.writeLine("Host: \(status.host ?? "(unavailable)")")
+        io.writeLine("Port: \(status.port.map(String.init) ?? "(unavailable)")")
+        io.writeLine("Base URL: \(status.baseURL?.absoluteString ?? "(unavailable)")")
+        if !status.isRunning {
+            io.writeLine("Proxy server is not running.")
+        }
         io.writeLine("Registered aliases: \(aliasCount)")
     }
 
@@ -603,7 +617,7 @@ struct CLIApp {
     }
 
     private func isFeatureFlagEnabled(_ name: String) -> Bool {
-        guard let raw = ProcessInfo.processInfo.environment[name]?.trimmingCharacters(in: .whitespacesAndNewlines),
+        guard let raw = environmentProvider()[name]?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty else {
             return false
         }
