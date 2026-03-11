@@ -17,6 +17,10 @@ struct CLIApp {
             return 0
         case let .register(command):
             return runRegisterCommand(command)
+        case .settingsGet:
+            return runSettingsGetCommand()
+        case let .settingsSetDefaultUserAgent(value):
+            return runSettingsSetDefaultUserAgentCommand(value)
         }
     }
 
@@ -48,13 +52,7 @@ struct CLIApp {
                     ]
                 )
             case "3":
-                runSubflow(
-                    title: "Settings",
-                    options: [
-                        "1) Show settings file path",
-                        "2) Edit default User-Agent (coming soon)"
-                    ]
-                )
+                runSettingsSubflow()
             case "4":
                 runSubflow(
                     title: "Cache Operations",
@@ -105,6 +103,39 @@ struct CLIApp {
                 runInteractiveRegisterAssetFlow()
             case "2":
                 io.writeLine("Option 2 in Asset Management is not implemented yet.")
+            default:
+                io.writeLine("Invalid selection '\(selection)'. Enter 0 to go back.")
+            }
+        }
+    }
+
+    private func runSettingsSubflow() {
+        var shouldReturn = false
+        while !shouldReturn {
+            io.writeLine("")
+            io.writeLine("[Settings]")
+            io.writeLine("1) Show settings")
+            io.writeLine("2) Set default User-Agent")
+            io.writeLine("0) Back")
+            io.writeLine("Choose an option:")
+
+            guard let selection = normalizedInput() else {
+                io.writeLine("Input stream closed. Returning to main menu.")
+                return
+            }
+
+            switch selection.lowercased() {
+            case "0", "b", "back":
+                shouldReturn = true
+            case "1":
+                _ = runSettingsGetCommand()
+            case "2":
+                io.writeLine("Default User-Agent value:")
+                guard let value = normalizedInput() else {
+                    io.writeLine("Input stream closed. Returning to settings menu.")
+                    continue
+                }
+                _ = runSettingsSetDefaultUserAgentCommand(value)
             default:
                 io.writeLine("Invalid selection '\(selection)'. Enter 0 to go back.")
             }
@@ -225,6 +256,30 @@ struct CLIApp {
             return 0
         } catch {
             io.writeLine("Failed to register asset: \(error.localizedDescription)")
+            return 1
+        }
+    }
+
+    private func runSettingsGetCommand() -> Int32 {
+        let settings = context.settingsStore.current()
+        io.writeLine("Settings file: \(context.settingsFileURL.path)")
+        if let userAgent = settings.defaultUserAgent, !userAgent.isEmpty {
+            io.writeLine("defaultUserAgent: \(userAgent)")
+        } else {
+            io.writeLine("defaultUserAgent: (unset)")
+        }
+        return 0
+    }
+
+    private func runSettingsSetDefaultUserAgentCommand(_ value: String) -> Int32 {
+        do {
+            let settings = try context.settingsStore.setDefaultUserAgent(value)
+            io.writeLine("Settings updated.")
+            io.writeLine("Settings file: \(context.settingsFileURL.path)")
+            io.writeLine("defaultUserAgent: \(settings.defaultUserAgent ?? "")")
+            return 0
+        } catch {
+            io.writeLine(error.localizedDescription)
             return 1
         }
     }
