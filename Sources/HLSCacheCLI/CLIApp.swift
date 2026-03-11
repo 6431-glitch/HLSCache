@@ -302,24 +302,51 @@ struct CLIApp {
         let status = context.facade.proxyStatus()
         let aliasCount = context.facade.listAliases().count
         io.writeLine("Proxy status:")
-        io.writeLine("State: \(status.isRunning ? "running" : "stopped")")
-        io.writeLine("Host: \(status.host ?? "(unavailable)")")
-        io.writeLine("Port: \(status.port.map(String.init) ?? "(unavailable)")")
-        io.writeLine("Base URL: \(status.baseURL?.absoluteString ?? "(unavailable)")")
+        writeProxyStatusContext(status)
         if !status.isRunning {
             io.writeLine("Proxy server is not running.")
         }
         io.writeLine("Registered aliases: \(aliasCount)")
     }
 
-    private func runProxyRestartAction() {
+    @discardableResult
+    private func runProxyRestartAction() -> Int32 {
+        let before = context.facade.proxyStatus()
+        io.writeLine("Restarting proxy server...")
+        io.writeLine("Before restart:")
+        writeProxyStatusContext(before)
+
         context.facade.stopServer()
+
+        let restartHost = before.host ?? context.serverBaseURL.host ?? CLIArguments.defaultHost
+        let restartPort = before.port ?? context.serverBaseURL.port ?? CLIArguments.defaultPort
         let restarted = context.facade.startServer(
-            host: context.serverBaseURL.host ?? CLIArguments.defaultHost,
-            port: context.serverBaseURL.port ?? CLIArguments.defaultPort
+            host: restartHost,
+            port: restartPort
         )
+        let after = context.facade.proxyStatus()
+
+        guard after.isRunning else {
+            io.writeLine("Failed to restart proxy server.")
+            io.writeLine("Attempted host: \(restartHost)")
+            io.writeLine("Attempted port: \(restartPort)")
+            io.writeLine("Current base URL: \(after.baseURL?.absoluteString ?? "(unavailable)")")
+            io.writeLine("Action: verify runtime configuration and try again.")
+            return 1
+        }
+
         io.writeLine("Proxy server restarted.")
-        io.writeLine("Base URL: \(restarted.absoluteString)")
+        io.writeLine("After restart:")
+        writeProxyStatusContext(after)
+        io.writeLine("Resolved base URL: \(restarted.absoluteString)")
+        return 0
+    }
+
+    private func writeProxyStatusContext(_ status: ProxyServerStatus) {
+        io.writeLine("State: \(status.isRunning ? "running" : "stopped")")
+        io.writeLine("Host: \(status.host ?? "(unavailable)")")
+        io.writeLine("Port: \(status.port.map(String.init) ?? "(unavailable)")")
+        io.writeLine("Base URL: \(status.baseURL?.absoluteString ?? "(unavailable)")")
     }
 
     private func runInteractiveRegisterAssetFlow() {
