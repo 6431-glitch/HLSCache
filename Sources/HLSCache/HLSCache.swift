@@ -113,6 +113,21 @@ public final class HLSCacheFacade: @unchecked Sendable {
         return updated
     }
 
+    public func listAliases() -> [AssetRecord] {
+        let correlationID = UUID().uuidString
+        let records = aliasRegistry.allRecords()
+        logger.log(
+            StructuredLogEvent(
+                subsystem: "HLSCache",
+                operation: "listAliases",
+                level: .debug,
+                correlationID: correlationID,
+                metadata: ["count": String(records.count)]
+            )
+        )
+        return records
+    }
+
     public func proxyURL(for alias: Alias) throws -> URL {
         let correlationID = UUID().uuidString
         let base = queue.sync { serverBaseURL }

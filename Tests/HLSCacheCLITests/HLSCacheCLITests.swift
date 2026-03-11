@@ -340,3 +340,58 @@ private func makeCLITempDirectory() throws -> URL {
     #expect(io.outputLines.contains { $0.contains("Invalid URL 'invalid-url'") })
     #expect(io.outputLines.contains { $0.contains("Asset registered successfully.") })
 }
+
+@Test func cliAssetManagement_listAliases_showsMetadataAndQReturnsToMenu() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    _ = try context.facade.register(
+        alias: "MDLIST1",
+        assetID: "asset-list-1",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/list-1.m3u8"))
+    )
+
+    let io = FakeIO(inputs: [
+        "1", // Asset management
+        "2", // List aliases
+        "q", // Return from list
+        "0", // Back from asset management
+        "0" // Exit
+    ])
+    let app = CLIApp(context: context, io: io)
+    app.runInteractive()
+
+    #expect(io.outputLines.contains { $0.contains("[Alias List]") })
+    #expect(io.outputLines.contains { $0.contains("MDLIST1 | assetID=asset-list-1") })
+    #expect(io.outputLines.contains { $0.contains("remote=https://cdn.example.com/list-1.m3u8") })
+    #expect(io.outputLines.contains { $0.contains("Main Menu") })
+}
+
+@Test func cliAssetManagement_listAliases_enterRefreshesWithoutNestedLoops() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    _ = try context.facade.register(
+        alias: "MDLIST2",
+        assetID: "asset-list-2",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/list-2.m3u8"))
+    )
+
+    let io = FakeIO(inputs: [
+        "1", // Asset management
+        "2", // List aliases
+        "", // Refresh list
+        "q", // Return from list
+        "0", // Back from asset management
+        "0" // Exit
+    ])
+    let app = CLIApp(context: context, io: io)
+    app.runInteractive()
+
+    let listHeaderCount = io.outputLines.filter { $0 == "[Alias List]" }.count
+    #expect(listHeaderCount >= 2)
+    #expect(io.outputLines.contains { $0.contains("Press Enter to refresh, or q to return.") })
+    #expect(io.outputLines.contains { $0.contains("Goodbye.") })
+}
