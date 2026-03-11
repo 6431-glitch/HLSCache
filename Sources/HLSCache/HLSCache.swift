@@ -277,6 +277,45 @@ public final class HLSCacheFacade: @unchecked Sendable {
     }
 
     @discardableResult
+    public func removeAlias(alias: Alias) throws -> AssetRecord {
+        let correlationID = UUID().uuidString
+        do {
+            let removed = try aliasRegistry.unregister(alias: alias)
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "removeAlias",
+                    level: .warning,
+                    correlationID: correlationID,
+                    metadata: ["alias": alias]
+                )
+            )
+            return removed
+        } catch let error as AliasRegistryError {
+            switch error {
+            case let .aliasNotFound(missingAlias):
+                throw HLSCacheError.aliasNotFound(missingAlias)
+            }
+        }
+    }
+
+    @discardableResult
+    public func removeAllAliases() throws -> Int {
+        let correlationID = UUID().uuidString
+        let removedCount = try aliasRegistry.unregisterAll()
+        logger.log(
+            StructuredLogEvent(
+                subsystem: "HLSCache",
+                operation: "removeAllAliases",
+                level: .warning,
+                correlationID: correlationID,
+                metadata: ["count": String(removedCount)]
+            )
+        )
+        return removedCount
+    }
+
+    @discardableResult
     public func setPlugins(_ plugins: [any HLSCachePlugin]) -> [PluginStamp] {
         let correlationID = UUID().uuidString
         return queue.sync(flags: .barrier) {
@@ -381,8 +420,22 @@ public func cacheInfo(alias: Alias) throws -> CacheInfo {
     try sharedFacade.cacheInfo(alias: alias)
 }
 
+public func listAliases() -> [AssetRecord] {
+    sharedFacade.listAliases()
+}
+
 public func clearCache(alias: Alias? = nil) throws {
     try sharedFacade.clearCache(alias: alias)
+}
+
+@discardableResult
+public func removeAlias(alias: Alias) throws -> AssetRecord {
+    try sharedFacade.removeAlias(alias: alias)
+}
+
+@discardableResult
+public func removeAllAliases() throws -> Int {
+    try sharedFacade.removeAllAliases()
 }
 
 @discardableResult

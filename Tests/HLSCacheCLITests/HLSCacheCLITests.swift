@@ -1,4 +1,6 @@
+import CoreCache
 import Foundation
+import HLSCache
 import Testing
 @testable import HLSCacheCLI
 
@@ -32,6 +34,24 @@ private func makeCLITempDirectory() throws -> URL {
         .appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     return directory
+}
+
+private func seedCacheBytes(baseDirectory: URL, alias: String, assetID: String) throws {
+    let facade = HLSCacheFacade(baseDirectory: baseDirectory)
+    let record = try facade.register(
+        alias: alias,
+        assetID: assetID,
+        remoteURL: try #require(URL(string: "https://cdn.example.com/\(alias).m3u8"))
+    )
+
+    let coreCache = CoreCache(baseDirectory: baseDirectory)
+    let resource = ResourceID(
+        cacheKey: record.cacheKey,
+        kind: .segment,
+        resourceKey: ResourceID.makeResourceKey(from: "https://cdn.example.com/\(alias)-seg-1.ts")
+    )
+    _ = try coreCache.write(Data(repeating: 7, count: 256), resource: resource, at: 0)
+    _ = try coreCache.finalizeWrite(resource: resource, expectedLength: 256)
 }
 
 @Test func cliArguments_defaults_whenNoOptionsProvided() throws {
@@ -127,6 +147,28 @@ private func makeCLITempDirectory() throws -> URL {
         #expect(Bool(false))
     } catch let error as CLIArgumentParseError {
         #expect(error == .missingRequiredArgument("settings set default-user-agent <value>"))
+    }
+}
+
+@Test func cliArguments_parseClearDataCommand_withAliasDeleteAndYes() throws {
+    let parsed = try CLIArguments.parse(["clear", "--alias", "MDCLR1", "--delete-alias", "--yes"])
+    #expect(
+        parsed.command == .clearData(
+            ClearDataCommand(
+                scope: .alias("MDCLR1"),
+                removeAliasMetadata: true,
+                bypassConfirmation: true
+            )
+        )
+    )
+}
+
+@Test func cliArguments_parseClearDataCommand_missingScope_throws() throws {
+    do {
+        _ = try CLIArguments.parse(["clear", "--yes"])
+        #expect(Bool(false))
+    } catch let error as CLIArgumentParseError {
+        #expect(error == .missingRequiredArgument("--alias <alias> or --all"))
     }
 }
 
@@ -339,6 +381,76 @@ private func makeCLITempDirectory() throws -> URL {
     #expect(io.outputLines.contains { $0.contains("Alias is required.") })
     #expect(io.outputLines.contains { $0.contains("Invalid URL 'invalid-url'") })
     #expect(io.outputLines.contains { $0.contains("Asset registered successfully.") })
+}
+
+@Test func cliClearCommand_requiresYesFlag_forNonInteractiveExecution() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedCacheBytes(baseDirectory: directory, alias: "MDNOYES", assetID: "asset-no-yes")
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let exitCode = app.run(
+        command: .clearData(
+            ClearDataCommand(scope: .alias("MDNOYES"), removeAliasMetadata: false, bypassConfirmation: false)
+        )
+    )
+
+    #expect(exitCode == 1)
+    #expect(io.outputLines.contains { $0.contains("Re-run with --yes") })
+    #expect(context.facade.listAliases().contains { $0.alias == "MDNOYES" })
+    let info = try context.facade.cacheInfo(alias: "MDNOYES")
+    #expect(info.totalBytesOnDisk > 0)
+}
+
+@Test func cliClearCommand_aliasWithDelete_removesCacheAndMetadata() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedCacheBytes(baseDirectory: directory, alias: "MDCLR2", assetID: "asset-clr-2")
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let exitCode = app.run(
+        command: .clearData(
+            ClearDataCommand(scope: .alias("MDCLR2"), removeAliasMetadata: true, bypassConfirmation: true)
+        )
+    )
+
+    #expect(exitCode == 0)
+    #expect(io.outputLines.contains { $0.contains("Cleared cache for alias 'MDCLR2'.") })
+    #expect(io.outputLines.contains { $0.contains("Alias metadata removed for 'MDCLR2'.") })
+    #expect(io.outputLines.contains { $0.contains("Alias state: removed") })
+    #expect(!context.facade.listAliases().contains { $0.alias == "MDCLR2" })
+}
+
+@Test func cliInteractiveCacheClear_promptsAndCanCancel() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedCacheBytes(baseDirectory: directory, alias: "MDCANCEL", assetID: "asset-cancel")
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [
+        "4", // Cache operations
+        "1", // Clear by alias
+        "MDCANCEL",
+        "n", // Do not delete alias metadata
+        "no", // Cancel destructive confirmation
+        "0", // back
+        "0" // exit
+    ])
+    let app = CLIApp(context: context, io: io)
+    app.runInteractive()
+
+    #expect(io.outputLines.contains { $0.contains("[Cache Operations]") })
+    #expect(io.outputLines.contains { $0.contains("Type '--yes' to confirm") })
+    #expect(io.outputLines.contains { $0.contains("Clear operation cancelled.") })
+
+    let info = try context.facade.cacheInfo(alias: "MDCANCEL")
+    #expect(info.totalBytesOnDisk > 0)
 }
 
 @Test func cliAssetManagement_listAliases_showsMetadataAndQReturnsToMenu() throws {

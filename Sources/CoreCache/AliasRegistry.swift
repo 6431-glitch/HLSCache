@@ -134,6 +134,29 @@ public final class AliasRegistry: @unchecked Sendable {
         }
     }
 
+    /// Removes a single alias record from the registry.
+    @discardableResult
+    public func unregister(alias: Alias) throws -> AssetRecord {
+        try queue.sync(flags: .barrier) {
+            guard let removed = records.removeValue(forKey: alias) else {
+                throw AliasRegistryError.aliasNotFound(alias)
+            }
+            try saveToDiskAtomic()
+            return removed
+        }
+    }
+
+    /// Removes every alias record from the registry.
+    @discardableResult
+    public func unregisterAll() throws -> Int {
+        try queue.sync(flags: .barrier) {
+            let count = records.count
+            records.removeAll(keepingCapacity: false)
+            try saveToDiskAtomic()
+            return count
+        }
+    }
+
     private func loadFromDisk() {
         do {
             try fileManager.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
