@@ -5,7 +5,76 @@ public enum ReadPlanPart: Equatable, Sendable {
     case network(ByteRange)
 }
 
+public struct AssetCacheCompletionMetric: Equatable, Sendable {
+    public let cacheKey: CacheKey
+    public let resourceCount: Int
+    public let completedBytes: Int64
+    public let expectedBytes: Int64
+    public let completionRatio: Double
+
+    public init(
+        cacheKey: CacheKey,
+        resourceCount: Int,
+        completedBytes: Int64,
+        expectedBytes: Int64,
+        completionRatio: Double
+    ) {
+        self.cacheKey = cacheKey
+        self.resourceCount = resourceCount
+        self.completedBytes = completedBytes
+        self.expectedBytes = expectedBytes
+        self.completionRatio = completionRatio
+    }
+}
+
+public struct CoreCacheMetrics: Equatable, Sendable {
+    public let totalRequests: Int64
+    public let fullHitRequests: Int64
+    public let partialHitRequests: Int64
+    public let missRequests: Int64
+    public let requestedBytes: Int64
+    public let bytesPlannedFromCache: Int64
+    public let bytesPlannedFromNetwork: Int64
+    public let hitRatio: Double
+    public let totalBytesOnDisk: Int64
+    public let assets: [AssetCacheCompletionMetric]
+
+    public init(
+        totalRequests: Int64,
+        fullHitRequests: Int64,
+        partialHitRequests: Int64,
+        missRequests: Int64,
+        requestedBytes: Int64,
+        bytesPlannedFromCache: Int64,
+        bytesPlannedFromNetwork: Int64,
+        hitRatio: Double,
+        totalBytesOnDisk: Int64,
+        assets: [AssetCacheCompletionMetric]
+    ) {
+        self.totalRequests = totalRequests
+        self.fullHitRequests = fullHitRequests
+        self.partialHitRequests = partialHitRequests
+        self.missRequests = missRequests
+        self.requestedBytes = requestedBytes
+        self.bytesPlannedFromCache = bytesPlannedFromCache
+        self.bytesPlannedFromNetwork = bytesPlannedFromNetwork
+        self.hitRatio = hitRatio
+        self.totalBytesOnDisk = totalBytesOnDisk
+        self.assets = assets
+    }
+}
+
 public final class CoreCache: @unchecked Sendable {
+    private struct PlanMetricsAccumulator {
+        var totalRequests: Int64 = 0
+        var fullHitRequests: Int64 = 0
+        var partialHitRequests: Int64 = 0
+        var missRequests: Int64 = 0
+        var requestedBytes: Int64 = 0
+        var bytesPlannedFromCache: Int64 = 0
+        var bytesPlannedFromNetwork: Int64 = 0
+    }
+
     // Single synchronization strategy for mutable CoreCache state.
     // Reads use queue.sync; all mutations use barrier writes.
     private let queue = DispatchQueue(label: "CoreCache.CoreCache", attributes: .concurrent)
@@ -13,6 +82,8 @@ public final class CoreCache: @unchecked Sendable {
     private let manifestStore: ManifestStore
     private let diskQuotaBytes: Int64?
     private let logger: any StructuredLogger
+    private let metricsLock = NSLock()
+    private var planMetrics = PlanMetricsAccumulator()
 
     public init(
         baseDirectory: URL,
@@ -31,23 +102,15 @@ public final class CoreCache: @unchecked Sendable {
                 return []
             }
 
-            guard let record = try manifestStore.load(resourceID: resource) else {
-                logger.log(
-                    StructuredLogEvent(
-                        subsystem: "CoreCache",
-                        operation: "plan",
-                        metadata: [
-                            "cacheKey": resource.cacheKey.rawValue,
-                            "kind": resource.kind.rawValue,
-                            "parts": "1"
-                        ]
-                    )
-                )
-                return [.network(requested)]
+            let parts: [ReadPlanPart]
+            if let record = try manifestStore.load(resourceID: resource) {
+                let missingRanges = record.completedRanges.missingSubranges(for: requested)
+                parts = validatedPlanParts(requested: requested, missingRanges: missingRanges)
+            } else {
+                parts = [.network(requested)]
             }
 
-            let missingRanges = record.completedRanges.missingSubranges(for: requested)
-            let parts = validatedPlanParts(requested: requested, missingRanges: missingRanges)
+            recordPlanMetrics(parts: parts, requested: requested)
             logger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
@@ -60,6 +123,70 @@ public final class CoreCache: @unchecked Sendable {
                 )
             )
             return parts
+        }
+    }
+
+    public func metrics() throws -> CoreCacheMetrics {
+        let planSnapshot: PlanMetricsAccumulator = {
+            metricsLock.lock()
+            defer { metricsLock.unlock() }
+            return planMetrics
+        }()
+
+        return try queue.sync {
+            let entries = manifestStore.allRecords()
+            var bytesByResource: [ResourceID: Int64] = [:]
+            var totalBytesOnDisk: Int64 = 0
+            var recordsByAsset: [CacheKey: [StoredManifestRecord]] = [:]
+
+            for entry in entries {
+                let length = try diskStore.fileLength(for: entry.resourceID)
+                bytesByResource[entry.resourceID] = length
+                totalBytesOnDisk += length
+                recordsByAsset[entry.resourceID.cacheKey, default: []].append(entry)
+            }
+
+            let assets = recordsByAsset.map { cacheKey, groupedEntries in
+                let completed = groupedEntries.reduce(Int64(0)) { partial, entry in
+                    partial + entry.record.completedRanges.normalized.reduce(Int64(0)) { $0 + $1.length }
+                }
+                let expected = groupedEntries.reduce(Int64(0)) { partial, entry in
+                    let fallback = bytesByResource[entry.resourceID] ?? 0
+                    return partial + (entry.record.expectedLength ?? fallback)
+                }
+                let ratio: Double
+                if expected > 0 {
+                    ratio = min(1.0, Double(completed) / Double(expected))
+                } else {
+                    ratio = 0
+                }
+
+                return AssetCacheCompletionMetric(
+                    cacheKey: cacheKey,
+                    resourceCount: groupedEntries.count,
+                    completedBytes: completed,
+                    expectedBytes: expected,
+                    completionRatio: ratio
+                )
+            }
+            .sorted { $0.cacheKey.rawValue < $1.cacheKey.rawValue }
+
+            let hitRatio = planSnapshot.requestedBytes > 0
+                ? Double(planSnapshot.bytesPlannedFromCache) / Double(planSnapshot.requestedBytes)
+                : 0
+
+            return CoreCacheMetrics(
+                totalRequests: planSnapshot.totalRequests,
+                fullHitRequests: planSnapshot.fullHitRequests,
+                partialHitRequests: planSnapshot.partialHitRequests,
+                missRequests: planSnapshot.missRequests,
+                requestedBytes: planSnapshot.requestedBytes,
+                bytesPlannedFromCache: planSnapshot.bytesPlannedFromCache,
+                bytesPlannedFromNetwork: planSnapshot.bytesPlannedFromNetwork,
+                hitRatio: hitRatio,
+                totalBytesOnDisk: totalBytesOnDisk,
+                assets: assets
+            )
         }
     }
 
@@ -176,6 +303,37 @@ public final class CoreCache: @unchecked Sendable {
 
         // Never emit invalid planning output; fallback is coherent and safe.
         return [.network(requested)]
+    }
+
+    private func recordPlanMetrics(parts: [ReadPlanPart], requested: ByteRange) {
+        let requestedBytes = requested.length
+        var cacheBytes: Int64 = 0
+        var networkBytes: Int64 = 0
+
+        for part in parts {
+            switch part {
+            case let .file(range):
+                cacheBytes += range.length
+            case let .network(range):
+                networkBytes += range.length
+            }
+        }
+
+        metricsLock.lock()
+        defer { metricsLock.unlock() }
+
+        planMetrics.totalRequests += 1
+        planMetrics.requestedBytes += requestedBytes
+        planMetrics.bytesPlannedFromCache += cacheBytes
+        planMetrics.bytesPlannedFromNetwork += networkBytes
+
+        if networkBytes == 0, cacheBytes > 0 {
+            planMetrics.fullHitRequests += 1
+        } else if cacheBytes > 0 {
+            planMetrics.partialHitRequests += 1
+        } else {
+            planMetrics.missRequests += 1
+        }
     }
 
     private func enforceDiskQuotaIfNeeded() throws {
