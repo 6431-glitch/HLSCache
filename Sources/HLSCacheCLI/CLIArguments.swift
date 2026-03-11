@@ -40,6 +40,7 @@ extension CLIArgumentParseError: LocalizedError {
 enum CLICommand: Equatable {
     case interactive
     case register(RegisterAssetCommand)
+    case listAliases
     case download(DownloadCommand)
     case clearData(ClearDataCommand)
     case exportMP4(ExportMP4Command)
@@ -146,6 +147,10 @@ struct CLIArguments: Equatable {
                 let commandArgs = Array(args[(index + 1)...])
                 command = try parseDownloadCommand(commandArgs)
                 index = args.count
+            case "list":
+                let commandArgs = Array(args[(index + 1)...])
+                command = try parseListCommand(commandArgs)
+                index = args.count
             case "clear":
                 let commandArgs = Array(args[(index + 1)...])
                 command = try parseClearDataCommand(commandArgs)
@@ -181,6 +186,7 @@ struct CLIArguments: Equatable {
           swift run HLSCacheCLI [options]
           swift run HLSCacheCLI [options] add --alias <alias> --asset-id <asset-id> --url <remote-url> [--header "Name: Value"]
           swift run HLSCacheCLI [options] register --alias <alias> --asset-id <asset-id> --url <remote-url> [--header "Name: Value"]
+          swift run HLSCacheCLI [options] list
           swift run HLSCacheCLI [options] download --alias <alias>
           swift run HLSCacheCLI [options] clear --alias <alias> [--delete-alias] --yes
           swift run HLSCacheCLI [options] clear --all [--delete-alias] --yes
@@ -198,6 +204,7 @@ struct CLIArguments: Equatable {
           add, register             Add or update an alias mapping.
                                    Required: --alias, --asset-id, --url
                                    Optional: repeat --header "Name: Value"
+          list                      Print registered aliases and cache metadata.
           download                  Cache entire HLS content for an alias.
                                    Required: --alias
           clear                     Clear cache bytes by alias or all aliases.
@@ -307,6 +314,17 @@ struct CLIArguments: Equatable {
                 headers: headers.isEmpty ? nil : headers
             )
         )
+    }
+
+    private static func parseListCommand(_ args: [String]) throws -> CLICommand {
+        guard args.isEmpty else {
+            let value = args[0]
+            if value.hasPrefix("-") {
+                throw CLIArgumentParseError.unknownOption(value)
+            }
+            throw CLIArgumentParseError.unknownCommand(value)
+        }
+        return .listAliases
     }
 
     static func parseRemoteURL(_ raw: String) throws -> URL {

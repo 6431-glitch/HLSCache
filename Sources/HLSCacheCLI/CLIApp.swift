@@ -31,6 +31,8 @@ struct CLIApp {
             return 0
         case let .register(command):
             return runRegisterCommand(command)
+        case .listAliases:
+            return runListAliasesCommand()
         case let .download(command):
             return runDownloadCommand(command)
         case let .clearData(command):
@@ -164,19 +166,12 @@ struct CLIApp {
         while !shouldReturn {
             io.writeLine("")
             io.writeLine("[Alias List]")
-
-            let aliases = context.facade.listAliases()
-            if aliases.isEmpty {
-                io.writeLine("(no aliases registered)")
-            } else {
-                for record in aliases {
-                    let cacheBytes = (try? context.facade.cacheInfo(alias: record.alias).totalBytesOnDisk) ?? 0
-                    let updated = formattedListDate(record.lastUpdated)
-                    io.writeLine(
-                        "- \(record.alias) | assetID=\(record.assetID) | bytes=\(cacheBytes) | updated=\(updated)"
-                    )
-                    io.writeLine("  remote=\(record.currentRemoteURL.absoluteString)")
+            do {
+                for line in try renderAliasListLines(strictCacheInfo: false) {
+                    io.writeLine(line)
                 }
+            } catch {
+                io.writeLine("Failed to list aliases: \(error.localizedDescription)")
             }
 
             io.writeLine("Press Enter to refresh, or q to return.")
@@ -195,6 +190,43 @@ struct CLIApp {
     private func formattedListDate(_ date: Date) -> String {
         let formatter = ISO8601DateFormatter()
         return formatter.string(from: date)
+    }
+
+    private func runListAliasesCommand() -> Int32 {
+        do {
+            for line in try renderAliasListLines(strictCacheInfo: true) {
+                io.writeLine(line)
+            }
+            return 0
+        } catch {
+            io.writeErrorLine("Failed to list aliases: \(error.localizedDescription)")
+            return 1
+        }
+    }
+
+    private func renderAliasListLines(strictCacheInfo: Bool) throws -> [String] {
+        let aliases = context.facade.listAliases()
+        guard !aliases.isEmpty else {
+            return ["(no aliases registered)"]
+        }
+
+        var lines: [String] = []
+        lines.reserveCapacity(aliases.count * 2)
+
+        for record in aliases {
+            let cacheBytes: Int64
+            if strictCacheInfo {
+                cacheBytes = try context.facade.cacheInfo(alias: record.alias).totalBytesOnDisk
+            } else {
+                cacheBytes = (try? context.facade.cacheInfo(alias: record.alias).totalBytesOnDisk) ?? 0
+            }
+
+            let updated = formattedListDate(record.lastUpdated)
+            lines.append("- \(record.alias) | assetID=\(record.assetID) | bytes=\(cacheBytes) | updated=\(updated)")
+            lines.append("  remote=\(record.currentRemoteURL.absoluteString)")
+        }
+
+        return lines
     }
 
     private func runSettingsSubflow() {
