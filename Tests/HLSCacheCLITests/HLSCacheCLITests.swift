@@ -20,6 +20,10 @@ private final class FakeIO: CLIIO {
         }
         return inputQueue.removeFirst()
     }
+
+    func resetOutput() {
+        outputLines.removeAll()
+    }
 }
 
 private func makeCLITempDirectory() throws -> URL {
@@ -230,6 +234,81 @@ private func makeCLITempDirectory() throws -> URL {
     let exitCode = app.run(command: .settingsSetDefaultUserAgent("   "))
     #expect(exitCode == 1)
     #expect(io.outputLines.contains { $0.contains("Invalid value for default-user-agent") })
+}
+
+@Test func cliRegisterCommand_appliesDefaultUserAgentWhenHeaderMissing() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    #expect(app.run(command: .settingsSetDefaultUserAgent("GlobalUA/1.0")) == 0)
+    io.resetOutput()
+
+    let command = RegisterAssetCommand(
+        alias: "MDUA100",
+        assetID: "asset-ua-100",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/ua/master.m3u8")),
+        headers: nil
+    )
+    #expect(app.run(command: .register(command)) == 0)
+    #expect(io.outputLines.contains { $0.contains("User-Agent: GlobalUA/1.0") })
+}
+
+@Test func cliRegisterCommand_explicitUserAgentOverridesDefault() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    #expect(app.run(command: .settingsSetDefaultUserAgent("GlobalUA/1.0")) == 0)
+    io.resetOutput()
+
+    let command = RegisterAssetCommand(
+        alias: "MDUA200",
+        assetID: "asset-ua-200",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/ua/override.m3u8")),
+        headers: ["User-Agent": "AliasUA/2.0"]
+    )
+    #expect(app.run(command: .register(command)) == 0)
+    #expect(io.outputLines.contains { $0.contains("User-Agent: AliasUA/2.0") })
+    #expect(!io.outputLines.contains { $0.contains("User-Agent: GlobalUA/1.0") })
+}
+
+@Test func cliRegisterCommand_updatesAliasHeadersWithoutMutatingGlobalSettings() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    #expect(app.run(command: .settingsSetDefaultUserAgent("GlobalUA/1.0")) == 0)
+    io.resetOutput()
+
+    let first = RegisterAssetCommand(
+        alias: "MDUA300",
+        assetID: "asset-ua-300",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/ua/update-1.m3u8")),
+        headers: ["User-Agent": "AliasUA/1.0"]
+    )
+    #expect(app.run(command: .register(first)) == 0)
+
+    let second = RegisterAssetCommand(
+        alias: "MDUA300",
+        assetID: "asset-ua-300",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/ua/update-2.m3u8")),
+        headers: ["X-Test": "1"]
+    )
+    #expect(app.run(command: .register(second)) == 0)
+
+    io.resetOutput()
+    #expect(app.run(command: .settingsGet) == 0)
+    #expect(io.outputLines.contains { $0.contains("defaultUserAgent: GlobalUA/1.0") })
 }
 
 @Test func cliAssetManagement_registerFlow_handlesMissingAndInvalidInputs() throws {
