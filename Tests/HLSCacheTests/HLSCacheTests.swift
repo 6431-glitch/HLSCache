@@ -71,6 +71,44 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(updated.currentRemoteURL.absoluteString == "https://cdn2.example.com/master.m3u8")
 }
 
+@Test func facade_proxyStatus_reportsDeterministicLifecycleState() throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-proxy-status")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+
+    let initial = facade.proxyStatus()
+    #expect(initial.isRunning == false)
+    #expect(initial.host == nil)
+    #expect(initial.port == nil)
+    #expect(initial.baseURL == nil)
+
+    _ = facade.startServer(host: "0.0.0.0", port: 18888)
+    let started = facade.proxyStatus()
+    #expect(started.isRunning == true)
+    #expect(started.host == "0.0.0.0")
+    #expect(started.port == 18888)
+    #expect(started.baseURL?.absoluteString == "http://0.0.0.0:18888")
+
+    _ = facade.startServer(host: "127.0.0.1", port: 19999)
+    let restartedWithoutStop = facade.proxyStatus()
+    #expect(restartedWithoutStop == started)
+
+    facade.stopServer()
+    let stopped = facade.proxyStatus()
+    #expect(stopped.isRunning == false)
+    #expect(stopped.host == nil)
+    #expect(stopped.port == nil)
+    #expect(stopped.baseURL == nil)
+
+    _ = facade.startServer(port: 0)
+    let defaultPort = facade.proxyStatus()
+    #expect(defaultPort.isRunning == true)
+    #expect(defaultPort.host == "127.0.0.1")
+    #expect(defaultPort.port == 8080)
+    #expect(defaultPort.baseURL?.absoluteString == "http://127.0.0.1:8080")
+}
+
 @Test func facade_updateRemoteURL_preservesAliasProxyAndExistingCacheData() throws {
     let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-remote-rotation")
     defer { try? FileManager.default.removeItem(at: directory) }
