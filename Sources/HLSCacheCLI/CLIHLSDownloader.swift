@@ -1,0 +1,367 @@
+import CoreCache
+import Foundation
+import HLSCache
+
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+
+enum CLIDownloadError: Error, LocalizedError {
+    case aliasNotFound(String)
+    case requestFailed(url: URL, statusCode: Int?, reason: String)
+    case invalidPlaylistEncoding(URL)
+    case responseMissing(URL)
+
+    var errorDescription: String? {
+        switch self {
+        case let .aliasNotFound(alias):
+            return "Alias '\(alias)' was not found."
+        case let .requestFailed(url, statusCode, reason):
+            if let statusCode {
+                return "Request failed (\(statusCode)) for \(url.absoluteString): \(reason)"
+            }
+            return "Request failed for \(url.absoluteString): \(reason)"
+        case let .invalidPlaylistEncoding(url):
+            return "Playlist is not valid UTF-8: \(url.absoluteString)"
+        case let .responseMissing(url):
+            return "No response received for \(url.absoluteString)"
+        }
+    }
+}
+
+struct CLIDownloadResult: Equatable {
+    let alias: String
+    let playlistCount: Int
+    let mediaPlaylistCount: Int
+    let segmentCount: Int
+    let keyCount: Int
+    let bytesWritten: Int64
+}
+
+struct CLIHLSDownloader {
+    typealias Fetcher = (_ request: URLRequest) throws -> (Data, URLResponse)
+
+    private struct FetchedResource {
+        let data: Data
+        let contentType: String?
+    }
+
+    private let baseDirectory: URL
+    private let facade: HLSCacheFacade
+    private let diskStore: DiskStore
+    private let manifestStore: ManifestStore
+    private let fetcher: Fetcher
+
+    init(
+        baseDirectory: URL,
+        facade: HLSCacheFacade,
+        diskStore: DiskStore? = nil,
+        manifestStore: ManifestStore? = nil,
+        fetcher: @escaping Fetcher = CLIHLSDownloader.defaultFetcher
+    ) {
+        self.baseDirectory = baseDirectory
+        self.facade = facade
+        self.diskStore = diskStore ?? DiskStore(baseDirectory: baseDirectory)
+        self.manifestStore = manifestStore ?? ManifestStore(baseDirectory: baseDirectory)
+        self.fetcher = fetcher
+    }
+
+    func download(alias: String) throws -> CLIDownloadResult {
+        guard let asset = facade.listAliases().first(where: { $0.alias == alias }) else {
+            throw CLIDownloadError.aliasNotFound(alias)
+        }
+
+        var pendingPlaylists: [URL] = [asset.currentRemoteURL]
+        var visitedPlaylists: Set<String> = []
+        var cachedResources: Set<ResourceID> = []
+
+        var playlistCount = 0
+        var mediaPlaylistCount = 0
+        var segmentCount = 0
+        var keyCount = 0
+        var bytesWritten: Int64 = 0
+
+        while !pendingPlaylists.isEmpty {
+            let playlistURL = pendingPlaylists.removeFirst()
+            let playlistKey = canonicalURLKey(for: playlistURL)
+            guard !visitedPlaylists.contains(playlistKey) else {
+                continue
+            }
+            visitedPlaylists.insert(playlistKey)
+
+            let fetchedPlaylist = try fetchResource(url: playlistURL, headers: asset.headers)
+            let playlistData = fetchedPlaylist.data
+            guard let playlistText = String(data: playlistData, encoding: .utf8) else {
+                throw CLIDownloadError.invalidPlaylistEncoding(playlistURL)
+            }
+
+            let playlistResourceID = try storeResource(
+                url: playlistURL,
+                kind: .playlistM3U8,
+                cacheKey: asset.cacheKey,
+                data: playlistData,
+                contentType: fetchedPlaylist.contentType
+            )
+            cachedResources.insert(playlistResourceID)
+            playlistCount += 1
+            bytesWritten += Int64(playlistData.count)
+
+            let childPlaylists = try extractChildPlaylistURLs(from: playlistText, playlistURL: playlistURL)
+            for child in childPlaylists where !visitedPlaylists.contains(canonicalURLKey(for: child)) {
+                pendingPlaylists.append(child)
+            }
+
+            let isMediaPlaylist = playlistText.contains("#EXTINF")
+            if isMediaPlaylist {
+                mediaPlaylistCount += 1
+            }
+
+            let parsed = HLSPlaylistParser.parse(playlistText, playlistURL: playlistURL)
+            let mapURLs = try extractMapRemoteURLs(from: playlistText, playlistURL: playlistURL)
+
+            for key in parsed.keys where key.method?.uppercased() != "NONE" {
+                let keyResourceID = ResourceID(
+                    cacheKey: asset.cacheKey,
+                    kind: .key,
+                    resourceKey: ResourceID.makeResourceKey(from: key.remoteURL)
+                )
+                guard !cachedResources.contains(keyResourceID) else {
+                    continue
+                }
+                let fetchedKey = try fetchResource(url: key.remoteURL, headers: asset.headers)
+                _ = try storeResource(
+                    url: key.remoteURL,
+                    kind: .key,
+                    cacheKey: asset.cacheKey,
+                    data: fetchedKey.data,
+                    contentType: fetchedKey.contentType
+                )
+                cachedResources.insert(keyResourceID)
+                keyCount += 1
+                bytesWritten += Int64(fetchedKey.data.count)
+            }
+
+            let segmentURLs = parsed.segments.map(\.remoteURL) + mapURLs
+            for segmentURL in segmentURLs {
+                if looksLikePlaylistURL(segmentURL) {
+                    let segmentPlaylistKey = canonicalURLKey(for: segmentURL)
+                    if !visitedPlaylists.contains(segmentPlaylistKey) {
+                        pendingPlaylists.append(segmentURL)
+                    }
+                    continue
+                }
+
+                let segmentResourceID = ResourceID(
+                    cacheKey: asset.cacheKey,
+                    kind: .segment,
+                    resourceKey: ResourceID.makeResourceKey(from: segmentURL)
+                )
+                guard !cachedResources.contains(segmentResourceID) else {
+                    continue
+                }
+
+                let fetchedSegment = try fetchResource(url: segmentURL, headers: asset.headers)
+                _ = try storeResource(
+                    url: segmentURL,
+                    kind: .segment,
+                    cacheKey: asset.cacheKey,
+                    data: fetchedSegment.data,
+                    contentType: fetchedSegment.contentType
+                )
+                cachedResources.insert(segmentResourceID)
+                segmentCount += 1
+                bytesWritten += Int64(fetchedSegment.data.count)
+            }
+        }
+
+        return CLIDownloadResult(
+            alias: alias,
+            playlistCount: playlistCount,
+            mediaPlaylistCount: mediaPlaylistCount,
+            segmentCount: segmentCount,
+            keyCount: keyCount,
+            bytesWritten: bytesWritten
+        )
+    }
+
+    private func fetchResource(url: URL, headers: [String: String]?) throws -> FetchedResource {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        for (name, value) in (headers ?? [:]) {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+
+        let (data, response) = try fetcher(request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            guard response.url != nil else {
+                throw CLIDownloadError.responseMissing(url)
+            }
+            return FetchedResource(data: data, contentType: response.mimeType)
+        }
+
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw CLIDownloadError.requestFailed(
+                url: url,
+                statusCode: httpResponse.statusCode,
+                reason: HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
+            )
+        }
+
+        return FetchedResource(data: data, contentType: response.mimeType)
+    }
+
+    private func storeResource(
+        url: URL,
+        kind: ResourceKind,
+        cacheKey: CacheKey,
+        data: Data,
+        contentType: String?
+    ) throws -> ResourceID {
+        let resourceID = ResourceID(
+            cacheKey: cacheKey,
+            kind: kind,
+            resourceKey: ResourceID.makeResourceKey(from: url)
+        )
+
+        try? diskStore.remove(resourceID: resourceID)
+        _ = try diskStore.write(data, for: resourceID, at: 0)
+
+        var completedRanges = IntervalSet()
+        if let range = ByteRange(start: 0, endExclusive: Int64(data.count)) {
+            completedRanges.insert(range)
+        }
+
+        let record = ResourceRecord(
+            kind: kind,
+            originalURL: url,
+            contentType: contentType,
+            expectedLength: Int64(data.count),
+            completedRanges: completedRanges
+        )
+        try manifestStore.save(resourceID: resourceID, record: record)
+        return resourceID
+    }
+
+    private func extractChildPlaylistURLs(from playlist: String, playlistURL: URL) throws -> [URL] {
+        let lines = playlist.components(separatedBy: .newlines)
+        var urls: [URL] = []
+
+        for (index, line) in lines.enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                continue
+            }
+
+            if trimmed.hasPrefix("#EXT-X-MEDIA"),
+               let mediaURL = try resolveURIAttribute(in: line, relativeTo: playlistURL) {
+                urls.append(mediaURL)
+                continue
+            }
+
+            if trimmed.hasPrefix("#EXT-X-STREAM-INF") {
+                var nextIndex = index + 1
+                while nextIndex < lines.count {
+                    let candidate = lines[nextIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+                    nextIndex += 1
+                    guard !candidate.isEmpty else {
+                        continue
+                    }
+                    if candidate.hasPrefix("#") {
+                        continue
+                    }
+                    guard let childURL = URL(string: candidate, relativeTo: playlistURL)?.absoluteURL else {
+                        break
+                    }
+                    urls.append(childURL)
+                    break
+                }
+                continue
+            }
+
+            if trimmed.hasPrefix("#") {
+                continue
+            }
+
+            if looksLikePlaylistPath(trimmed),
+               let childURL = URL(string: trimmed, relativeTo: playlistURL)?.absoluteURL {
+                urls.append(childURL)
+            }
+        }
+
+        return urls
+    }
+
+    private func extractMapRemoteURLs(from playlist: String, playlistURL: URL) throws -> [URL] {
+        var urls: [URL] = []
+        for line in playlist.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("#EXT-X-MAP") else {
+                continue
+            }
+            if let mapURL = try resolveURIAttribute(in: line, relativeTo: playlistURL) {
+                urls.append(mapURL)
+            }
+        }
+        return urls
+    }
+
+    private func resolveURIAttribute(in line: String, relativeTo baseURL: URL) throws -> URL? {
+        guard let uriRange = line.range(of: "URI=\"") else {
+            return nil
+        }
+        let start = uriRange.upperBound
+        guard let end = line[start...].firstIndex(of: "\"") else {
+            throw CLIDownloadError.requestFailed(
+                url: baseURL,
+                statusCode: nil,
+                reason: "Invalid URI attribute in line: \(line)"
+            )
+        }
+        let raw = String(line[start..<end])
+        guard let url = URL(string: raw, relativeTo: baseURL)?.absoluteURL else {
+            throw CLIDownloadError.requestFailed(
+                url: baseURL,
+                statusCode: nil,
+                reason: "Invalid URI value '\(raw)'"
+            )
+        }
+        return url
+    }
+
+    private func canonicalURLKey(for url: URL) -> String {
+        url.absoluteString
+    }
+
+    private func looksLikePlaylistURL(_ url: URL) -> Bool {
+        let absolute = url.absoluteString.lowercased()
+        return absolute.contains(".m3u8")
+    }
+
+    private func looksLikePlaylistPath(_ raw: String) -> Bool {
+        raw.lowercased().contains(".m3u8")
+    }
+
+    static func defaultFetcher(request: URLRequest) throws -> (Data, URLResponse) {
+        let semaphore = DispatchSemaphore(value: 0)
+        var outputData: Data?
+        var outputResponse: URLResponse?
+        var outputError: Error?
+
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            outputData = data
+            outputResponse = response
+            outputError = error
+            semaphore.signal()
+        }
+        task.resume()
+        semaphore.wait()
+
+        if let outputError {
+            throw outputError
+        }
+        guard let outputData, let outputResponse else {
+            throw CLIDownloadError.responseMissing(request.url ?? URL(fileURLWithPath: "/"))
+        }
+        return (outputData, outputResponse)
+    }
+}

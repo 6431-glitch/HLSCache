@@ -41,6 +41,7 @@ struct CLIExporter {
         let playlistURL: URL
         let segmentRemoteURLs: [URL]
         let mapRemoteURLs: [URL]
+        let keyRemoteURLs: [URL]
     }
 
     private let baseDirectory: URL
@@ -98,6 +99,7 @@ struct CLIExporter {
         let mapFileNames = try copyResources(
             urls: candidate.mapRemoteURLs,
             prefix: "map",
+            kind: .segment,
             cacheKey: asset.cacheKey,
             diskStore: diskStore,
             destinationDirectory: stagingDirectory
@@ -105,6 +107,15 @@ struct CLIExporter {
         let segmentFileNames = try copyResources(
             urls: candidate.segmentRemoteURLs,
             prefix: "segment",
+            kind: .segment,
+            cacheKey: asset.cacheKey,
+            diskStore: diskStore,
+            destinationDirectory: stagingDirectory
+        )
+        let keyFileNames = try copyResources(
+            urls: candidate.keyRemoteURLs,
+            prefix: "key",
+            kind: .key,
             cacheKey: asset.cacheKey,
             diskStore: diskStore,
             destinationDirectory: stagingDirectory
@@ -114,6 +125,7 @@ struct CLIExporter {
             candidate.playlistText,
             playlistURL: candidate.playlistURL,
             mapFileNames: mapFileNames,
+            keyFileNames: keyFileNames,
             segmentFileNames: segmentFileNames
         )
         let localPlaylistURL = stagingDirectory.appendingPathComponent("input.m3u8")
@@ -161,10 +173,6 @@ struct CLIExporter {
             let playlistURL = entry.record.originalURL
                 ?? URL(string: "https://export.local/\(playlistResourceID.resourceKey).m3u8")!
             let parsed = HLSPlaylistParser.parse(playlistText, playlistURL: playlistURL)
-            if !parsed.keys.isEmpty {
-                failureReasons.append("playlist contains encrypted key tags and is not supported for export")
-                continue
-            }
             if parsed.segments.isEmpty {
                 failureReasons.append("playlist does not contain media segments")
                 continue
@@ -172,9 +180,11 @@ struct CLIExporter {
 
             let mapRemoteURLs = try extractMapRemoteURLs(from: playlistText, playlistURL: playlistURL)
             let segmentRemoteURLs = parsed.segments.map(\.remoteURL)
+            let keyRemoteURLs = parsed.keys
+                .filter { $0.method?.uppercased() != "NONE" }
+                .map(\.remoteURL)
 
-            let allRequired = mapRemoteURLs + segmentRemoteURLs
-            let incomplete = allRequired.first { remoteURL in
+            let missingSegment = (mapRemoteURLs + segmentRemoteURLs).first { remoteURL in
                 let resourceID = ResourceID(
                     cacheKey: playlistResourceID.cacheKey,
                     kind: .segment,
@@ -186,8 +196,24 @@ struct CLIExporter {
                 return !isComplete(record: record, resourceID: resourceID, diskStore: diskStore)
             }
 
-            if let incomplete {
-                failureReasons.append("missing or incomplete segment for \(incomplete.absoluteString)")
+            if let missingSegment {
+                failureReasons.append("missing or incomplete segment for \(missingSegment.absoluteString)")
+                continue
+            }
+
+            let missingKey = keyRemoteURLs.first { remoteURL in
+                let resourceID = ResourceID(
+                    cacheKey: playlistResourceID.cacheKey,
+                    kind: .key,
+                    resourceKey: ResourceID.makeResourceKey(from: remoteURL)
+                )
+                guard let record = recordsByResource[resourceID] else {
+                    return true
+                }
+                return !isComplete(record: record, resourceID: resourceID, diskStore: diskStore)
+            }
+            if let missingKey {
+                failureReasons.append("missing or incomplete key for \(missingKey.absoluteString)")
                 continue
             }
 
@@ -195,7 +221,8 @@ struct CLIExporter {
                 playlistText: playlistText,
                 playlistURL: playlistURL,
                 segmentRemoteURLs: segmentRemoteURLs,
-                mapRemoteURLs: mapRemoteURLs
+                mapRemoteURLs: mapRemoteURLs,
+                keyRemoteURLs: keyRemoteURLs
             )
             if bestCandidate == nil || candidate.segmentRemoteURLs.count > bestCandidate!.segmentRemoteURLs.count {
                 bestCandidate = candidate
@@ -214,6 +241,7 @@ struct CLIExporter {
     private func copyResources(
         urls: [URL],
         prefix: String,
+        kind: ResourceKind,
         cacheKey: CacheKey,
         diskStore: DiskStore,
         destinationDirectory: URL
@@ -222,12 +250,12 @@ struct CLIExporter {
         for (index, remoteURL) in urls.enumerated() {
             let resourceID = ResourceID(
                 cacheKey: cacheKey,
-                kind: .segment,
+                kind: kind,
                 resourceKey: ResourceID.makeResourceKey(from: remoteURL)
             )
             let sourceURL = diskStore.dataFileURL(for: resourceID)
             guard fileManager.fileExists(atPath: sourceURL.path) else {
-                throw CLIExportError.incompleteCache("segment file missing at \(sourceURL.path)")
+                throw CLIExportError.incompleteCache("\(kind.rawValue) file missing at \(sourceURL.path)")
             }
 
             let ext = remoteURL.pathExtension.isEmpty ? "bin" : remoteURL.pathExtension
@@ -246,6 +274,7 @@ struct CLIExporter {
         _ playlist: String,
         playlistURL: URL,
         mapFileNames: [URL: String],
+        keyFileNames: [URL: String],
         segmentFileNames: [URL: String]
     ) throws -> String {
         let lines = playlist.components(separatedBy: .newlines)
@@ -255,8 +284,11 @@ struct CLIExporter {
         var segmentIndex = 0
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.hasPrefix("#EXT-X-KEY") {
-                throw CLIExportError.incompleteCache("encrypted playlists are not currently supported")
+            if trimmed.hasPrefix("#EXT-X-KEY"),
+               let keyURL = try resolveURIAttribute(in: line, relativeTo: playlistURL),
+               let localName = keyFileNames[keyURL] {
+                rewritten.append(replacingURIAttribute(in: line, with: localName))
+                continue
             }
 
             if trimmed.hasPrefix("#EXT-X-MAP"),

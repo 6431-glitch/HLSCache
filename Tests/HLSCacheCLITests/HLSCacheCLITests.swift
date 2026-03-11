@@ -198,6 +198,11 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     }
 }
 
+@Test func cliArguments_parseDownloadCommand_withAlias() throws {
+    let parsed = try CLIArguments.parse(["download", "--alias", "MDDL01"])
+    #expect(parsed.command == .download(DownloadCommand(alias: "MDDL01")))
+}
+
 @Test func cliArguments_parseSettingsGetCommand() throws {
     let parsed = try CLIArguments.parse(["settings", "get"])
     #expect(parsed.command == .settingsGet)
@@ -642,6 +647,20 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     #expect(io.outputLines.contains { $0.contains("Alias: MDEXPCLI") })
     #expect(io.outputLines.contains { $0.contains("Output: \(outputURL.path)") })
     #expect(io.outputLines.contains { $0.contains("Output size: 8 bytes") })
+}
+
+@Test func cliDownloadCommand_missingAliasPrintsActionableError() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let exitCode = app.run(command: .download(DownloadCommand(alias: "DOES_NOT_EXIST")))
+
+    #expect(exitCode == 1)
+    #expect(io.outputLines.contains { $0.contains("Alias 'DOES_NOT_EXIST' was not found.") })
 }
 
 @Test func cliInteractive_quickstartFlow_coversCoreCommandsAndNavigation() throws {

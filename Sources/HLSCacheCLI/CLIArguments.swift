@@ -40,6 +40,7 @@ extension CLIArgumentParseError: LocalizedError {
 enum CLICommand: Equatable {
     case interactive
     case register(RegisterAssetCommand)
+    case download(DownloadCommand)
     case clearData(ClearDataCommand)
     case exportMP4(ExportMP4Command)
     case settingsGet
@@ -51,6 +52,10 @@ struct RegisterAssetCommand: Equatable {
     let assetID: String
     let remoteURL: URL
     let headers: [String: String]?
+}
+
+struct DownloadCommand: Equatable {
+    let alias: String
 }
 
 enum ClearDataScope: Equatable {
@@ -137,6 +142,10 @@ struct CLIArguments: Equatable {
                 let commandArgs = Array(args[(index + 1)...])
                 command = try parseRegisterCommand(commandArgs)
                 index = args.count
+            case "download":
+                let commandArgs = Array(args[(index + 1)...])
+                command = try parseDownloadCommand(commandArgs)
+                index = args.count
             case "clear":
                 let commandArgs = Array(args[(index + 1)...])
                 command = try parseClearDataCommand(commandArgs)
@@ -172,6 +181,7 @@ struct CLIArguments: Equatable {
           swift run HLSCacheCLI [options]
           swift run HLSCacheCLI [options] add --alias <alias> --asset-id <asset-id> --url <remote-url> [--header "Name: Value"]
           swift run HLSCacheCLI [options] register --alias <alias> --asset-id <asset-id> --url <remote-url> [--header "Name: Value"]
+          swift run HLSCacheCLI [options] download --alias <alias>
           swift run HLSCacheCLI [options] clear --alias <alias> [--delete-alias] --yes
           swift run HLSCacheCLI [options] clear --all [--delete-alias] --yes
           swift run HLSCacheCLI [options] export --alias <alias> --output <file.mp4>
@@ -188,6 +198,8 @@ struct CLIArguments: Equatable {
           add, register             Add or update an alias mapping.
                                    Required: --alias, --asset-id, --url
                                    Optional: repeat --header "Name: Value"
+          download                  Cache entire HLS content for an alias.
+                                   Required: --alias
           clear                     Clear cache bytes by alias or all aliases.
                                    Required: one of --alias <alias> or --all
                                    Optional: --delete-alias to remove alias metadata
@@ -198,6 +210,35 @@ struct CLIArguments: Equatable {
           settings set default-user-agent "<value>"
                                    Persist global default User-Agent.
         """
+    }
+
+    private static func parseDownloadCommand(_ args: [String]) throws -> CLICommand {
+        var alias: String?
+        var index = 0
+
+        while index < args.count {
+            let option = args[index]
+            switch option {
+            case "--alias":
+                index += 1
+                guard index < args.count else {
+                    throw CLIArgumentParseError.missingValue(option)
+                }
+                alias = args[index]
+                index += 1
+            default:
+                if option.hasPrefix("-") {
+                    throw CLIArgumentParseError.unknownOption(option)
+                }
+                throw CLIArgumentParseError.unknownCommand(option)
+            }
+        }
+
+        guard let alias, !alias.isEmpty else {
+            throw CLIArgumentParseError.missingRequiredArgument("--alias")
+        }
+
+        return .download(DownloadCommand(alias: alias))
     }
 
     private static func parseRegisterCommand(_ args: [String]) throws -> CLICommand {
