@@ -269,6 +269,65 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(restored.pluginsApplied == [stamp])
 }
 
+@Test func coreCache_recovery_corruptedManifest_isTreatedAsCacheMissAndRebuilt() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-recovery-corrupt-manifest")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let cache = CoreCache(baseDirectory: directory)
+    let resource = try makeCoreCacheResourceID(suffix: "recover-corrupt.ts")
+    let initialPayload = Data("initial-segment".utf8)
+
+    _ = try cache.write(initialPayload, resource: resource, at: 0, expectedLength: Int64(initialPayload.count))
+    _ = try cache.finalizeWrite(resource: resource, expectedLength: Int64(initialPayload.count))
+
+    let manifestStore = ManifestStore(baseDirectory: directory)
+    let manifestURL = manifestStore.manifestFileURL(for: resource)
+    try Data("{\"broken\":".utf8).write(to: manifestURL)
+
+    let restarted = CoreCache(baseDirectory: directory)
+    #expect(
+        try restarted.plan(resource: resource, requested: try br(0, Int64(initialPayload.count)))
+            == [.network(try br(0, Int64(initialPayload.count)))]
+    )
+
+    let recoveredPayload = Data("recovered-segment".utf8)
+    _ = try restarted.write(
+        recoveredPayload,
+        resource: resource,
+        at: 0,
+        expectedLength: Int64(recoveredPayload.count)
+    )
+    _ = try restarted.finalizeWrite(resource: resource, expectedLength: Int64(recoveredPayload.count))
+
+    let restoredRecord = try #require(try restarted.resourceRecord(for: resource))
+    #expect(restoredRecord.completedRanges.contains(try br(0, Int64(recoveredPayload.count))))
+    let readBack = try restarted.read(resource: resource, range: try br(0, Int64(recoveredPayload.count)))
+    #expect(readBack == recoveredPayload)
+}
+
+@Test func coreCache_recovery_orphanManifestTempFile_isClearedOnNextSave() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-recovery-temp-manifest")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let cache = CoreCache(baseDirectory: directory)
+    let resource = try makeCoreCacheResourceID(suffix: "recover-temp.ts")
+    let payload = Data("123456".utf8)
+
+    _ = try cache.write(payload, resource: resource, at: 0, expectedLength: Int64(payload.count))
+    _ = try cache.finalizeWrite(resource: resource, expectedLength: Int64(payload.count))
+
+    let manifestStore = ManifestStore(baseDirectory: directory)
+    let tempManifestURL = manifestStore.manifestFileURL(for: resource).appendingPathExtension("tmp")
+    try Data("{\"partial\":".utf8).write(to: tempManifestURL)
+    #expect(FileManager.default.fileExists(atPath: tempManifestURL.path))
+
+    let restarted = CoreCache(baseDirectory: directory)
+    _ = try restarted.write(Data("AB".utf8), resource: resource, at: 0, expectedLength: Int64(payload.count))
+    _ = try restarted.finalizeWrite(resource: resource, expectedLength: Int64(payload.count))
+
+    #expect(!FileManager.default.fileExists(atPath: tempManifestURL.path))
+}
+
 @Test func coreCache_concurrencySmoke_planAndWriteAreThreadSafe() async throws {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-concurrency")
     defer { try? FileManager.default.removeItem(at: directory) }

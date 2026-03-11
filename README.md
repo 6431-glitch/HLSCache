@@ -187,6 +187,7 @@ Each resource has:
   Includes `pluginsApplied` stamps (`id` + `version`) for transform compatibility tracking.
 
 Manifests are written atomically (temp file + replace).
+If a manifest is corrupted (for example after interruption), it is treated as a cache miss and rebuilt on subsequent writes.
 
 ### Alias Registry Persistence
 
