@@ -33,8 +33,8 @@ private func makeCoreCacheTempDirectory(prefix: String = "core-cache-tests") thr
     return directory
 }
 
-private func makeCoreCacheResourceID(suffix: String = "playlist.m3u8") throws -> ResourceID {
-    let cacheKey = CacheKey.fromAssetID("asset-corecache")
+private func makeCoreCacheResourceID(assetID: String = "asset-corecache", suffix: String = "playlist.m3u8") throws -> ResourceID {
+    let cacheKey = CacheKey.fromAssetID(assetID)
     let url = try #require(URL(string: "https://cdn.example.com/\(suffix)"))
     return ResourceID(cacheKey: cacheKey, kind: .segment, resourceKey: ResourceID.makeResourceKey(from: url))
 }
@@ -90,19 +90,19 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(String(decoding: payload, as: UTF8.self) == "23456")
 }
 
-@Test func coreCache_quotaEviction_evictsLeastRecentlyUpdatedResource() throws {
+@Test func coreCache_quotaEviction_evictsLeastRecentlyUpdatedAsset() throws {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-quota")
     defer { try? FileManager.default.removeItem(at: directory) }
 
     let logger = RecordingStructuredLogger()
     let cache = CoreCache(baseDirectory: directory, diskQuotaBytes: 10, logger: logger)
-    let first = try makeCoreCacheResourceID(suffix: "lru-first.ts")
-    let second = try makeCoreCacheResourceID(suffix: "lru-second.ts")
+    let first = try makeCoreCacheResourceID(assetID: "asset-first", suffix: "lru-first.ts")
+    let second = try makeCoreCacheResourceID(assetID: "asset-second", suffix: "lru-second.ts")
 
     _ = try cache.write(Data(repeating: 1, count: 6), resource: first, at: 0, expectedLength: 6)
     _ = try cache.finalizeWrite(resource: first, expectedLength: 6)
 
-    Thread.sleep(forTimeInterval: 0.02)
+    Thread.sleep(forTimeInterval: 1.1)
 
     _ = try cache.write(Data(repeating: 2, count: 6), resource: second, at: 0, expectedLength: 6)
     _ = try cache.finalizeWrite(resource: second, expectedLength: 6)
@@ -111,6 +111,30 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(try cache.resourceRecord(for: second) != nil)
     #expect(try cache.plan(resource: first, requested: try br(0, 6)) == [.network(try br(0, 6))])
     #expect(logger.events().contains { $0.operation == "evict" })
+}
+
+@Test func coreCache_quotaEviction_evictsWholeAssetGroupNotSingleResource() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-quota-asset-group")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let cache = CoreCache(baseDirectory: directory, diskQuotaBytes: 10)
+    let oldAssetFirst = try makeCoreCacheResourceID(assetID: "asset-old", suffix: "old-1.ts")
+    let oldAssetSecond = try makeCoreCacheResourceID(assetID: "asset-old", suffix: "old-2.ts")
+    let freshAsset = try makeCoreCacheResourceID(assetID: "asset-fresh", suffix: "fresh-1.ts")
+
+    _ = try cache.write(Data(repeating: 1, count: 4), resource: oldAssetFirst, at: 0, expectedLength: 4)
+    _ = try cache.finalizeWrite(resource: oldAssetFirst, expectedLength: 4)
+    _ = try cache.write(Data(repeating: 2, count: 4), resource: oldAssetSecond, at: 0, expectedLength: 4)
+    _ = try cache.finalizeWrite(resource: oldAssetSecond, expectedLength: 4)
+
+    Thread.sleep(forTimeInterval: 1.1)
+
+    _ = try cache.write(Data(repeating: 3, count: 6), resource: freshAsset, at: 0, expectedLength: 6)
+    _ = try cache.finalizeWrite(resource: freshAsset, expectedLength: 6)
+
+    #expect(try cache.resourceRecord(for: oldAssetFirst) == nil)
+    #expect(try cache.resourceRecord(for: oldAssetSecond) == nil)
+    #expect(try cache.resourceRecord(for: freshAsset) != nil)
 }
 
 @Test func coreCache_withoutQuota_doesNotEvictResources() throws {

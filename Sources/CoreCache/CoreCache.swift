@@ -183,16 +183,18 @@ public final class CoreCache: @unchecked Sendable {
             return
         }
 
-        var entries = manifestStore.allRecords()
+        let entries = manifestStore.allRecords()
         guard !entries.isEmpty else {
             return
         }
 
         var bytesByResource: [ResourceID: Int64] = [:]
+        var entriesByAsset: [CacheKey: [StoredManifestRecord]] = [:]
         var totalBytes: Int64 = 0
         for entry in entries {
             let length = try diskStore.fileLength(for: entry.resourceID)
             bytesByResource[entry.resourceID] = length
+            entriesByAsset[entry.resourceID.cacheKey, default: []].append(entry)
             totalBytes += length
         }
 
@@ -200,35 +202,62 @@ public final class CoreCache: @unchecked Sendable {
             return
         }
 
-        entries.sort { lhs, rhs in
-            if lhs.record.lastUpdated != rhs.record.lastUpdated {
-                return lhs.record.lastUpdated < rhs.record.lastUpdated
-            }
-            if lhs.resourceID.cacheKey.rawValue != rhs.resourceID.cacheKey.rawValue {
-                return lhs.resourceID.cacheKey.rawValue < rhs.resourceID.cacheKey.rawValue
-            }
-            return lhs.resourceID.resourceKey < rhs.resourceID.resourceKey
+        struct AssetEvictionCandidate {
+            let cacheKey: CacheKey
+            let resources: [StoredManifestRecord]
+            let totalBytes: Int64
+            let lastUpdated: Date
         }
 
-        for entry in entries where totalBytes > diskQuotaBytes {
-            let resource = entry.resourceID
-            let length = bytesByResource[resource] ?? 0
-
-            try diskStore.remove(resourceID: resource)
-            try manifestStore.delete(resourceID: resource)
-            logger.log(
-                StructuredLogEvent(
-                    subsystem: "CoreCache",
-                    operation: "evict",
-                    metadata: [
-                        "cacheKey": resource.cacheKey.rawValue,
-                        "kind": resource.kind.rawValue,
-                        "bytes": String(length)
-                    ]
-                )
+        var assets = entriesByAsset.map { cacheKey, resources in
+            let total = resources.reduce(Int64(0)) { partial, entry in
+                partial + (bytesByResource[entry.resourceID] ?? 0)
+            }
+            let newestUpdate = resources.map(\.record.lastUpdated).max() ?? .distantPast
+            let sortedResources = resources.sorted { lhs, rhs in
+                if lhs.record.lastUpdated != rhs.record.lastUpdated {
+                    return lhs.record.lastUpdated < rhs.record.lastUpdated
+                }
+                if lhs.resourceID.kind.rawValue != rhs.resourceID.kind.rawValue {
+                    return lhs.resourceID.kind.rawValue < rhs.resourceID.kind.rawValue
+                }
+                return lhs.resourceID.resourceKey < rhs.resourceID.resourceKey
+            }
+            return AssetEvictionCandidate(
+                cacheKey: cacheKey,
+                resources: sortedResources,
+                totalBytes: total,
+                lastUpdated: newestUpdate
             )
+        }
+        assets.sort { lhs, rhs in
+            if lhs.lastUpdated != rhs.lastUpdated {
+                return lhs.lastUpdated < rhs.lastUpdated
+            }
+            return lhs.cacheKey.rawValue < rhs.cacheKey.rawValue
+        }
 
-            totalBytes -= length
+        for asset in assets where totalBytes > diskQuotaBytes {
+            for entry in asset.resources {
+                let resource = entry.resourceID
+                let length = bytesByResource[resource] ?? 0
+
+                try diskStore.remove(resourceID: resource)
+                try manifestStore.delete(resourceID: resource)
+                logger.log(
+                    StructuredLogEvent(
+                        subsystem: "CoreCache",
+                        operation: "evict",
+                        metadata: [
+                            "cacheKey": resource.cacheKey.rawValue,
+                            "kind": resource.kind.rawValue,
+                            "bytes": String(length)
+                        ]
+                    )
+                )
+            }
+
+            totalBytes -= asset.totalBytes
         }
     }
 

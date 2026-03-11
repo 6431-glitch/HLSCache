@@ -10,7 +10,7 @@ The architecture cleanly separates playback proxying, storage, and background do
 
 - Local HTTP proxy server built with SwiftNIO
 - Range-aware disk caching with partial content support (206)
-- Optional disk quota with LRU eviction in `CoreCache`
+- Optional disk quota with per-asset LRU eviction in `CoreCache`
 - Stable alias-based routing (`/MD0534`) and typed proxy resource routes (`/MD0534/seg|key|raw/<encoded-url>`)
 - Structured logging hooks across `CoreCache` and `HLSCacheFacade`
 - Background HLS offline downloading via `URLSessionConfiguration.background`
