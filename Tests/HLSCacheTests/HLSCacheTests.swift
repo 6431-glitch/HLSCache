@@ -173,11 +173,18 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     _ = try facade.proxyURL(for: "MDLOG")
     _ = try facade.cacheInfo(alias: "MDLOG")
 
-    let operations = Set(logger.events().map(\.operation))
-    #expect(operations.contains("startServer"))
-    #expect(operations.contains("register"))
-    #expect(operations.contains("proxyURL"))
-    #expect(operations.contains("cacheInfo"))
+    let events = logger.events()
+    #expect(events.allSatisfy { !$0.correlationID.isEmpty })
+
+    let startServerEvent = try #require(events.first { $0.operation == "startServer" })
+    let registerEvent = try #require(events.first { $0.operation == "register" })
+    let proxyURLEvent = try #require(events.first { $0.operation == "proxyURL" })
+    let cacheInfoEvent = try #require(events.first { $0.operation == "cacheInfo" })
+
+    #expect(startServerEvent.level == .info)
+    #expect(registerEvent.level == .info)
+    #expect(proxyURLEvent.level == .debug)
+    #expect(cacheInfoEvent.level == .debug)
 }
 
 @Test func facade_cacheInfoAndClearCache_reflectsUnderlyingDiskUsage() throws {
