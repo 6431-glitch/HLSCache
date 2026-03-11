@@ -4,15 +4,21 @@ import Foundation
 public enum HLSPlaylistRewriter {
     public typealias ProxyURLBuilder = (_ alias: Alias, _ kind: ProxyResourceKind, _ remoteURL: URL) throws -> URL
 
+    private struct DirectiveAttribute {
+        let key: String
+        let value: String
+        let valueRange: Range<String.Index>
+    }
+
     public static func rewrite(
         _ playlist: String,
         alias: Alias,
         playlistURL: URL,
         proxyURLBuilder: ProxyURLBuilder
     ) throws -> String {
-        let lines = playlist.split(separator: "\n", omittingEmptySubsequences: false)
+        let lines = playlist.components(separatedBy: .newlines)
         let rewritten = try lines.map { line in
-            try rewriteLine(String(line), alias: alias, playlistURL: playlistURL, proxyURLBuilder: proxyURLBuilder)
+            try rewriteLine(line, alias: alias, playlistURL: playlistURL, proxyURLBuilder: proxyURLBuilder)
         }
         return rewritten.joined(separator: "\n")
     }
@@ -23,12 +29,25 @@ public enum HLSPlaylistRewriter {
         playlistURL: URL,
         proxyURLBuilder: ProxyURLBuilder
     ) throws -> String {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if trimmed.hasPrefix("#EXT-X-KEY:") {
-            return try rewriteKeyDirective(
+            return try rewriteDirectiveURI(
                 line,
+                directivePrefix: "#EXT-X-KEY:",
                 alias: alias,
+                kind: .key,
+                playlistURL: playlistURL,
+                proxyURLBuilder: proxyURLBuilder
+            )
+        }
+
+        if trimmed.hasPrefix("#EXT-X-MAP:") {
+            return try rewriteDirectiveURI(
+                line,
+                directivePrefix: "#EXT-X-MAP:",
+                alias: alias,
+                kind: .segment,
                 playlistURL: playlistURL,
                 proxyURLBuilder: proxyURLBuilder
             )
@@ -46,27 +65,122 @@ public enum HLSPlaylistRewriter {
         return proxyURL.absoluteString
     }
 
-    private static func rewriteKeyDirective(
+    private static func rewriteDirectiveURI(
         _ line: String,
+        directivePrefix: String,
         alias: Alias,
+        kind: ProxyResourceKind,
         playlistURL: URL,
         proxyURLBuilder: ProxyURLBuilder
     ) throws -> String {
-        guard let uriStart = line.range(of: "URI=\"")?.upperBound else {
+        guard let attributeStart = line.range(of: directivePrefix)?.upperBound else {
             return line
         }
-        guard let uriEnd = line[uriStart...].firstIndex(of: "\"") else {
-            return line
-        }
-
-        let uriValue = String(line[uriStart..<uriEnd])
-        guard let remoteURL = URL(string: uriValue, relativeTo: playlistURL)?.absoluteURL else {
+        let attributes = parseDirectiveAttributes(in: line, range: attributeStart..<line.endIndex)
+        guard let uriAttribute = attributes.first(where: { $0.key == "URI" }) else {
             return line
         }
 
-        let proxyURL = try proxyURLBuilder(alias, .key, remoteURL)
+        if directivePrefix == "#EXT-X-KEY:",
+           let method = attributes.first(where: { $0.key == "METHOD" })?.value,
+           method.uppercased() == "NONE" {
+            return line
+        }
+
+        guard let remoteURL = URL(string: uriAttribute.value, relativeTo: playlistURL)?.absoluteURL else {
+            return line
+        }
+
+        let proxyURL = try proxyURLBuilder(alias, kind, remoteURL)
         var rewritten = line
-        rewritten.replaceSubrange(uriStart..<uriEnd, with: proxyURL.absoluteString)
+        rewritten.replaceSubrange(uriAttribute.valueRange, with: proxyURL.absoluteString)
         return rewritten
+    }
+
+    private static func parseDirectiveAttributes(in line: String, range: Range<String.Index>) -> [DirectiveAttribute] {
+        var attributes: [DirectiveAttribute] = []
+        var tokenStart = range.lowerBound
+        var current = range.lowerBound
+        var insideQuotes = false
+
+        while current < range.upperBound {
+            let character = line[current]
+            if character == "\"" {
+                insideQuotes.toggle()
+            } else if character == "," && !insideQuotes {
+                if let attribute = parseAttributeToken(in: line, range: tokenStart..<current) {
+                    attributes.append(attribute)
+                }
+                tokenStart = line.index(after: current)
+            }
+            current = line.index(after: current)
+        }
+
+        if let attribute = parseAttributeToken(in: line, range: tokenStart..<range.upperBound) {
+            attributes.append(attribute)
+        }
+
+        return attributes
+    }
+
+    private static func parseAttributeToken(in line: String, range: Range<String.Index>) -> DirectiveAttribute? {
+        guard let trimmedToken = trimmedRange(in: line, range: range),
+              let equalsIndex = line[trimmedToken].firstIndex(of: "=") else {
+            return nil
+        }
+
+        guard let keyRange = trimmedRange(in: line, range: trimmedToken.lowerBound..<equalsIndex),
+              let rawValueRange = trimmedRange(
+                  in: line,
+                  range: line.index(after: equalsIndex)..<trimmedToken.upperBound
+              ) else {
+            return nil
+        }
+
+        let key = String(line[keyRange]).uppercased()
+        guard !key.isEmpty else {
+            return nil
+        }
+
+        let valueRange: Range<String.Index>
+        let rawValue = line[rawValueRange]
+        if rawValue.first == "\"",
+           rawValue.last == "\"",
+           line.distance(from: rawValueRange.lowerBound, to: rawValueRange.upperBound) >= 2 {
+            let start = line.index(after: rawValueRange.lowerBound)
+            let end = line.index(before: rawValueRange.upperBound)
+            valueRange = start..<end
+        } else {
+            valueRange = rawValueRange
+        }
+
+        return DirectiveAttribute(
+            key: key,
+            value: String(line[valueRange]),
+            valueRange: valueRange
+        )
+    }
+
+    private static func trimmedRange(in line: String, range: Range<String.Index>) -> Range<String.Index>? {
+        var lower = range.lowerBound
+        var upper = range.upperBound
+
+        while lower < upper, line[lower].isWhitespace {
+            lower = line.index(after: lower)
+        }
+
+        while upper > lower {
+            let previous = line.index(before: upper)
+            if line[previous].isWhitespace {
+                upper = previous
+            } else {
+                break
+            }
+        }
+
+        guard lower < upper else {
+            return nil
+        }
+        return lower..<upper
     }
 }
