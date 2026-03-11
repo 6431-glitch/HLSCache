@@ -64,13 +64,7 @@ struct CLIApp {
             case "1":
                 runAssetManagementSubflow()
             case "2":
-                runSubflow(
-                    title: "Proxy Server",
-                    options: [
-                        "1) Show proxy status (coming soon)",
-                        "2) Restart proxy server (coming soon)"
-                    ]
-                )
+                runProxyServerSubflow()
             case "3":
                 runSettingsSubflow()
             case "4":
@@ -101,7 +95,7 @@ struct CLIApp {
             io.writeLine("")
             io.writeLine("[Asset Management]")
             io.writeLine("1) Add/register asset")
-            io.writeLine("2) List aliases (coming soon)")
+            io.writeLine("2) List aliases")
             io.writeLine("0) Back")
             io.writeLine("Choose an option:")
 
@@ -117,6 +111,48 @@ struct CLIApp {
                 runInteractiveRegisterAssetFlow()
             case "2":
                 runAliasListMonitor()
+            default:
+                io.writeLine("Invalid selection '\(selection)'. Enter 0 to go back.")
+            }
+        }
+    }
+
+    private func runProxyServerSubflow() {
+        var shouldReturn = false
+        while !shouldReturn {
+            io.writeLine("")
+            io.writeLine("[Proxy Server]")
+            io.writeLine("Proxy base URL: \(context.serverBaseURL.absoluteString)")
+
+            let statusEnabled = isFeatureFlagEnabled("HLSCACHECLI_PROXY_STATUS_ACTION")
+            let restartEnabled = isFeatureFlagEnabled("HLSCACHECLI_PROXY_RESTART_ACTION")
+
+            if statusEnabled {
+                io.writeLine("1) Show proxy status")
+            }
+            if restartEnabled {
+                io.writeLine("2) Restart proxy server")
+            }
+            if !statusEnabled, !restartEnabled {
+                io.writeLine("Proxy actions are disabled by feature flags.")
+                io.writeLine("Set HLSCACHECLI_PROXY_STATUS_ACTION=1 and/or HLSCACHECLI_PROXY_RESTART_ACTION=1 to enable.")
+            }
+
+            io.writeLine("0) Back")
+            io.writeLine("Choose an option:")
+
+            guard let selection = normalizedInput() else {
+                io.writeLine("Input stream closed. Returning to main menu.")
+                return
+            }
+
+            switch selection.lowercased() {
+            case "0", "b", "back":
+                shouldReturn = true
+            case "1" where statusEnabled:
+                runProxyStatusAction()
+            case "2" where restartEnabled:
+                runProxyRestartAction()
             default:
                 io.writeLine("Invalid selection '\(selection)'. Enter 0 to go back.")
             }
@@ -222,37 +258,22 @@ struct CLIApp {
         }
     }
 
-    private func runSubflow(title: String, options: [String]) {
-        var shouldReturn = false
-        while !shouldReturn {
-            io.writeLine("")
-            io.writeLine("[\(title)]")
-            for option in options {
-                io.writeLine(option)
-            }
-            io.writeLine("0) Back")
-            io.writeLine("Choose an option:")
+    private func runProxyStatusAction() {
+        let aliasCount = context.facade.listAliases().count
+        io.writeLine("Proxy status:")
+        io.writeLine("State: running")
+        io.writeLine("Base URL: \(context.serverBaseURL.absoluteString)")
+        io.writeLine("Registered aliases: \(aliasCount)")
+    }
 
-            guard let selection = normalizedInput() else {
-                io.writeLine("Input stream closed. Returning to main menu.")
-                return
-            }
-
-            switch selection.lowercased() {
-            case "0", "b", "back":
-                shouldReturn = true
-            case "1":
-                if title == "Settings" {
-                    io.writeLine("Settings file: \(context.settingsFileURL.path)")
-                } else {
-                    io.writeLine("Option 1 in \(title) is not implemented yet.")
-                }
-            case "2":
-                io.writeLine("Option 2 in \(title) is not implemented yet.")
-            default:
-                io.writeLine("Invalid selection '\(selection)'. Enter 0 to go back.")
-            }
-        }
+    private func runProxyRestartAction() {
+        context.facade.stopServer()
+        let restarted = context.facade.startServer(
+            host: context.serverBaseURL.host ?? CLIArguments.defaultHost,
+            port: context.serverBaseURL.port ?? CLIArguments.defaultPort
+        )
+        io.writeLine("Proxy server restarted.")
+        io.writeLine("Base URL: \(restarted.absoluteString)")
     }
 
     private func runInteractiveRegisterAssetFlow() {
@@ -546,6 +567,20 @@ struct CLIApp {
             return false
         default:
             return defaultValue
+        }
+    }
+
+    private func isFeatureFlagEnabled(_ name: String) -> Bool {
+        guard let raw = ProcessInfo.processInfo.environment[name]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return false
+        }
+
+        switch raw.lowercased() {
+        case "1", "true", "yes", "on":
+            return true
+        default:
+            return false
         }
     }
 
