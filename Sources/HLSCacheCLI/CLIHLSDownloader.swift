@@ -46,13 +46,34 @@ struct CLIDownloadProgress: Equatable {
     let currentKind: ResourceKind
 }
 
+struct CLIDownloadPlan: Equatable {
+    let playlistCount: Int
+    let mediaPlaylistCount: Int
+    let segmentCount: Int
+    let keyCount: Int
+    let totalUnits: Int
+}
+
 struct CLIHLSDownloader {
     typealias Fetcher = (_ request: URLRequest) throws -> (Data, URLResponse)
+    typealias PlanHandler = (_ plan: CLIDownloadPlan) -> Void
     typealias ProgressHandler = (_ progress: CLIDownloadProgress) -> Void
 
     private struct FetchedResource {
         let data: Data
         let contentType: String?
+    }
+
+    private struct DiscoveryPlan {
+        let playlistURLsInOrder: [URL]
+        let mediaPlaylistCount: Int
+        let keyURLs: [URL]
+        let segmentURLs: [URL]
+        let fetchedPlaylists: [String: FetchedResource]
+
+        var totalResources: Int {
+            playlistURLsInOrder.count + keyURLs.count + segmentURLs.count
+        }
     }
 
     private let baseDirectory: URL
@@ -75,40 +96,41 @@ struct CLIHLSDownloader {
         self.fetcher = fetcher
     }
 
-    func download(alias: String, progressHandler: ProgressHandler? = nil) throws -> CLIDownloadResult {
+    func download(
+        alias: String,
+        planHandler: PlanHandler? = nil,
+        progressHandler: ProgressHandler? = nil
+    ) throws -> CLIDownloadResult {
         guard let asset = facade.listAliases().first(where: { $0.alias == alias }) else {
             throw CLIDownloadError.aliasNotFound(alias)
         }
 
-        var pendingPlaylists: [URL] = [asset.currentRemoteURL]
-        var visitedPlaylists: Set<String> = []
-        var cachedResources: Set<ResourceID> = []
-        var plannedResources: Set<ResourceID> = []
-        let rootResourceID = makeResourceID(url: asset.currentRemoteURL, kind: .playlistM3U8, cacheKey: asset.cacheKey)
-        plannedResources.insert(rootResourceID)
+        let plan = try buildDiscoveryPlan(rootURL: asset.currentRemoteURL, headers: asset.headers)
 
-        var playlistCount = 0
-        var mediaPlaylistCount = 0
-        var segmentCount = 0
-        var keyCount = 0
+        let playlistCount = plan.playlistURLsInOrder.count
+        let mediaPlaylistCount = plan.mediaPlaylistCount
+        let segmentCount = plan.segmentURLs.count
+        let keyCount = plan.keyURLs.count
+        let totalUnits = plan.totalResources
+        planHandler?(
+            CLIDownloadPlan(
+                playlistCount: playlistCount,
+                mediaPlaylistCount: mediaPlaylistCount,
+                segmentCount: segmentCount,
+                keyCount: keyCount,
+                totalUnits: totalUnits
+            )
+        )
+
+        var processedUnits = 0
         var bytesWritten: Int64 = 0
 
-        while !pendingPlaylists.isEmpty {
-            let playlistURL = pendingPlaylists.removeFirst()
+        for playlistURL in plan.playlistURLsInOrder {
             let playlistKey = canonicalURLKey(for: playlistURL)
-            guard !visitedPlaylists.contains(playlistKey) else {
-                continue
+            guard let fetchedPlaylist = plan.fetchedPlaylists[playlistKey] else {
+                throw CLIDownloadError.responseMissing(playlistURL)
             }
-            visitedPlaylists.insert(playlistKey)
-
-            let playlistResourceID = makeResourceID(url: playlistURL, kind: .playlistM3U8, cacheKey: asset.cacheKey)
-            plannedResources.insert(playlistResourceID)
-
-            let fetchedPlaylist = try fetchResource(url: playlistURL, headers: asset.headers)
             let playlistData = fetchedPlaylist.data
-            guard let playlistText = String(data: playlistData, encoding: .utf8) else {
-                throw CLIDownloadError.invalidPlaylistEncoding(playlistURL)
-            }
 
             _ = try storeResource(
                 url: playlistURL,
@@ -117,108 +139,61 @@ struct CLIHLSDownloader {
                 data: playlistData,
                 contentType: fetchedPlaylist.contentType
             )
-            cachedResources.insert(playlistResourceID)
-            playlistCount += 1
+            processedUnits += 1
             bytesWritten += Int64(playlistData.count)
             progressHandler?(
                 CLIDownloadProgress(
-                    processedUnits: cachedResources.count,
-                    totalUnits: plannedResources.count,
+                    processedUnits: processedUnits,
+                    totalUnits: totalUnits,
                     bytesWritten: bytesWritten,
                     currentURL: playlistURL,
                     currentKind: .playlistM3U8
                 )
             )
+        }
 
-            let childPlaylists = try extractChildPlaylistURLs(from: playlistText, playlistURL: playlistURL)
-            for child in childPlaylists where !visitedPlaylists.contains(canonicalURLKey(for: child)) {
-                let childResourceID = makeResourceID(url: child, kind: .playlistM3U8, cacheKey: asset.cacheKey)
-                if plannedResources.insert(childResourceID).inserted {
-                    pendingPlaylists.append(child)
-                }
-            }
-
-            let isMediaPlaylist = playlistText.contains("#EXTINF")
-            if isMediaPlaylist {
-                mediaPlaylistCount += 1
-            }
-
-            let parsed = HLSPlaylistParser.parse(playlistText, playlistURL: playlistURL)
-            let mapURLs = try extractMapRemoteURLs(from: playlistText, playlistURL: playlistURL)
-
-            for key in parsed.keys where key.method?.uppercased() != "NONE" {
-                let keyResourceID = ResourceID(
-                    cacheKey: asset.cacheKey,
-                    kind: .key,
-                    resourceKey: ResourceID.makeResourceKey(from: key.remoteURL)
+        for keyURL in plan.keyURLs {
+            let fetchedKey = try fetchResource(url: keyURL, headers: asset.headers)
+            _ = try storeResource(
+                url: keyURL,
+                kind: .key,
+                cacheKey: asset.cacheKey,
+                data: fetchedKey.data,
+                contentType: fetchedKey.contentType
+            )
+            processedUnits += 1
+            bytesWritten += Int64(fetchedKey.data.count)
+            progressHandler?(
+                CLIDownloadProgress(
+                    processedUnits: processedUnits,
+                    totalUnits: totalUnits,
+                    bytesWritten: bytesWritten,
+                    currentURL: keyURL,
+                    currentKind: .key
                 )
-                guard !cachedResources.contains(keyResourceID) else {
-                    continue
-                }
-                plannedResources.insert(keyResourceID)
-                let fetchedKey = try fetchResource(url: key.remoteURL, headers: asset.headers)
-                _ = try storeResource(
-                    url: key.remoteURL,
-                    kind: .key,
-                    cacheKey: asset.cacheKey,
-                    data: fetchedKey.data,
-                    contentType: fetchedKey.contentType
-                )
-                cachedResources.insert(keyResourceID)
-                keyCount += 1
-                bytesWritten += Int64(fetchedKey.data.count)
-                progressHandler?(
-                    CLIDownloadProgress(
-                        processedUnits: cachedResources.count,
-                        totalUnits: plannedResources.count,
-                        bytesWritten: bytesWritten,
-                        currentURL: key.remoteURL,
-                        currentKind: .key
-                    )
-                )
-            }
+            )
+        }
 
-            let segmentURLs = parsed.segments.map(\.remoteURL) + mapURLs
-            for segmentURL in segmentURLs {
-                if looksLikePlaylistURL(segmentURL) {
-                    let segmentPlaylistKey = canonicalURLKey(for: segmentURL)
-                    if !visitedPlaylists.contains(segmentPlaylistKey) {
-                        pendingPlaylists.append(segmentURL)
-                    }
-                    continue
-                }
-
-                let segmentResourceID = ResourceID(
-                    cacheKey: asset.cacheKey,
-                    kind: .segment,
-                    resourceKey: ResourceID.makeResourceKey(from: segmentURL)
+        for segmentURL in plan.segmentURLs {
+            let fetchedSegment = try fetchResource(url: segmentURL, headers: asset.headers)
+            _ = try storeResource(
+                url: segmentURL,
+                kind: .segment,
+                cacheKey: asset.cacheKey,
+                data: fetchedSegment.data,
+                contentType: fetchedSegment.contentType
+            )
+            processedUnits += 1
+            bytesWritten += Int64(fetchedSegment.data.count)
+            progressHandler?(
+                CLIDownloadProgress(
+                    processedUnits: processedUnits,
+                    totalUnits: totalUnits,
+                    bytesWritten: bytesWritten,
+                    currentURL: segmentURL,
+                    currentKind: .segment
                 )
-                guard !cachedResources.contains(segmentResourceID) else {
-                    continue
-                }
-                plannedResources.insert(segmentResourceID)
-
-                let fetchedSegment = try fetchResource(url: segmentURL, headers: asset.headers)
-                _ = try storeResource(
-                    url: segmentURL,
-                    kind: .segment,
-                    cacheKey: asset.cacheKey,
-                    data: fetchedSegment.data,
-                    contentType: fetchedSegment.contentType
-                )
-                cachedResources.insert(segmentResourceID)
-                segmentCount += 1
-                bytesWritten += Int64(fetchedSegment.data.count)
-                progressHandler?(
-                    CLIDownloadProgress(
-                        processedUnits: cachedResources.count,
-                        totalUnits: plannedResources.count,
-                        bytesWritten: bytesWritten,
-                        currentURL: segmentURL,
-                        currentKind: .segment
-                    )
-                )
-            }
+            )
         }
 
         return CLIDownloadResult(
@@ -228,6 +203,81 @@ struct CLIHLSDownloader {
             segmentCount: segmentCount,
             keyCount: keyCount,
             bytesWritten: bytesWritten
+        )
+    }
+
+    private func buildDiscoveryPlan(rootURL: URL, headers: [String: String]?) throws -> DiscoveryPlan {
+        var pendingPlaylists: [URL] = [rootURL]
+        var visitedPlaylists: Set<String> = []
+        var playlistURLsInOrder: [URL] = []
+        var fetchedPlaylists: [String: FetchedResource] = [:]
+        var mediaPlaylistCount = 0
+
+        var keyURLs: [URL] = []
+        var keyURLKeys: Set<String> = []
+        var segmentURLs: [URL] = []
+        var segmentURLKeys: Set<String> = []
+
+        while !pendingPlaylists.isEmpty {
+            let playlistURL = pendingPlaylists.removeFirst()
+            let playlistKey = canonicalURLKey(for: playlistURL)
+            guard visitedPlaylists.insert(playlistKey).inserted else {
+                continue
+            }
+
+            let fetchedPlaylist = try fetchResource(url: playlistURL, headers: headers)
+            guard let playlistText = String(data: fetchedPlaylist.data, encoding: .utf8) else {
+                throw CLIDownloadError.invalidPlaylistEncoding(playlistURL)
+            }
+            fetchedPlaylists[playlistKey] = fetchedPlaylist
+            playlistURLsInOrder.append(playlistURL)
+
+            let childPlaylists = try extractChildPlaylistURLs(from: playlistText, playlistURL: playlistURL)
+            for childURL in childPlaylists {
+                let childKey = canonicalURLKey(for: childURL)
+                if !visitedPlaylists.contains(childKey) {
+                    pendingPlaylists.append(childURL)
+                }
+            }
+
+            if playlistText.contains("#EXTINF") {
+                mediaPlaylistCount += 1
+            }
+
+            let parsed = HLSPlaylistParser.parse(playlistText, playlistURL: playlistURL)
+            let mapURLs = try extractMapRemoteURLs(from: playlistText, playlistURL: playlistURL)
+
+            for key in parsed.keys where key.method?.uppercased() != "NONE" {
+                let keyURL = key.remoteURL
+                let keyURLKey = canonicalURLKey(for: keyURL)
+                if keyURLKeys.insert(keyURLKey).inserted {
+                    keyURLs.append(keyURL)
+                }
+            }
+
+            let discoveredSegmentURLs = parsed.segments.map(\.remoteURL) + mapURLs
+            for segmentURL in discoveredSegmentURLs {
+                if looksLikePlaylistURL(segmentURL) {
+                    let segmentPlaylistKey = canonicalURLKey(for: segmentURL)
+                    if !visitedPlaylists.contains(segmentPlaylistKey) {
+                        pendingPlaylists.append(segmentURL)
+                    }
+                    continue
+                }
+
+                let segmentURLKey = canonicalURLKey(for: segmentURL)
+                if segmentURLKeys.insert(segmentURLKey).inserted {
+                    segmentURLs.append(segmentURL)
+                }
+            }
+        }
+
+        return DiscoveryPlan(
+            playlistURLsInOrder: playlistURLsInOrder,
+            mediaPlaylistCount: mediaPlaylistCount,
+            keyURLs: keyURLs,
+            segmentURLs: segmentURLs,
+            fetchedPlaylists: fetchedPlaylists
         )
     }
 
