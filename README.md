@@ -290,6 +290,8 @@ Export cached HLS media to MP4:
 
 ```bash
 swift run HLSCacheCLI export --alias MD0534 --output /tmp/MD0534.mp4
+swift run HLSCacheCLI export --alias MD0534 --output /tmp/MD0534-av1.mp4 --av1
+swift run HLSCacheCLI export --alias MD0534 --output /tmp/MD0534-av1.mp4 --av1 --av1-preset 8 --av1-crf 30 --av1-bitrate 1400k
 ```
 
 Persisted CLI settings commands:
@@ -323,7 +325,10 @@ Interactive cache operations:
 Export behavior:
 - Validates cached media playlist + segment completeness before remux
 - Returns actionable error when cache is incomplete
-- Uses `ffmpeg` for remux and reports output path + size on success
+- Default mode remuxes with `-c copy` for backward compatibility
+- Optional `--av1` mode transcodes video with `libsvtav1` (better compression, slower encode)
+- AV1 tuning flags: `--av1-preset`, `--av1-crf`, `--av1-bitrate`
+- Uses `ffmpeg` for export and reports output path + size on success
 
 CLI quickstart (add/list/clear/settings/export):
 
@@ -347,6 +352,9 @@ swift run HLSCacheCLI clear --alias MD0534 --yes
 
 # 5) Export cached media to MP4
 swift run HLSCacheCLI export --alias MD0534 --output /tmp/MD0534.mp4
+
+# 6) Optional AV1 transcode mode (smaller files, slower encode)
+swift run HLSCacheCLI export --alias MD0534 --output /tmp/MD0534-av1.mp4 --av1 --av1-preset 8 --av1-crf 30
 ```
 
 Export prerequisites:
@@ -354,9 +362,11 @@ Export prerequisites:
 - Alias must exist and point to a cached media playlist.
 - Required segment data must be fully cached (incomplete cache fails fast).
 - AES-128 encrypted playlists are currently not supported by CLI export.
+- AV1 mode requires an ffmpeg build with `libsvtav1` encoder support.
 
 Export troubleshooting:
 - `ffmpeg is unavailable`: install ffmpeg and verify with `ffmpeg -version`.
+- `ffmpeg encoder 'libsvtav1' is not available`: install ffmpeg with AV1 encoder support, or run export without `--av1`.
 - `No cached media playlist was found`: ensure the alias was registered and playlist bytes were cached.
 - `Cache is incomplete`: warm cache by playing/downloading until required segments are fully written.
 - `MP4 remux failed`: inspect playlist/segment integrity and retry export after refreshing cache.
@@ -379,7 +389,7 @@ Validation command for local CLI changes:
 ##Limitations / Non-Goals
 
 - No DRM system implementation (FairPlay/Widevine)
-- No transcoding or re-muxing
+- No generalized transcoding pipeline outside CLI export mode
 - No multi-range HTTP support in initial version
 - Live HLS support may be limited in early versions
 - Proxy does not remain active while app is suspended

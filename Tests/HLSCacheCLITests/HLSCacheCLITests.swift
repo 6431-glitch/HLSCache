@@ -285,6 +285,48 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     )
 }
 
+@Test func cliArguments_parseExportCommand_withAV1Flags() throws {
+    let parsed = try CLIArguments.parse([
+        "export",
+        "--alias", "MDEXPORT",
+        "--output", "/tmp/output.mp4",
+        "--av1",
+        "--av1-preset", "8",
+        "--av1-crf", "29",
+        "--av1-bitrate", "1400k"
+    ])
+
+    #expect(
+        parsed.command == .exportMP4(
+            ExportMP4Command(
+                alias: "MDEXPORT",
+                outputURL: URL(fileURLWithPath: "/tmp/output.mp4").standardizedFileURL,
+                videoCodec: .av1(
+                    AV1TranscodeOptions(
+                        preset: "8",
+                        crf: 29,
+                        bitrate: "1400k"
+                    )
+                )
+            )
+        )
+    )
+}
+
+@Test func cliArguments_parseExportCommand_av1TuningWithoutMode_throws() throws {
+    do {
+        _ = try CLIArguments.parse([
+            "export",
+            "--alias", "MDEXPORT",
+            "--output", "/tmp/output.mp4",
+            "--av1-crf", "31"
+        ])
+        #expect(Bool(false))
+    } catch let error as CLIArgumentParseError {
+        #expect(error == .invalidArgument("AV1 tuning flags require --av1"))
+    }
+}
+
 @Test func cliArguments_parseExportCommand_missingOutput_throws() throws {
     do {
         _ = try CLIArguments.parse(["export", "--alias", "MDEXPORT"])
@@ -907,7 +949,7 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
             CLIExporter(
                 baseDirectory: appContext.baseDirectory,
                 facade: appContext.facade,
-                remuxRunner: { _, outputURL in
+                exportRunner: { _, outputURL, _ in
                     try FileManager.default.createDirectory(
                         at: outputURL.deletingLastPathComponent(),
                         withIntermediateDirectories: true
@@ -927,6 +969,7 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     #expect(exitCode == 0)
     #expect(io.outputLines.contains { $0.contains("Export completed successfully.") })
     #expect(io.outputLines.contains { $0.contains("Alias: MDEXPCLI") })
+    #expect(io.outputLines.contains { $0.contains("Video mode: remux (copy)") })
     #expect(io.outputLines.contains { $0.contains("Output: \(outputURL.path)") })
     #expect(io.outputLines.contains { $0.contains("Output size: 8 bytes") })
 }

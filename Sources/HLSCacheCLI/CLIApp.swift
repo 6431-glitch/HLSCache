@@ -545,9 +545,23 @@ struct CLIApp {
     private func runExportMP4Command(_ command: ExportMP4Command) -> Int32 {
         do {
             let exporter = makeExporter(context)
-            let result = try exporter.export(alias: command.alias, outputURL: command.outputURL)
+            let result = try exporter.export(
+                alias: command.alias,
+                outputURL: command.outputURL,
+                videoCodec: command.videoCodec
+            )
             io.writeLine("Export completed successfully.")
             io.writeLine("Alias: \(command.alias)")
+            switch command.videoCodec {
+            case .copy:
+                io.writeLine("Video mode: remux (copy)")
+            case let .av1(options):
+                if let bitrate = options.bitrate {
+                    io.writeLine("Video mode: AV1 (preset=\(options.preset), crf=\(options.crf), bitrate=\(bitrate))")
+                } else {
+                    io.writeLine("Video mode: AV1 (preset=\(options.preset), crf=\(options.crf))")
+                }
+            }
             io.writeLine("Output: \(result.outputURL.path)")
             io.writeLine("Output size: \(result.outputBytes) bytes")
             return 0

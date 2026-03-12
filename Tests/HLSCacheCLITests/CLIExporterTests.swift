@@ -159,10 +159,11 @@ private func seedCachedMediaPlaylist(
     let exporter = CLIExporter(
         baseDirectory: directory,
         facade: facade,
-        remuxRunner: { playlistURL, outputURL in
+        exportRunner: { playlistURL, outputURL, videoCodec in
             remuxInvoked = true
             let playlistText = try String(contentsOf: playlistURL, encoding: .utf8)
             #expect(playlistText.contains("segment-00000"))
+            #expect(videoCodec == .copy)
             try FileManager.default.createDirectory(
                 at: outputURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true
@@ -187,7 +188,7 @@ private func seedCachedMediaPlaylist(
     let exporter = CLIExporter(
         baseDirectory: directory,
         facade: facade,
-        remuxRunner: { _, _ in
+        exportRunner: { _, _, _ in
             throw CLIExportError.remuxFailed("should not be invoked for incomplete cache")
         }
     )
@@ -215,7 +216,7 @@ private func seedCachedMediaPlaylist(
     let exporter = CLIExporter(
         baseDirectory: directory,
         facade: facade,
-        remuxRunner: { _, _ in
+        exportRunner: { _, _, _ in
             throw CLIExportError.remuxFailed("should not be invoked for encrypted playlist")
         }
     )
@@ -251,11 +252,12 @@ private func seedCachedMediaPlaylist(
     let exporter = CLIExporter(
         baseDirectory: directory,
         facade: facade,
-        remuxRunner: { playlistURL, outputURL in
+        exportRunner: { playlistURL, outputURL, videoCodec in
             remuxInvoked = true
             let playlistText = try String(contentsOf: playlistURL, encoding: .utf8)
             #expect(playlistText.contains("key-00000"))
             #expect(playlistText.contains("segment-00000"))
+            #expect(videoCodec == .copy)
             try FileManager.default.createDirectory(
                 at: outputURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true
@@ -268,4 +270,81 @@ private func seedCachedMediaPlaylist(
     #expect(remuxInvoked)
     #expect(result.outputURL == outputURL)
     #expect(result.outputBytes == 8)
+}
+
+@Test func exporter_exportAV1Mode_invokesTranscodeRunnerAndReturnsOutputSize() throws {
+    let directory = try makeExporterTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedCachedMediaPlaylist(baseDirectory: directory, alias: "MDEXPORT5", completeCache: true, includeKeyTag: false)
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    let outputURL = directory.appendingPathComponent("out/video-av1.mp4")
+    var exportInvoked = false
+    var probeInvoked = false
+
+    let options = AV1TranscodeOptions(preset: "7", crf: 30, bitrate: "1200k")
+    let exporter = CLIExporter(
+        baseDirectory: directory,
+        facade: facade,
+        exportRunner: { playlistURL, outputURL, videoCodec in
+            exportInvoked = true
+            let playlistText = try String(contentsOf: playlistURL, encoding: .utf8)
+            #expect(playlistText.contains("segment-00000"))
+            #expect(videoCodec == .av1(options))
+            try FileManager.default.createDirectory(
+                at: outputURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data("fake-av1-mp4".utf8).write(to: outputURL)
+        },
+        encoderAvailabilityChecker: { encoderName in
+            probeInvoked = true
+            #expect(encoderName == "libsvtav1")
+        }
+    )
+
+    let result = try exporter.export(alias: "MDEXPORT5", outputURL: outputURL, videoCodec: .av1(options))
+    #expect(exportInvoked)
+    #expect(probeInvoked)
+    #expect(result.outputURL == outputURL)
+    #expect(result.outputBytes == 12)
+}
+
+@Test func exporter_exportAV1Mode_whenEncoderUnavailable_throwsActionableError() throws {
+    let directory = try makeExporterTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedCachedMediaPlaylist(baseDirectory: directory, alias: "MDEXPORT6", completeCache: true, includeKeyTag: false)
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    let outputURL = directory.appendingPathComponent("out/video-av1.mp4")
+    var exportInvoked = false
+
+    let exporter = CLIExporter(
+        baseDirectory: directory,
+        facade: facade,
+        exportRunner: { _, _, _ in
+            exportInvoked = true
+            throw CLIExportError.remuxFailed("export should not run when AV1 encoder is unavailable")
+        },
+        encoderAvailabilityChecker: { _ in
+            throw CLIExportError.ffmpegUnavailable("ffmpeg encoder 'libsvtav1' is not available. Install ffmpeg with libsvtav1 support, or rerun export without --av1.")
+        }
+    )
+
+    do {
+        _ = try exporter.export(
+            alias: "MDEXPORT6",
+            outputURL: outputURL,
+            videoCodec: .av1(AV1TranscodeOptions(preset: "6", crf: 32, bitrate: nil))
+        )
+        #expect(Bool(false))
+    } catch let error as CLIExportError {
+        #expect(!exportInvoked)
+        switch error {
+        case let .ffmpegUnavailable(reason):
+            #expect(reason.contains("libsvtav1"))
+        default:
+            #expect(Bool(false))
+        }
+    }
 }
