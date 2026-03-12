@@ -19,6 +19,7 @@ The architecture cleanly separates playback proxying, storage, and background do
 - Optional encrypt-at-rest layer
 - Designed for AVPlayer compatibility (HLS + MP4)
 - Server-agnostic `CoreCache` module usable outside proxy context
+- Offline playback mode toggle in `ProxyCacheCoordinator` (`allowNetworkFallback: false`)
 - Atomic manifest persistence and crash-safe writes
 - Thread-safe concurrent read/write support
 
@@ -247,6 +248,7 @@ Playlist rewrite helper available:
 - `HLSPlaylistParser.parse(_:playlistURL:)` to extract media segment and `EXT-X-KEY` remote URLs
 - `ProxyRangeResponse.make(rangeHeader:totalLength:)` for AVPlayer-compatible 200/206 range response metadata
 - `ProxyCacheCoordinator.serve(...)` for mixed cache/network streaming over `CoreCache` read plans
+  Set `allowNetworkFallback: false` to enforce disk-only serving (offline playback mode).
 
 ## CLI Scaffold
 
