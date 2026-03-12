@@ -967,11 +967,85 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     )
 
     #expect(exitCode == 0)
+    #expect(io.outputLines.contains { $0.contains("Export progress:") })
     #expect(io.outputLines.contains { $0.contains("Export completed successfully.") })
+    #expect(io.outputLines.contains { $0.contains("Export completed in ") })
     #expect(io.outputLines.contains { $0.contains("Alias: MDEXPCLI") })
     #expect(io.outputLines.contains { $0.contains("Video mode: remux (copy)") })
     #expect(io.outputLines.contains { $0.contains("Output: \(outputURL.path)") })
     #expect(io.outputLines.contains { $0.contains("Output size: 8 bytes") })
+}
+
+@Test func cliDownloadCommand_runsThroughCLIApp_andPrintsProgressSummary() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    _ = try context.facade.register(
+        alias: "MDDLPROG",
+        assetID: "asset-download-progress",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/progress/media.m3u8"))
+    )
+
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(
+        context: context,
+        io: io,
+        makeDownloader: { appContext in
+            CLIHLSDownloader(
+                baseDirectory: appContext.baseDirectory,
+                facade: appContext.facade,
+                fetcher: { request in
+                    let url = try #require(request.url)
+                    let body: Data
+                    let contentType: String
+
+                    switch url.absoluteString {
+                    case "https://cdn.example.com/progress/media.m3u8":
+                        body = Data(
+                            """
+                            #EXTM3U
+                            #EXT-X-VERSION:3
+                            #EXT-X-TARGETDURATION:8
+                            #EXTINF:8.0,
+                            seg-1.ts
+                            #EXTINF:8.0,
+                            seg-2.ts
+                            #EXT-X-ENDLIST
+                            """.utf8
+                        )
+                        contentType = "application/vnd.apple.mpegurl"
+                    case "https://cdn.example.com/progress/seg-1.ts":
+                        body = Data(repeating: 0x11, count: 188)
+                        contentType = "video/mp2t"
+                    case "https://cdn.example.com/progress/seg-2.ts":
+                        body = Data(repeating: 0x22, count: 188)
+                        contentType = "video/mp2t"
+                    default:
+                        throw CLIDownloadError.requestFailed(url: url, statusCode: 404, reason: "Not Found")
+                    }
+
+                    let response = HTTPURLResponse(
+                        url: url,
+                        statusCode: 200,
+                        httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": contentType]
+                    )!
+                    return (body, response)
+                }
+            )
+        }
+    )
+
+    let exitCode = app.run(command: .download(DownloadCommand(alias: "MDDLPROG")))
+
+    #expect(exitCode == 0)
+    #expect(io.outputLines.contains { $0.contains("Download progress:") })
+    #expect(io.outputLines.contains { $0.contains("Download completed successfully.") })
+    #expect(io.outputLines.contains { $0.contains("Download completed in ") })
+    #expect(io.outputLines.contains { $0.contains("Alias: MDDLPROG") })
+    #expect(io.outputLines.contains { $0.contains("Segments cached: 2") })
+    #expect(io.outputLines.contains { $0.contains("Bytes written:") })
 }
 
 @Test func cliDownloadCommand_missingAliasPrintsActionableError() throws {

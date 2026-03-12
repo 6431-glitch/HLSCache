@@ -33,9 +33,24 @@ struct CLIExportResult: Equatable {
     let outputBytes: Int64
 }
 
+struct CLIExportProgress: Equatable {
+    enum Phase: String, Equatable {
+        case preparing
+        case staging
+        case encoding
+        case completed
+    }
+
+    let phase: Phase
+    let processedUnits: Int
+    let totalUnits: Int
+    let detail: String?
+}
+
 struct CLIExporter {
     typealias ExportRunner = (_ playlistURL: URL, _ outputURL: URL, _ videoCodec: ExportVideoCodec) throws -> Void
     typealias EncoderAvailabilityChecker = (_ encoderName: String) throws -> Void
+    typealias ProgressHandler = (_ progress: CLIExportProgress) -> Void
 
     private struct PlaylistCandidate {
         let playlistText: String
@@ -65,7 +80,12 @@ struct CLIExporter {
         self.encoderAvailabilityChecker = encoderAvailabilityChecker
     }
 
-    func export(alias: String, outputURL: URL, videoCodec: ExportVideoCodec = .copy) throws -> CLIExportResult {
+    func export(
+        alias: String,
+        outputURL: URL,
+        videoCodec: ExportVideoCodec = .copy,
+        progressHandler: ProgressHandler? = nil
+    ) throws -> CLIExportResult {
         guard outputURL.pathExtension.lowercased() == "mp4" else {
             throw CLIExportError.invalidOutputPath(outputURL.path)
         }
@@ -91,6 +111,18 @@ struct CLIExporter {
             diskStore: diskStore
         )
 
+        let totalCopyUnits = candidate.mapRemoteURLs.count + candidate.segmentRemoteURLs.count + candidate.keyRemoteURLs.count
+        let totalUnits = max(totalCopyUnits + 1, 1)
+        var processedUnits = 0
+        progressHandler?(
+            CLIExportProgress(
+                phase: .preparing,
+                processedUnits: processedUnits,
+                totalUnits: totalUnits,
+                detail: "Preparing local export staging area"
+            )
+        )
+
         let outputDirectory = outputURL.deletingLastPathComponent()
         try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 
@@ -106,7 +138,18 @@ struct CLIExporter {
             kind: .segment,
             cacheKey: asset.cacheKey,
             diskStore: diskStore,
-            destinationDirectory: stagingDirectory
+            destinationDirectory: stagingDirectory,
+            onCopy: { fileName in
+                processedUnits += 1
+                progressHandler?(
+                    CLIExportProgress(
+                        phase: .staging,
+                        processedUnits: processedUnits,
+                        totalUnits: totalUnits,
+                        detail: "Staged \(fileName)"
+                    )
+                )
+            }
         )
         let segmentFileNames = try copyResources(
             urls: candidate.segmentRemoteURLs,
@@ -114,7 +157,18 @@ struct CLIExporter {
             kind: .segment,
             cacheKey: asset.cacheKey,
             diskStore: diskStore,
-            destinationDirectory: stagingDirectory
+            destinationDirectory: stagingDirectory,
+            onCopy: { fileName in
+                processedUnits += 1
+                progressHandler?(
+                    CLIExportProgress(
+                        phase: .staging,
+                        processedUnits: processedUnits,
+                        totalUnits: totalUnits,
+                        detail: "Staged \(fileName)"
+                    )
+                )
+            }
         )
         let keyFileNames = try copyResources(
             urls: candidate.keyRemoteURLs,
@@ -122,7 +176,18 @@ struct CLIExporter {
             kind: .key,
             cacheKey: asset.cacheKey,
             diskStore: diskStore,
-            destinationDirectory: stagingDirectory
+            destinationDirectory: stagingDirectory,
+            onCopy: { fileName in
+                processedUnits += 1
+                progressHandler?(
+                    CLIExportProgress(
+                        phase: .staging,
+                        processedUnits: processedUnits,
+                        totalUnits: totalUnits,
+                        detail: "Staged \(fileName)"
+                    )
+                )
+            }
         )
 
         let rewrittenPlaylist = try rewritePlaylist(
@@ -139,7 +204,24 @@ struct CLIExporter {
             try encoderAvailabilityChecker("libsvtav1")
         }
 
+        progressHandler?(
+            CLIExportProgress(
+                phase: .encoding,
+                processedUnits: processedUnits,
+                totalUnits: totalUnits,
+                detail: videoCodec == .copy ? "Running ffmpeg remux" : "Running ffmpeg AV1 transcode"
+            )
+        )
         try exportRunner(localPlaylistURL, outputURL, videoCodec)
+        processedUnits = totalUnits
+        progressHandler?(
+            CLIExportProgress(
+                phase: .completed,
+                processedUnits: processedUnits,
+                totalUnits: totalUnits,
+                detail: "Export output generated"
+            )
+        )
 
         guard fileManager.fileExists(atPath: outputURL.path) else {
             throw CLIExportError.remuxFailed("Output file was not created.")
@@ -252,7 +334,8 @@ struct CLIExporter {
         kind: ResourceKind,
         cacheKey: CacheKey,
         diskStore: DiskStore,
-        destinationDirectory: URL
+        destinationDirectory: URL,
+        onCopy: ((String) -> Void)? = nil
     ) throws -> [URL: String] {
         var output: [URL: String] = [:]
         for (index, remoteURL) in urls.enumerated() {
@@ -274,6 +357,7 @@ struct CLIExporter {
             }
             try fileManager.copyItem(at: sourceURL, to: destinationURL)
             output[remoteURL] = fileName
+            onCopy?(fileName)
         }
         return output
     }

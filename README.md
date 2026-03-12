@@ -322,12 +322,19 @@ Interactive cache operations:
 - Destructive confirmation prompt (`--yes`/`yes`) before execution
 - Post-clear verification output includes alias state/count and resulting cache bytes
 
+Download behavior:
+- Non-interactive `download` shows periodic progress updates.
+- Progress lines include processed/known-total resources, elapsed time, ETA, and bytes written.
+- Completion prints a final summary including total elapsed time.
+
 Export behavior:
 - Validates cached media playlist + segment completeness before remux
 - Returns actionable error when cache is incomplete
 - Default mode remuxes with `-c copy` for backward compatibility
 - Optional `--av1` mode transcodes video with `libsvtav1` (better compression, slower encode)
 - AV1 tuning flags: `--av1-preset`, `--av1-crf`, `--av1-bitrate`
+- Non-interactive `export` shows periodic progress updates with elapsed time and ETA.
+- Completion prints a final summary including total elapsed time.
 - Uses `ffmpeg` for export and reports output path + size on success
 
 CLI quickstart (add/list/clear/settings/export):
