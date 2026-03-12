@@ -6,6 +6,9 @@ struct CLIApp {
     private let io: any CLIIO
     private let makeExporter: (CLIAppContext) -> CLIExporter
     private let makeDownloader: (CLIAppContext) -> CLIHLSDownloader
+    private let proxyStatusProvider: () -> ProxyServerStatus
+    private let stopProxyServer: () -> Void
+    private let startProxyServer: (_ host: String, _ port: Int) -> URL
 
     init(
         context: CLIAppContext,
@@ -15,12 +18,20 @@ struct CLIApp {
         },
         makeDownloader: @escaping (CLIAppContext) -> CLIHLSDownloader = { context in
             CLIHLSDownloader(baseDirectory: context.baseDirectory, facade: context.facade)
-        }
+        },
+        proxyStatusProvider: (() -> ProxyServerStatus)? = nil,
+        stopProxyServer: (() -> Void)? = nil,
+        startProxyServer: ((_ host: String, _ port: Int) -> URL)? = nil
     ) {
         self.context = context
         self.io = io
         self.makeExporter = makeExporter
         self.makeDownloader = makeDownloader
+        self.proxyStatusProvider = proxyStatusProvider ?? { context.facade.proxyStatus() }
+        self.stopProxyServer = stopProxyServer ?? { context.facade.stopServer() }
+        self.startProxyServer = startProxyServer ?? { host, port in
+            context.facade.startServer(host: host, port: port)
+        }
     }
 
     @discardableResult
@@ -125,7 +136,7 @@ struct CLIApp {
             io.writeLine("")
             io.writeLine("[Proxy Server]")
             // Decision path for HLS-90: runtime is ready, so proxy actions stay visible by default.
-            let runtimeStatus = context.facade.proxyStatus()
+            let runtimeStatus = proxyStatusProvider()
             if let baseURL = runtimeStatus.baseURL {
                 io.writeLine("Proxy base URL: \(baseURL.absoluteString)")
             } else {
@@ -286,7 +297,7 @@ struct CLIApp {
     }
 
     private func runProxyStatusAction() {
-        let status = context.facade.proxyStatus()
+        let status = proxyStatusProvider()
         let aliasCount = context.facade.listAliases().count
         io.writeLine("Proxy status:")
         writeProxyStatusContext(status)
@@ -298,20 +309,17 @@ struct CLIApp {
 
     @discardableResult
     private func runProxyRestartAction() -> Int32 {
-        let before = context.facade.proxyStatus()
+        let before = proxyStatusProvider()
         io.writeLine("Restarting proxy server...")
         io.writeLine("Before restart:")
         writeProxyStatusContext(before)
 
-        context.facade.stopServer()
+        stopProxyServer()
 
         let restartHost = before.host ?? context.serverBaseURL.host ?? CLIArguments.defaultHost
         let restartPort = before.port ?? context.serverBaseURL.port ?? CLIArguments.defaultPort
-        let restarted = context.facade.startServer(
-            host: restartHost,
-            port: restartPort
-        )
-        let after = context.facade.proxyStatus()
+        let restarted = startProxyServer(restartHost, restartPort)
+        let after = proxyStatusProvider()
 
         guard after.isRunning else {
             io.writeLine("Failed to restart proxy server.")
