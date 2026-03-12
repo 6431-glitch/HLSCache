@@ -249,6 +249,7 @@ Playlist rewrite helper available:
 - `ProxyRangeResponse.make(rangeHeader:totalLength:)` for AVPlayer-compatible 200/206 range response metadata
 - `ProxyCacheCoordinator.serve(...)` for mixed cache/network streaming over `CoreCache` read plans
   Set `allowNetworkFallback: false` to enforce disk-only serving (offline playback mode).
+- `BackgroundURLSessionDownloadCoordinator` to register URLSession download task mappings, recover active background tasks after relaunch, and finalize completed downloads into cache + manifest atomically.
 
 ## CLI Scaffold
 
