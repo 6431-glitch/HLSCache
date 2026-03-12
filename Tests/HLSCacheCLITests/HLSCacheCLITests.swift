@@ -1040,6 +1040,7 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     let exitCode = app.run(command: .download(DownloadCommand(alias: "MDDLPROG")))
 
     #expect(exitCode == 0)
+    #expect(io.outputLines.contains { $0.contains("Download plan: playlists 1 (media 1) | segments 2 | keys 0 | total resources 3") })
     #expect(io.outputLines.contains { $0.contains("Download progress:") })
     #expect(io.outputLines.contains { $0.contains("Download completed successfully.") })
     #expect(io.outputLines.contains { $0.contains("Download completed in ") })

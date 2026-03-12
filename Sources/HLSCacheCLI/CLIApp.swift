@@ -623,6 +623,7 @@ struct CLIApp {
 
     private func runDownloadCommand(_ command: DownloadCommand) -> Int32 {
         let startedAt = Date()
+        var discoveredPlan: CLIDownloadPlan?
         var lastProgress: CLIDownloadProgress?
         var lastRenderAt = Date.distantPast
 
@@ -658,6 +659,12 @@ struct CLIApp {
             let downloader = makeDownloader(context)
             let result = try downloader.download(
                 alias: command.alias,
+                planHandler: { plan in
+                    discoveredPlan = plan
+                    io.writeLine(
+                        "Download plan: playlists \(plan.playlistCount) (media \(plan.mediaPlaylistCount)) | segments \(plan.segmentCount) | keys \(plan.keyCount) | total resources \(plan.totalUnits)"
+                    )
+                },
                 progressHandler: { progress in
                     lastProgress = progress
                     renderProgress(progress)
@@ -684,6 +691,11 @@ struct CLIApp {
                 )
             } else {
                 io.writeLine("Download failed after \(elapsedText).")
+                if let discoveredPlan {
+                    io.writeLine(
+                        "Planned resources before failure: \(discoveredPlan.totalUnits) (segments \(discoveredPlan.segmentCount), keys \(discoveredPlan.keyCount), playlists \(discoveredPlan.playlistCount))."
+                    )
+                }
             }
             io.writeLine(error.localizedDescription)
             return 1
