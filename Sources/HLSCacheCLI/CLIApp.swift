@@ -543,14 +543,56 @@ struct CLIApp {
     }
 
     private func runExportMP4Command(_ command: ExportMP4Command) -> Int32 {
+        let startedAt = Date()
+        var lastProgress: CLIExportProgress?
+        var lastRenderAt = Date.distantPast
+
+        func renderProgress(_ progress: CLIExportProgress, force: Bool = false) {
+            let now = Date()
+            guard force || now.timeIntervalSince(lastRenderAt) >= 0.5 else {
+                return
+            }
+            lastRenderAt = now
+
+            let percent = progress.totalUnits > 0
+                ? Int((Double(progress.processedUnits) / Double(progress.totalUnits) * 100).rounded())
+                : 0
+            let elapsed = now.timeIntervalSince(startedAt)
+            let elapsedText = formatDuration(elapsed)
+
+            var etaText = "n/a"
+            let remaining = max(progress.totalUnits - progress.processedUnits, 0)
+            if progress.processedUnits > 0, remaining > 0 {
+                let rate = Double(progress.processedUnits) / max(elapsed, 0.001)
+                let etaSeconds = Double(remaining) / max(rate, 0.001)
+                etaText = formatDuration(etaSeconds)
+            } else if remaining == 0 {
+                etaText = "0s"
+            }
+
+            let detailSuffix = progress.detail.map { " | \($0)" } ?? ""
+            io.writeLine(
+                "Export progress: \(progress.processedUnits)/\(progress.totalUnits) (\(percent)%) | elapsed \(elapsedText) | eta \(etaText) | phase \(progress.phase.rawValue)\(detailSuffix)"
+            )
+        }
+
         do {
             let exporter = makeExporter(context)
             let result = try exporter.export(
                 alias: command.alias,
                 outputURL: command.outputURL,
-                videoCodec: command.videoCodec
+                videoCodec: command.videoCodec,
+                progressHandler: { progress in
+                    lastProgress = progress
+                    renderProgress(progress)
+                }
             )
+            if let lastProgress {
+                renderProgress(lastProgress, force: true)
+            }
+            let elapsedText = formatDuration(Date().timeIntervalSince(startedAt))
             io.writeLine("Export completed successfully.")
+            io.writeLine("Export completed in \(elapsedText).")
             io.writeLine("Alias: \(command.alias)")
             switch command.videoCodec {
             case .copy:
@@ -566,16 +608,67 @@ struct CLIApp {
             io.writeLine("Output size: \(result.outputBytes) bytes")
             return 0
         } catch {
+            let elapsedText = formatDuration(Date().timeIntervalSince(startedAt))
+            if let lastProgress {
+                io.writeLine(
+                    "Export failed after \(elapsedText) at \(lastProgress.processedUnits)/\(lastProgress.totalUnits) (phase \(lastProgress.phase.rawValue))."
+                )
+            } else {
+                io.writeLine("Export failed after \(elapsedText).")
+            }
             io.writeLine(error.localizedDescription)
             return 1
         }
     }
 
     private func runDownloadCommand(_ command: DownloadCommand) -> Int32 {
+        let startedAt = Date()
+        var lastProgress: CLIDownloadProgress?
+        var lastRenderAt = Date.distantPast
+
+        func renderProgress(_ progress: CLIDownloadProgress, force: Bool = false) {
+            let now = Date()
+            guard force || now.timeIntervalSince(lastRenderAt) >= 0.5 else {
+                return
+            }
+            lastRenderAt = now
+
+            let percent = progress.totalUnits > 0
+                ? Int((Double(progress.processedUnits) / Double(progress.totalUnits) * 100).rounded())
+                : 0
+            let elapsed = now.timeIntervalSince(startedAt)
+            let elapsedText = formatDuration(elapsed)
+
+            var etaText = "n/a"
+            let remaining = max(progress.totalUnits - progress.processedUnits, 0)
+            if progress.processedUnits > 0, remaining > 0 {
+                let rate = Double(progress.processedUnits) / max(elapsed, 0.001)
+                let etaSeconds = Double(remaining) / max(rate, 0.001)
+                etaText = formatDuration(etaSeconds)
+            } else if remaining == 0 {
+                etaText = "0s"
+            }
+
+            io.writeLine(
+                "Download progress: \(progress.processedUnits)/\(progress.totalUnits) (\(percent)%) | elapsed \(elapsedText) | eta \(etaText) | bytes \(progress.bytesWritten) | \(progress.currentKind.rawValue) \(progress.currentURL.lastPathComponent)"
+            )
+        }
+
         do {
             let downloader = makeDownloader(context)
-            let result = try downloader.download(alias: command.alias)
+            let result = try downloader.download(
+                alias: command.alias,
+                progressHandler: { progress in
+                    lastProgress = progress
+                    renderProgress(progress)
+                }
+            )
+            if let lastProgress {
+                renderProgress(lastProgress, force: true)
+            }
+            let elapsedText = formatDuration(Date().timeIntervalSince(startedAt))
             io.writeLine("Download completed successfully.")
+            io.writeLine("Download completed in \(elapsedText).")
             io.writeLine("Alias: \(result.alias)")
             io.writeLine("Playlists cached: \(result.playlistCount)")
             io.writeLine("Media playlists: \(result.mediaPlaylistCount)")
@@ -584,9 +677,32 @@ struct CLIApp {
             io.writeLine("Bytes written: \(result.bytesWritten)")
             return 0
         } catch {
+            let elapsedText = formatDuration(Date().timeIntervalSince(startedAt))
+            if let lastProgress {
+                io.writeLine(
+                    "Download failed after \(elapsedText) at \(lastProgress.processedUnits)/\(lastProgress.totalUnits) while fetching \(lastProgress.currentKind.rawValue) \(lastProgress.currentURL.absoluteString)."
+                )
+            } else {
+                io.writeLine("Download failed after \(elapsedText).")
+            }
             io.writeLine(error.localizedDescription)
             return 1
         }
+    }
+
+    private func formatDuration(_ seconds: TimeInterval) -> String {
+        let rounded = max(Int(seconds.rounded()), 0)
+        let hours = rounded / 3600
+        let minutes = (rounded % 3600) / 60
+        let secs = rounded % 60
+
+        if hours > 0 {
+            return "\(hours)h \(minutes)m \(secs)s"
+        }
+        if minutes > 0 {
+            return "\(minutes)m \(secs)s"
+        }
+        return "\(secs)s"
     }
 
     private func mergedHeadersWithDefaultUserAgent(_ providedHeaders: [String: String]?) -> [String: String]? {

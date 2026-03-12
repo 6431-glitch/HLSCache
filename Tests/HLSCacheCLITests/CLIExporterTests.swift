@@ -348,3 +348,39 @@ private func seedCachedMediaPlaylist(
         }
     }
 }
+
+@Test func exporter_exportCompleteCache_reportsProgressEvents() throws {
+    let directory = try makeExporterTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedCachedMediaPlaylist(baseDirectory: directory, alias: "MDEXPORT7", completeCache: true, includeKeyTag: false)
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    let outputURL = directory.appendingPathComponent("out/video.mp4")
+    var progressEvents: [CLIExportProgress] = []
+
+    let exporter = CLIExporter(
+        baseDirectory: directory,
+        facade: facade,
+        exportRunner: { _, outputURL, _ in
+            try FileManager.default.createDirectory(
+                at: outputURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data("fake-mp4".utf8).write(to: outputURL)
+        }
+    )
+
+    _ = try exporter.export(
+        alias: "MDEXPORT7",
+        outputURL: outputURL,
+        progressHandler: { progress in
+            progressEvents.append(progress)
+        }
+    )
+
+    #expect(!progressEvents.isEmpty)
+    #expect(progressEvents.contains { $0.phase == .preparing })
+    #expect(progressEvents.contains { $0.phase == .encoding })
+    #expect(progressEvents.last?.phase == .completed)
+    #expect(progressEvents.last?.processedUnits == progressEvents.last?.totalUnits)
+}
