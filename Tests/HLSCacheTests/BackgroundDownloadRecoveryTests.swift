@@ -110,3 +110,83 @@ private func makeBackgroundDownloadResourceID(assetID: String, suffix: String) t
     #expect(manifest.expectedLength == 12)
     #expect(manifest.completedRanges.contains(fullRange))
 }
+
+@Test func backgroundURLSessionCoordinator_registerAndRecoverPendingTasks_fromURLSessionTasks() throws {
+    let directory = try makeBackgroundDownloadTempDirectory(prefix: "bg-urlsession-recover")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let coordinator = BackgroundURLSessionDownloadCoordinator(baseDirectory: directory)
+    let session = URLSession(configuration: .ephemeral)
+    defer { session.invalidateAndCancel() }
+
+    let remoteURL1 = try #require(URL(string: "https://origin.example.com/seg-401.ts"))
+    let remoteURL2 = try #require(URL(string: "https://origin.example.com/seg-402.ts"))
+    let task1 = session.downloadTask(with: remoteURL1)
+    let task2 = session.downloadTask(with: remoteURL2)
+
+    _ = try coordinator.registerDownloadTask(
+        task1,
+        resourceID: try makeBackgroundDownloadResourceID(assetID: "asset-bg-401", suffix: "seg-401.ts"),
+        remoteURL: remoteURL1
+    )
+    _ = try coordinator.registerDownloadTask(
+        task2,
+        resourceID: try makeBackgroundDownloadResourceID(assetID: "asset-bg-402", suffix: "seg-402.ts"),
+        remoteURL: remoteURL2
+    )
+
+    let recovered = try coordinator.recoverPendingTasks(activeTasks: [task2])
+    #expect(recovered.count == 1)
+    #expect(recovered.first?.taskIdentifier == task2.taskIdentifier)
+    #expect(coordinator.taskRecord(for: task1) == nil)
+    #expect(coordinator.taskRecord(for: task2) != nil)
+}
+
+@Test func backgroundURLSessionCoordinator_completeDownload_usesResponseMetadataAndUpdatesManifest() throws {
+    let directory = try makeBackgroundDownloadTempDirectory(prefix: "bg-urlsession-complete")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let coordinator = BackgroundURLSessionDownloadCoordinator(baseDirectory: directory)
+    let session = URLSession(configuration: .ephemeral)
+    defer { session.invalidateAndCancel() }
+
+    let remoteURL = try #require(URL(string: "https://origin.example.com/seg-500.ts"))
+    let task = session.downloadTask(with: remoteURL)
+    let resourceID = try makeBackgroundDownloadResourceID(assetID: "asset-bg-500", suffix: "seg-500.ts")
+
+    _ = try coordinator.registerDownloadTask(
+        task,
+        resourceID: resourceID,
+        remoteURL: remoteURL
+    )
+
+    let payload = Data("SEGMENT-DATA".utf8)
+    let temporaryFileURL = directory.appendingPathComponent("seg-500.tmp")
+    try payload.write(to: temporaryFileURL)
+    let response = try #require(
+        HTTPURLResponse(
+            url: remoteURL,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: [
+                "Content-Type": "video/mp2t",
+                "Content-Length": String(payload.count)
+            ]
+        )
+    )
+
+    let result = try coordinator.completeDownload(
+        task: task,
+        temporaryFileURL: temporaryFileURL,
+        response: response
+    )
+
+    #expect(result.taskIdentifier == task.taskIdentifier)
+    #expect(coordinator.taskRecord(for: task) == nil)
+
+    let manifestStore = ManifestStore(baseDirectory: directory)
+    let manifest = try #require(try manifestStore.load(resourceID: resourceID))
+    #expect(manifest.originalURL == remoteURL)
+    #expect(manifest.contentType == "video/mp2t")
+    #expect(manifest.expectedLength == Int64(payload.count))
+}
