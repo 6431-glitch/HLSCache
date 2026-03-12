@@ -357,10 +357,13 @@ swift run HLSCacheCLI settings get
 # 4) Clear cache safely
 swift run HLSCacheCLI clear --alias MD0534 --yes
 
-# 5) Export cached media to MP4
+# 5) Cache full HLS content for offline/export workflows
+swift run HLSCacheCLI download --alias MD0534
+
+# 6) Export cached media to MP4
 swift run HLSCacheCLI export --alias MD0534 --output /tmp/MD0534.mp4
 
-# 6) Optional AV1 transcode mode (smaller files, slower encode)
+# 7) Optional AV1 transcode mode (smaller files, slower encode)
 swift run HLSCacheCLI export --alias MD0534 --output /tmp/MD0534-av1.mp4 --av1 --av1-preset 8 --av1-crf 30
 ```
 
@@ -368,7 +371,7 @@ Export prerequisites:
 - `ffmpeg` must be installed and available in `PATH`.
 - Alias must exist and point to a cached media playlist.
 - Required segment data must be fully cached (incomplete cache fails fast).
-- AES-128 encrypted playlists are currently not supported by CLI export.
+- AES-128 encrypted playlists are exportable when the referenced key material is already cached.
 - AV1 mode requires an ffmpeg build with `libsvtav1` encoder support.
 
 Export troubleshooting:
