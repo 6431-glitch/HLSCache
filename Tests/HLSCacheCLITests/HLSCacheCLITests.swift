@@ -485,6 +485,78 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     #expect(io.outputLines.contains { $0.contains("Goodbye.") })
 }
 
+@Test func cliProxyMenu_e2e_statusBeforeAndAfterRestart_reportsStableTransitions() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    _ = try context.facade.register(
+        alias: "MDE2E1",
+        assetID: "asset-e2e-1",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/e2e-1.m3u8"))
+    )
+
+    let io = FakeIO(inputs: [
+        "2", // Proxy menu
+        "1", // Status before restart
+        "2", // Restart
+        "1", // Status after restart
+        "0", // Back
+        "0" // Exit
+    ])
+    let app = CLIApp(context: context, io: io)
+    app.runInteractive()
+
+    let proxyStatusCount = io.outputLines.filter { $0 == "Proxy status:" }.count
+    #expect(proxyStatusCount >= 2)
+    #expect(io.outputLines.contains { $0.contains("Proxy server restarted.") })
+    #expect(io.outputLines.contains { $0.contains("Before restart:") })
+    #expect(io.outputLines.contains { $0.contains("After restart:") })
+    #expect(io.outputLines.contains { $0.contains("Registered aliases: 1") })
+    #expect(io.outputLines.contains { $0.contains("Goodbye.") })
+}
+
+@Test func cliProxyMenu_e2e_restartFailurePath_printsActionableErrorAndDoesNotCrash() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let runningURL = try #require(URL(string: "http://127.0.0.1:8080"))
+    var status = ProxyServerStatus(
+        isRunning: true,
+        host: "127.0.0.1",
+        port: 8080,
+        baseURL: runningURL
+    )
+
+    let io = FakeIO(inputs: [
+        "2", // Proxy menu
+        "2", // Restart
+        "0", // Back
+        "0" // Exit
+    ])
+    let app = CLIApp(
+        context: context,
+        io: io,
+        proxyStatusProvider: { status },
+        stopProxyServer: {
+            status = ProxyServerStatus(isRunning: false, host: nil, port: nil, baseURL: nil)
+        },
+        startProxyServer: { host, port in
+            // Simulate startup API returning a URL while runtime remains unavailable.
+            status = ProxyServerStatus(isRunning: false, host: nil, port: nil, baseURL: nil)
+            return URL(string: "http://\(host):\(port)")!
+        }
+    )
+    app.runInteractive()
+
+    #expect(io.outputLines.contains { $0.contains("Failed to restart proxy server.") })
+    #expect(io.outputLines.contains { $0.contains("Attempted host: 127.0.0.1") })
+    #expect(io.outputLines.contains { $0.contains("Attempted port: 8080") })
+    #expect(io.outputLines.contains { $0.contains("Action: verify runtime configuration and try again.") })
+    #expect(io.outputLines.contains { $0.contains("Goodbye.") })
+}
+
 @Test func cliInteractive_containsNoPlaceholderText() throws {
     let directory = try makeCLITempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
