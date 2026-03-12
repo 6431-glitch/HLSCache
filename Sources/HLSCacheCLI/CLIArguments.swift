@@ -70,9 +70,30 @@ struct ClearDataCommand: Equatable {
     let bypassConfirmation: Bool
 }
 
+enum ExportVideoCodec: Equatable {
+    case copy
+    case av1(AV1TranscodeOptions)
+}
+
+struct AV1TranscodeOptions: Equatable {
+    static let defaultPreset = "6"
+    static let defaultCRF = 32
+
+    let preset: String
+    let crf: Int
+    let bitrate: String?
+}
+
 struct ExportMP4Command: Equatable {
     let alias: String
     let outputURL: URL
+    let videoCodec: ExportVideoCodec
+
+    init(alias: String, outputURL: URL, videoCodec: ExportVideoCodec = .copy) {
+        self.alias = alias
+        self.outputURL = outputURL
+        self.videoCodec = videoCodec
+    }
 }
 
 struct CLIArguments: Equatable {
@@ -190,7 +211,7 @@ struct CLIArguments: Equatable {
           swift run HLSCacheCLI [options] download --alias <alias>
           swift run HLSCacheCLI [options] clear --alias <alias> [--delete-alias] --yes
           swift run HLSCacheCLI [options] clear --all [--delete-alias] --yes
-          swift run HLSCacheCLI [options] export --alias <alias> --output <file.mp4>
+          swift run HLSCacheCLI [options] export --alias <alias> --output <file.mp4> [--av1] [--av1-preset <preset>] [--av1-crf <0...63>] [--av1-bitrate <value>]
           swift run HLSCacheCLI [options] settings get
           swift run HLSCacheCLI [options] settings set default-user-agent "<value>"
 
@@ -213,6 +234,8 @@ struct CLIArguments: Equatable {
                                    Required for non-interactive use: --yes
           export                    Export cached HLS media to MP4.
                                    Required: --alias, --output <file.mp4>
+                                   Optional: --av1 for AV1 transcode mode
+                                   Optional AV1 tuning: --av1-preset, --av1-crf, --av1-bitrate
           settings get              Show persisted CLI settings.
           settings set default-user-agent "<value>"
                                    Persist global default User-Agent.
@@ -411,6 +434,10 @@ struct CLIArguments: Equatable {
     private static func parseExportCommand(_ args: [String]) throws -> CLICommand {
         var alias: String?
         var output: String?
+        var av1Enabled = false
+        var av1Preset: String?
+        var av1CRF: Int?
+        var av1Bitrate: String?
 
         var index = 0
         while index < args.count {
@@ -430,6 +457,42 @@ struct CLIArguments: Equatable {
                 }
                 output = args[index]
                 index += 1
+            case "--av1":
+                av1Enabled = true
+                index += 1
+            case "--av1-preset":
+                index += 1
+                guard index < args.count else {
+                    throw CLIArgumentParseError.missingValue(option)
+                }
+                let value = args[index].trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !value.isEmpty else {
+                    throw CLIArgumentParseError.invalidArgument("AV1 preset must not be empty")
+                }
+                av1Preset = value
+                index += 1
+            case "--av1-crf":
+                index += 1
+                guard index < args.count else {
+                    throw CLIArgumentParseError.missingValue(option)
+                }
+                let value = args[index]
+                guard let parsed = Int(value), (0...63).contains(parsed) else {
+                    throw CLIArgumentParseError.invalidArgument("AV1 CRF must be an integer between 0 and 63")
+                }
+                av1CRF = parsed
+                index += 1
+            case "--av1-bitrate":
+                index += 1
+                guard index < args.count else {
+                    throw CLIArgumentParseError.missingValue(option)
+                }
+                let value = args[index].trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !value.isEmpty else {
+                    throw CLIArgumentParseError.invalidArgument("AV1 bitrate must not be empty")
+                }
+                av1Bitrate = value
+                index += 1
             default:
                 if option.hasPrefix("-") {
                     throw CLIArgumentParseError.unknownOption(option)
@@ -445,10 +508,28 @@ struct CLIArguments: Equatable {
             throw CLIArgumentParseError.missingRequiredArgument("--output")
         }
 
+        if !av1Enabled, av1Preset != nil || av1CRF != nil || av1Bitrate != nil {
+            throw CLIArgumentParseError.invalidArgument("AV1 tuning flags require --av1")
+        }
+
+        let videoCodec: ExportVideoCodec
+        if av1Enabled {
+            videoCodec = .av1(
+                AV1TranscodeOptions(
+                    preset: av1Preset ?? AV1TranscodeOptions.defaultPreset,
+                    crf: av1CRF ?? AV1TranscodeOptions.defaultCRF,
+                    bitrate: av1Bitrate
+                )
+            )
+        } else {
+            videoCodec = .copy
+        }
+
         return .exportMP4(
             ExportMP4Command(
                 alias: alias,
-                outputURL: URL(fileURLWithPath: output).standardizedFileURL
+                outputURL: URL(fileURLWithPath: output).standardizedFileURL,
+                videoCodec: videoCodec
             )
         )
     }

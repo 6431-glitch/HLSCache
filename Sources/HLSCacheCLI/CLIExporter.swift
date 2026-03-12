@@ -34,7 +34,8 @@ struct CLIExportResult: Equatable {
 }
 
 struct CLIExporter {
-    typealias RemuxRunner = (_ playlistURL: URL, _ outputURL: URL) throws -> Void
+    typealias ExportRunner = (_ playlistURL: URL, _ outputURL: URL, _ videoCodec: ExportVideoCodec) throws -> Void
+    typealias EncoderAvailabilityChecker = (_ encoderName: String) throws -> Void
 
     private struct PlaylistCandidate {
         let playlistText: String
@@ -47,21 +48,24 @@ struct CLIExporter {
     private let baseDirectory: URL
     private let facade: HLSCacheFacade
     private let fileManager: FileManager
-    private let remuxRunner: RemuxRunner
+    private let exportRunner: ExportRunner
+    private let encoderAvailabilityChecker: EncoderAvailabilityChecker
 
     init(
         baseDirectory: URL,
         facade: HLSCacheFacade,
         fileManager: FileManager = .default,
-        remuxRunner: @escaping RemuxRunner = CLIExporter.defaultRemuxRunner
+        exportRunner: @escaping ExportRunner = CLIExporter.defaultExportRunner,
+        encoderAvailabilityChecker: @escaping EncoderAvailabilityChecker = CLIExporter.defaultEncoderAvailabilityChecker
     ) {
         self.baseDirectory = baseDirectory
         self.facade = facade
         self.fileManager = fileManager
-        self.remuxRunner = remuxRunner
+        self.exportRunner = exportRunner
+        self.encoderAvailabilityChecker = encoderAvailabilityChecker
     }
 
-    func export(alias: String, outputURL: URL) throws -> CLIExportResult {
+    func export(alias: String, outputURL: URL, videoCodec: ExportVideoCodec = .copy) throws -> CLIExportResult {
         guard outputURL.pathExtension.lowercased() == "mp4" else {
             throw CLIExportError.invalidOutputPath(outputURL.path)
         }
@@ -131,7 +135,11 @@ struct CLIExporter {
         let localPlaylistURL = stagingDirectory.appendingPathComponent("input.m3u8")
         try rewrittenPlaylist.write(to: localPlaylistURL, atomically: true, encoding: .utf8)
 
-        try remuxRunner(localPlaylistURL, outputURL)
+        if case .av1 = videoCodec {
+            try encoderAvailabilityChecker("libsvtav1")
+        }
+
+        try exportRunner(localPlaylistURL, outputURL, videoCodec)
 
         guard fileManager.fileExists(atPath: outputURL.path) else {
             throw CLIExportError.remuxFailed("Output file was not created.")
@@ -379,21 +387,76 @@ struct CLIExporter {
         return url
     }
 
-    static func defaultRemuxRunner(playlistURL: URL, outputURL: URL) throws {
-        let stderrPipe = Pipe()
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = [
-            "ffmpeg",
+    static func defaultEncoderAvailabilityChecker(encoderName: String) throws {
+        let (status, stderrOutput) = try runFFmpeg(
+            arguments: [
+                "-hide_banner",
+                "-loglevel", "error",
+                "-h", "encoder=\(encoderName)"
+            ]
+        )
+
+        guard status == 0 else {
+            if isFFmpegUnavailable(stderrOutput) {
+                throw CLIExportError.ffmpegUnavailable(stderrOutput)
+            }
+            if stderrOutput.isEmpty {
+                throw CLIExportError.ffmpegUnavailable(
+                    "ffmpeg encoder '\(encoderName)' is not available. Install ffmpeg with \(encoderName) support, or rerun export without --av1."
+                )
+            }
+            throw CLIExportError.ffmpegUnavailable(stderrOutput)
+        }
+    }
+
+    static func defaultExportRunner(playlistURL: URL, outputURL: URL, videoCodec: ExportVideoCodec) throws {
+        var arguments = commonFFmpegInputArguments(playlistURL: playlistURL)
+
+        switch videoCodec {
+        case .copy:
+            arguments += ["-c", "copy"]
+        case let .av1(options):
+            arguments += [
+                "-c:v", "libsvtav1",
+                "-preset", options.preset,
+                "-crf", String(options.crf)
+            ]
+            if let bitrate = options.bitrate {
+                arguments += ["-b:v", bitrate]
+            }
+            arguments += ["-c:a", "copy"]
+        }
+
+        arguments.append(outputURL.path)
+        let (status, stderrOutput) = try runFFmpeg(arguments: arguments)
+
+        guard status == 0 else {
+            if isFFmpegUnavailable(stderrOutput) {
+                throw CLIExportError.ffmpegUnavailable(stderrOutput)
+            }
+            if stderrOutput.isEmpty {
+                throw CLIExportError.remuxFailed("ffmpeg exited with status \(status)")
+            }
+            throw CLIExportError.remuxFailed(stderrOutput)
+        }
+    }
+
+    private static func commonFFmpegInputArguments(playlistURL: URL) -> [String] {
+        [
             "-hide_banner",
             "-loglevel", "error",
             "-y",
             "-allowed_extensions", "ALL",
             "-protocol_whitelist", "file,crypto,data",
-            "-i", playlistURL.path,
-            "-c", "copy",
-            outputURL.path
+            "-i", playlistURL.path
         ]
+    }
+
+    private static func runFFmpeg(arguments: [String]) throws -> (status: Int32, stderr: String) {
+        let stderrPipe = Pipe()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["ffmpeg"] + arguments
         process.standardOutput = Pipe()
         process.standardError = stderrPipe
 
@@ -408,18 +471,12 @@ struct CLIExporter {
         let stderrOutput = String(data: stderrData, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
-        guard process.terminationStatus == 0 else {
-            let lower = stderrOutput.lowercased()
-            if lower.contains("ffmpeg:") && lower.contains("not found") {
-                throw CLIExportError.ffmpegUnavailable(stderrOutput)
-            }
-            if lower.contains("no such file or directory") && lower.contains("ffmpeg") {
-                throw CLIExportError.ffmpegUnavailable(stderrOutput)
-            }
-            if stderrOutput.isEmpty {
-                throw CLIExportError.remuxFailed("ffmpeg exited with status \(process.terminationStatus)")
-            }
-            throw CLIExportError.remuxFailed(stderrOutput)
-        }
+        return (process.terminationStatus, stderrOutput)
+    }
+
+    private static func isFFmpegUnavailable(_ stderrOutput: String) -> Bool {
+        let lower = stderrOutput.lowercased()
+        return (lower.contains("ffmpeg:") && lower.contains("not found"))
+            || (lower.contains("no such file or directory") && lower.contains("ffmpeg"))
     }
 }
