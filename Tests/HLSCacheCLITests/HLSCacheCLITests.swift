@@ -438,6 +438,53 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     #expect(io.outputLines.contains { $0.contains("Resolved base URL: http://127.0.0.1:8080") })
 }
 
+@Test func cliProxyMenu_returnBehavior_supportsBackAndQToMainMenu() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [
+        "2", // Enter proxy menu
+        "back", // Return to main
+        "2", // Enter proxy menu again
+        "q", // Return to main using q
+        "0" // Exit app
+    ])
+    let app = CLIApp(context: context, io: io)
+    app.runInteractive()
+
+    let proxyMenuCount = io.outputLines.filter { $0 == "[Proxy Server]" }.count
+    #expect(proxyMenuCount == 2)
+    #expect(io.outputLines.contains { $0.contains("Main Menu") })
+    #expect(io.outputLines.contains { $0.contains("Goodbye.") })
+}
+
+@Test func cliProxyMenu_integration_flow_validatesPromptsAndNoPlaceholderRegression() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [
+        "2", // Enter proxy menu
+        "1", // Show status
+        "2", // Restart
+        "0", // Back to main menu
+        "0" // Exit app
+    ])
+    let app = CLIApp(context: context, io: io)
+    app.runInteractive()
+
+    #expect(io.outputLines.contains { $0.contains("[Proxy Server]") })
+    #expect(io.outputLines.contains { $0.contains("1) Show proxy status") })
+    #expect(io.outputLines.contains { $0.contains("2) Restart proxy server") })
+    #expect(io.outputLines.contains { $0.contains("Choose an option:") })
+    #expect(io.outputLines.contains { $0.contains("Proxy status:") })
+    #expect(io.outputLines.contains { $0.contains("Proxy server restarted.") })
+    #expect(!io.outputLines.contains { $0.localizedCaseInsensitiveContains("coming soon") })
+    #expect(!io.outputLines.contains { $0.localizedCaseInsensitiveContains("not implemented yet") })
+    #expect(io.outputLines.contains { $0.contains("Goodbye.") })
+}
+
 @Test func cliInteractive_containsNoPlaceholderText() throws {
     let directory = try makeCLITempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
