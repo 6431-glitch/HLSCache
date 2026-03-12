@@ -145,3 +145,76 @@ private func makeCoordinatorResourceID() throws -> ResourceID {
     let secondRecord = try #require(try cache.resourceRecord(for: resourceID))
     #expect(secondRecord.pluginsApplied == [stamp])
 }
+
+@Test func proxyCacheCoordinator_offlineMode_cacheHit_servesFromDiskWithoutNetworkFallback() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-offline-hit")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 256
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 251) })
+    let resourceID = try makeCoordinatorResourceID()
+
+    let cache = CoreCache(baseDirectory: directory)
+    let coordinator = ProxyCacheCoordinator(coreCache: cache)
+
+    _ = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-127",
+        totalLength: totalLength,
+        fetchNetworkRange: { range in
+            Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        },
+        emit: { _ in }
+    )
+
+    var payload = Data()
+    var networkFetches = 0
+    _ = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-127",
+        totalLength: totalLength,
+        allowNetworkFallback: false,
+        fetchNetworkRange: { _ in
+            networkFetches += 1
+            return Data()
+        },
+        emit: { payload.append($0) }
+    )
+
+    #expect(networkFetches == 0)
+    #expect(payload == Data(originData[0..<128]))
+}
+
+@Test func proxyCacheCoordinator_offlineMode_cacheMiss_throwsWithoutNetworkFallback() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-offline-miss")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let cache = CoreCache(baseDirectory: directory)
+    let coordinator = ProxyCacheCoordinator(coreCache: cache)
+    let resourceID = try makeCoordinatorResourceID()
+    var networkFetches = 0
+
+    do {
+        _ = try coordinator.serve(
+            resourceID: resourceID,
+            rangeHeader: "bytes=0-127",
+            totalLength: 256,
+            allowNetworkFallback: false,
+            fetchNetworkRange: { _ in
+                networkFetches += 1
+                return Data(repeating: 0xAA, count: 128)
+            },
+            emit: { _ in }
+        )
+        #expect(Bool(false))
+    } catch let error as ProxyCacheCoordinatorError {
+        #expect(networkFetches == 0)
+        #expect(error == .offlineCacheMiss(range: try #require(ByteRange(start: 0, endExclusive: 128))))
+    }
+}

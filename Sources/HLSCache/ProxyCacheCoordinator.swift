@@ -4,6 +4,7 @@ import Foundation
 public enum ProxyCacheCoordinatorError: Error, Equatable, Sendable {
     case invalidNetworkChunkLength(expected: Int64, actual: Int)
     case invalidComputedRange(start: Int64, endExclusive: Int64)
+    case offlineCacheMiss(range: ByteRange)
 }
 
 public enum ProxyStreamChunkSource: String, Equatable, Sendable {
@@ -50,6 +51,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         rangeHeader: String?,
         totalLength: Int64,
         contentType: String? = nil,
+        allowNetworkFallback: Bool = true,
         fetchNetworkRange: (ByteRange) throws -> Data,
         emit: (Data) throws -> Void
     ) throws -> ProxyCacheServeResult {
@@ -63,6 +65,9 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         for part in plan {
             switch part {
             case let .network(range):
+                guard allowNetworkFallback else {
+                    throw ProxyCacheCoordinatorError.offlineCacheMiss(range: range)
+                }
                 let networkData = try fetchAndValidate(range: range, fetchNetworkRange: fetchNetworkRange)
                 let writeProcessor = transformPipeline.makeProcessor(
                     context: TransformContext(resourceID: resourceID, byteOffset: range.start),
@@ -98,6 +103,12 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                     continue
                 }
 
+                let missingStart = range.start + Int64(cachedData.count)
+                let missingRange = try requireRange(start: missingStart, endExclusive: range.endExclusive)
+                guard allowNetworkFallback else {
+                    throw ProxyCacheCoordinatorError.offlineCacheMiss(range: missingRange)
+                }
+
                 if !cachedData.isEmpty {
                     let decodedPayload = try readProcessor.process(cachedData, isFinal: true)
                     try emit(decodedPayload)
@@ -109,8 +120,6 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                     totalStreamed += Int64(cachedData.count)
                 }
 
-                let missingStart = range.start + Int64(cachedData.count)
-                let missingRange = try requireRange(start: missingStart, endExclusive: range.endExclusive)
                 let networkData = try fetchAndValidate(range: missingRange, fetchNetworkRange: fetchNetworkRange)
                 let missingWriteProcessor = transformPipeline.makeProcessor(
                     context: TransformContext(resourceID: resourceID, byteOffset: missingRange.start),
