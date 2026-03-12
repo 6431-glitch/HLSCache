@@ -243,6 +243,34 @@ Transform pipeline integration.
 
 ---
 
+# CLI Readiness Gate (HLS-93)
+
+The CLI epic (`HLS-84`) must not be marked complete until lower-layer dependency epics satisfy the gate below.
+
+## Dependency checklist
+
+- `HLS-39` (`HLSC-CORE — CoreCache Foundation`): must be `Done`
+- `HLS-38` (`HLSC-PROXY — SwiftNIO Proxy Server`): must be `Done`
+- `HLS-37` (`HLSC-HLS — HLS Playback Support`): must be `Done`
+- `HLS-35` (`HLSC-PLUGIN — Transform Pipeline`): must be `Done`
+- `HLS-34` (`HLSC-HARDEN — Stability & Observability`): must be `Done`
+- `HLS-36` (`HLSC-DOWNLOAD — Background Offline HLS`): must be at least `In Progress` for interim CLI readiness; must be `Done` before final production CLI sign-off that includes offline/download claims.
+
+## Gate criteria
+
+- Minimum gate to continue CLI feature delivery:
+  - All required epics above are in their minimum states.
+- Final CLI completion gate:
+  - `HLS-84` cannot transition to `Done` unless all dependency epics listed above are `Done`.
+  - If any dependency epic regresses below required state, CLI completion is blocked until resolved.
+
+## Enforcement
+
+- Before moving `HLS-84` to `Done`, run a Jira check against the dependency keys and verify statuses explicitly.
+- Record the gate result in the final CLI completion ticket comment (pass/fail + status snapshot).
+
+---
+
 # Public API Draft
 
 startServer()
