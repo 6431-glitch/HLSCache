@@ -127,6 +127,30 @@ private func seedExportableMediaCache(baseDirectory: URL, alias: String, assetID
     }
 }
 
+private func loadRepositoryREADME() throws -> String {
+    let testFileURL = URL(fileURLWithPath: #filePath)
+    let repositoryRoot = testFileURL
+        .deletingLastPathComponent() // HLSCacheCLITests
+        .deletingLastPathComponent() // Tests
+        .deletingLastPathComponent() // repo root
+    let readmeURL = repositoryRoot.appendingPathComponent("README.md")
+    return try String(contentsOf: readmeURL, encoding: .utf8)
+}
+
+@Test func docs_readmeAndUsageStayAlignedWithImplementedCLI() throws {
+    let readme = try loadRepositoryREADME()
+    #expect(readme.contains("swift run HLSCacheCLI download --alias MD0534"))
+    #expect(readme.contains("--av1"))
+    #expect(readme.contains("AES-128 encrypted playlists are exportable when the referenced key material is already cached."))
+    #expect(!readme.contains("AES-128 encrypted playlists are currently not supported by CLI export."))
+
+    let usage = CLIArguments.usage.lowercased()
+    #expect(usage.contains("download --alias <alias>"))
+    #expect(usage.contains("export --alias <alias> --output <file.mp4> [--av1]"))
+    #expect(!usage.contains("coming soon"))
+    #expect(!usage.contains("placeholder"))
+}
+
 @Test func cliArguments_defaults_whenNoOptionsProvided() throws {
     let parsed = try CLIArguments.parse([])
 
