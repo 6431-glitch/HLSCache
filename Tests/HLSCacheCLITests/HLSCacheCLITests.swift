@@ -1087,6 +1087,114 @@ private func loadRepositoryREADME() throws -> String {
     #expect(io.outputLines.contains { $0.contains("Alias 'DOES_NOT_EXIST' was not found.") })
 }
 
+@Test func cliDownloader_asyncFetcherFailure_propagatesRequestError() async throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    _ = try context.facade.register(
+        alias: "MDFAIL",
+        assetID: "asset-download-fail",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/fail/root.m3u8"))
+    )
+
+    let downloader = CLIHLSDownloader(
+        baseDirectory: context.baseDirectory,
+        facade: context.facade,
+        fetcher: { request in
+            let url = try #require(request.url)
+            let response = try #require(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 500,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: nil
+                )
+            )
+            return (Data(), response)
+        }
+    )
+
+    do {
+        _ = try await downloader.download(alias: "MDFAIL")
+        #expect(Bool(false))
+    } catch let error as CLIDownloadError {
+        guard case let .requestFailed(url, statusCode, _) = error else {
+            #expect(Bool(false))
+            return
+        }
+        #expect(url.absoluteString == "https://cdn.example.com/fail/root.m3u8")
+        #expect(statusCode == 500)
+    }
+}
+
+@Test func cliDownloader_asyncCancellation_bubblesCancellation() async throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    _ = try context.facade.register(
+        alias: "MDCANCEL",
+        assetID: "asset-download-cancel",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/cancel/root.m3u8"))
+    )
+
+    let playlistBody = Data(
+        """
+        #EXTM3U
+        #EXT-X-VERSION:3
+        #EXT-X-TARGETDURATION:8
+        #EXTINF:8.0,
+        seg-1.ts
+        #EXT-X-ENDLIST
+        """.utf8
+    )
+
+    let downloader = CLIHLSDownloader(
+        baseDirectory: context.baseDirectory,
+        facade: context.facade,
+        fetcher: { request in
+            let url = try #require(request.url)
+            if url.absoluteString.hasSuffix("root.m3u8") {
+                let response = try #require(
+                    HTTPURLResponse(
+                        url: url,
+                        statusCode: 200,
+                        httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "application/vnd.apple.mpegurl"]
+                    )
+                )
+                return (playlistBody, response)
+            }
+
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            let response = try #require(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "video/mp2t"]
+                )
+            )
+            return (Data(repeating: 0x11, count: 188), response)
+        }
+    )
+
+    let task = Task {
+        try await downloader.download(alias: "MDCANCEL")
+    }
+
+    try await Task.sleep(nanoseconds: 100_000_000)
+    task.cancel()
+
+    do {
+        _ = try await task.value
+        #expect(Bool(false))
+    } catch is CancellationError {
+        #expect(Bool(true))
+    }
+}
+
 @Test func cliInteractive_quickstartFlow_coversCoreCommandsAndNavigation() throws {
     let directory = try makeCLITempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
