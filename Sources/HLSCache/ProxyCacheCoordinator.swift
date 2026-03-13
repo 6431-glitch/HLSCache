@@ -45,6 +45,16 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         self.transformPipeline = transformPipeline
     }
 
+    @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+    public func fetchRange(
+        from remoteURL: URL,
+        range: ByteRange,
+        headers: [String: String] = [:],
+        using networkClient: any NetworkClient
+    ) async throws -> Data {
+        try await networkClient.data(from: remoteURL, byteRange: range, headers: headers)
+    }
+
     @discardableResult
     public func serve(
         resourceID: ResourceID,
