@@ -130,6 +130,40 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     }
 }
 
+@Test func proxyCacheCoordinator_unsatisfiableRange_returns416WithoutNetworkOrCacheStreaming() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-416")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let cache = try CoreCache(baseDirectory: directory)
+    let coordinator = ProxyCacheCoordinator(coreCache: cache)
+    let resourceID = try makeCoordinatorResourceID()
+
+    var networkFetches = 0
+    var emittedBytes = 0
+    let result = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=2048-4096",
+        totalLength: 1024,
+        fetchNetworkRange: { _ in
+            networkFetches += 1
+            return Data()
+        },
+        emit: { chunk in
+            emittedBytes += chunk.count
+        }
+    )
+
+    #expect(result.response.statusCode == 416)
+    #expect(result.response.headers["Content-Range"] == "bytes */1024")
+    #expect(result.chunks.isEmpty)
+    #expect(result.totalBytesStreamed == 0)
+    #expect(networkFetches == 0)
+    #expect(emittedBytes == 0)
+}
+
 @Test func proxyCacheCoordinator_encryptAtRest_storesEncryptedAndServesDecrypted() throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("hlscache-proxy-coordinator-encrypt")

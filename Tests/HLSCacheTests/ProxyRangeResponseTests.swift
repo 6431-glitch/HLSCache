@@ -46,13 +46,24 @@ import Testing
     #expect(response.headers["Content-Range"] == "bytes 100-349/350")
 }
 
-@Test func proxyRangeResponse_invalidRangeHeader_throwsActionableError() throws {
-    do {
-        _ = try ProxyRangeResponse.make(rangeHeader: "bytes=100-50", totalLength: 350)
-        #expect(Bool(false))
-    } catch let error as ProxyRangeResponseError {
-        #expect(error == .invalidRangeHeader("bytes=100-50"))
-    }
+@Test func proxyRangeResponse_malformedRangeHeader_fallsBackTo200FullContent() throws {
+    let response = try ProxyRangeResponse.make(rangeHeader: "bytes=100-50", totalLength: 350)
+
+    #expect(response.statusCode == 200)
+    #expect(response.requestedRange == ByteRange(start: 0, endExclusive: 350))
+    #expect(response.headers["Accept-Ranges"] == "bytes")
+    #expect(response.headers["Content-Length"] == "350")
+    #expect(response.headers["Content-Range"] == nil)
+}
+
+@Test func proxyRangeResponse_unsatisfiableRange_returns416WithRequiredHeaders() throws {
+    let response = try ProxyRangeResponse.make(rangeHeader: "bytes=400-500", totalLength: 350)
+
+    #expect(response.statusCode == 416)
+    #expect(response.requestedRange == ByteRange(start: 0, endExclusive: 0))
+    #expect(response.headers["Accept-Ranges"] == "bytes")
+    #expect(response.headers["Content-Length"] == "0")
+    #expect(response.headers["Content-Range"] == "bytes */350")
 }
 
 @Test func proxyRangeResponse_negativeTotalLength_throws() throws {

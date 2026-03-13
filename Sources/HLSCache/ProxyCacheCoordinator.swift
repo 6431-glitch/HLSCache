@@ -69,6 +69,9 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         emit: (Data) async throws -> Void
     ) async throws -> ProxyCacheServeResult {
         let response = try ProxyRangeResponse.make(rangeHeader: rangeHeader, totalLength: totalLength)
+        if response.statusCode == 416 {
+            return ProxyCacheServeResult(response: response, chunks: [], totalBytesStreamed: 0)
+        }
         let plan = try coreCache.plan(resource: resourceID, requested: response.requestedRange)
 
         var chunks: [ProxyStreamChunk] = []
@@ -182,6 +185,9 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         emit: (Data) throws -> Void
     ) throws -> ProxyCacheServeResult {
         let response = try ProxyRangeResponse.make(rangeHeader: rangeHeader, totalLength: totalLength)
+        if response.statusCode == 416 {
+            return ProxyCacheServeResult(response: response, chunks: [], totalBytesStreamed: 0)
+        }
         let plan = try coreCache.plan(resource: resourceID, requested: response.requestedRange)
 
         var chunks: [ProxyStreamChunk] = []
