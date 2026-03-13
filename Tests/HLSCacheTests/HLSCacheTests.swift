@@ -233,6 +233,27 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(cacheInfoEvent.level == .debug)
 }
 
+@Test func facade_initialization_passesLoggerToAliasRegistryRecoveryTelemetry() throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-alias-registry-recovery")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let registryFileURL = directory.appendingPathComponent("alias_registry.json")
+    try Data("{bad-json".utf8).write(to: registryFileURL)
+
+    let logger = RecordingStructuredLogger()
+    _ = HLSCacheFacade(baseDirectory: directory, logger: logger)
+
+    let event = try #require(
+        logger.events().first {
+            $0.operation == "loadAliasRegistry"
+                && $0.metadata["result"] == "recovered_decode_failure"
+        }
+    )
+    #expect(event.subsystem == "CoreCache")
+    #expect(event.level == .warning)
+    #expect(event.metadata["registryPath"] == registryFileURL.path)
+}
+
 @Test func facade_cacheInfoAndClearCache_reflectsUnderlyingDiskUsage() throws {
     let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-info")
     defer { try? FileManager.default.removeItem(at: directory) }

@@ -72,15 +72,19 @@ public final class AliasRegistry: @unchecked Sendable {
     private let baseDirectory: URL
     private let fileURL: URL
     private let temporaryFileURL: URL
+    private let corruptFileURL: URL
+    private let logger: any StructuredLogger
     private let queue = DispatchQueue(label: "CoreCache.AliasRegistry", attributes: .concurrent)
 
     private var records: [Alias: AssetRecord] = [:]
 
-    public init(baseDirectory: URL) {
+    public init(baseDirectory: URL, logger: any StructuredLogger = NoopStructuredLogger()) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
         self.fileURL = baseDirectory.appendingPathComponent("alias_registry.json")
         self.temporaryFileURL = baseDirectory.appendingPathComponent("alias_registry.json.tmp")
+        self.corruptFileURL = baseDirectory.appendingPathComponent("alias_registry.json.corrupt")
+        self.logger = logger
         loadFromDisk()
     }
 
@@ -183,8 +187,67 @@ public final class AliasRegistry: @unchecked Sendable {
                     )
                 )
             })
+        } catch let decodeError as DecodingError {
+            recoverFromDecodeFailure(decodeError)
         } catch {
             records = [:]
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "CoreCache",
+                    operation: "loadAliasRegistry",
+                    level: .error,
+                    metadata: [
+                        "result": "load_failed",
+                        "registryPath": fileURL.path,
+                        "error": String(describing: error)
+                    ]
+                )
+            )
+        }
+    }
+
+    private func recoverFromDecodeFailure(_ decodeError: DecodingError) {
+        records = [:]
+
+        do {
+            if fileManager.fileExists(atPath: corruptFileURL.path) {
+                try fileManager.removeItem(at: corruptFileURL)
+            }
+
+            if fileManager.fileExists(atPath: fileURL.path) {
+                try fileManager.moveItem(at: fileURL, to: corruptFileURL)
+            }
+
+            try saveToDiskAtomic()
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "CoreCache",
+                    operation: "loadAliasRegistry",
+                    level: .warning,
+                    metadata: [
+                        "result": "recovered_decode_failure",
+                        "registryPath": fileURL.path,
+                        "recoveryPath": corruptFileURL.path,
+                        "recoveryAction": "quarantine_and_reset",
+                        "error": String(describing: decodeError)
+                    ]
+                )
+            )
+        } catch {
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "CoreCache",
+                    operation: "loadAliasRegistry",
+                    level: .error,
+                    metadata: [
+                        "result": "recovery_failed",
+                        "registryPath": fileURL.path,
+                        "recoveryPath": corruptFileURL.path,
+                        "error": String(describing: decodeError),
+                        "recoveryError": String(describing: error)
+                    ]
+                )
+            )
         }
     }
 
