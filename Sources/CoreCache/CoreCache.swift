@@ -106,6 +106,10 @@ public final class CoreCache: @unchecked Sendable {
         self.manifestStore = ManifestStore(baseDirectory: baseDirectory)
         self.diskQuotaBytes = diskQuotaBytes.map { max($0, 0) }
         self.logger = logger
+
+        queue.sync(flags: .barrier) {
+            reconcileStorageOnStartup()
+        }
     }
 
     public func plan(resource: ResourceID, requested: ByteRange) throws -> [ReadPlanPart] {
@@ -371,6 +375,85 @@ public final class CoreCache: @unchecked Sendable {
         }
     }
 
+    private func reconcileStorageOnStartup() {
+        let correlationID = UUID().uuidString
+
+        do {
+            let manifestIDs = Set(manifestStore.allManifestResourceIDs())
+            let dataIDs = Set(diskStore.allStoredResourceIDs())
+
+            let orphanManifestIDs = manifestIDs.subtracting(dataIDs).sorted(by: Self.resourceIDSort)
+            let orphanDataIDs = dataIDs.subtracting(manifestIDs).sorted(by: Self.resourceIDSort)
+
+            var purgedOrphanDataBytes: Int64 = 0
+
+            for resourceID in orphanManifestIDs {
+                try manifestStore.delete(resourceID: resourceID)
+                logger.log(
+                    StructuredLogEvent(
+                        subsystem: "CoreCache",
+                        operation: "reconcileStartup",
+                        level: .warning,
+                        correlationID: correlationID,
+                        metadata: [
+                            "action": "purgeOrphanManifest",
+                            "cacheKey": resourceID.cacheKey.rawValue,
+                            "kind": resourceID.kind.rawValue
+                        ]
+                    )
+                )
+            }
+
+            for resourceID in orphanDataIDs {
+                let bytes = try diskStore.fileLength(for: resourceID)
+                try diskStore.remove(resourceID: resourceID)
+                purgedOrphanDataBytes += bytes
+                logger.log(
+                    StructuredLogEvent(
+                        subsystem: "CoreCache",
+                        operation: "reconcileStartup",
+                        level: .warning,
+                        correlationID: correlationID,
+                        metadata: [
+                            "action": "purgeOrphanData",
+                            "cacheKey": resourceID.cacheKey.rawValue,
+                            "kind": resourceID.kind.rawValue,
+                            "bytes": String(bytes)
+                        ]
+                    )
+                )
+            }
+
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "CoreCache",
+                    operation: "reconcileStartup",
+                    level: .info,
+                    correlationID: correlationID,
+                    metadata: [
+                        "action": "summary",
+                        "orphanManifestCount": String(orphanManifestIDs.count),
+                        "orphanDataCount": String(orphanDataIDs.count),
+                        "purgedOrphanDataBytes": String(purgedOrphanDataBytes)
+                    ]
+                )
+            )
+        } catch {
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "CoreCache",
+                    operation: "reconcileStartup",
+                    level: .error,
+                    correlationID: correlationID,
+                    metadata: [
+                        "action": "failed",
+                        "error": String(describing: error)
+                    ]
+                )
+            )
+        }
+    }
+
     private func enforceDiskQuotaIfNeeded(correlationID: String) throws {
         guard let diskQuotaBytes else {
             return
@@ -508,5 +591,15 @@ public final class CoreCache: @unchecked Sendable {
         }
 
         return cursor == requested.endExclusive
+    }
+
+    private static func resourceIDSort(_ lhs: ResourceID, _ rhs: ResourceID) -> Bool {
+        if lhs.cacheKey.rawValue != rhs.cacheKey.rawValue {
+            return lhs.cacheKey.rawValue < rhs.cacheKey.rawValue
+        }
+        if lhs.kind.rawValue != rhs.kind.rawValue {
+            return lhs.kind.rawValue < rhs.kind.rawValue
+        }
+        return lhs.resourceKey < rhs.resourceKey
     }
 }

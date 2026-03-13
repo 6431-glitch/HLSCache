@@ -106,6 +106,40 @@ public final class DiskStore: @unchecked Sendable {
         }
     }
 
+    func allStoredResourceIDs() -> [ResourceID] {
+        queue.sync {
+            let cacheDirectory = baseDirectory.appendingPathComponent("cache", isDirectory: true)
+            guard fileManager.fileExists(atPath: cacheDirectory.path) else {
+                return []
+            }
+
+            guard let enumerator = fileManager.enumerator(
+                at: cacheDirectory,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                return []
+            }
+
+            let cacheComponents = cacheDirectory.resolvingSymlinksInPath().pathComponents
+            var resourceIDs: [ResourceID] = []
+            resourceIDs.reserveCapacity(32)
+
+            for case let fileURL as URL in enumerator {
+                guard let resourceID = resourceID(
+                    from: fileURL,
+                    under: cacheComponents,
+                    fileExtension: "bin"
+                ) else {
+                    continue
+                }
+                resourceIDs.append(resourceID)
+            }
+
+            return resourceIDs
+        }
+    }
+
     private func readFromFileDescriptor(_ fd: Int32, startOffset: Int64, byteCount: Int) throws -> Data {
         var data = Data()
         data.reserveCapacity(min(byteCount, readChunkSize * 4))
@@ -195,5 +229,40 @@ public final class DiskStore: @unchecked Sendable {
     private func currentPOSIXError(code: Int32? = nil) -> POSIXError {
         let value = code ?? errno
         return POSIXError(POSIXErrorCode(rawValue: value) ?? .EIO)
+    }
+
+    private func resourceID(
+        from fileURL: URL,
+        under cacheComponents: [String],
+        fileExtension: String
+    ) -> ResourceID? {
+        guard fileURL.pathExtension == fileExtension else {
+            return nil
+        }
+
+        guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]),
+              values.isRegularFile == true else {
+            return nil
+        }
+
+        let fileComponents = fileURL.resolvingSymlinksInPath().pathComponents
+        guard fileComponents.count >= cacheComponents.count,
+              Array(fileComponents.prefix(cacheComponents.count)) == cacheComponents else {
+            return nil
+        }
+
+        let components = Array(fileComponents.dropFirst(cacheComponents.count))
+        guard components.count == 4,
+              components[1] == "resources",
+              let kind = ResourceKind(rawValue: components[2]) else {
+            return nil
+        }
+
+        let resourceKey = URL(fileURLWithPath: components[3]).deletingPathExtension().lastPathComponent
+        return ResourceID(
+            cacheKey: CacheKey(rawValue: components[0]),
+            kind: kind,
+            resourceKey: resourceKey
+        )
     }
 }
