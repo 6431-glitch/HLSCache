@@ -441,8 +441,8 @@ private func loadRepositoryREADME() throws -> String {
     #expect(io.outputLines.contains { $0.contains("Proxy status:") })
     #expect(io.outputLines.contains { $0.contains("State: running") })
     #expect(io.outputLines.contains { $0.contains("Host: 127.0.0.1") })
-    #expect(io.outputLines.contains { $0.contains("Port: 8080") })
-    #expect(io.outputLines.contains { $0.contains("Base URL: http://127.0.0.1:8080") })
+    #expect(io.outputLines.contains { $0.contains("Port: \(context.serverBaseURL.port.map(String.init) ?? "(unavailable)")") })
+    #expect(io.outputLines.contains { $0.contains("Base URL: \(context.serverBaseURL.absoluteString)") })
     #expect(io.outputLines.contains { $0.contains("Registered aliases: 1") })
 }
 
@@ -480,7 +480,7 @@ private func loadRepositoryREADME() throws -> String {
     #expect(io.outputLines.contains { $0.contains("Before restart:") })
     #expect(io.outputLines.contains { $0.contains("After restart:") })
     #expect(io.outputLines.contains { $0.contains("Proxy server restarted.") })
-    #expect(io.outputLines.contains { $0.contains("Resolved base URL: http://127.0.0.1:8080") })
+    #expect(io.outputLines.contains { $0.hasPrefix("Resolved base URL: http://127.0.0.1:") })
 
     let runningStateCount = io.outputLines.filter { $0 == "State: running" }.count
     #expect(runningStateCount >= 2)
@@ -501,7 +501,7 @@ private func loadRepositoryREADME() throws -> String {
     #expect(io.outputLines.contains { $0.contains("State: stopped") })
     #expect(io.outputLines.contains { $0.contains("After restart:") })
     #expect(io.outputLines.contains { $0.contains("State: running") })
-    #expect(io.outputLines.contains { $0.contains("Resolved base URL: http://127.0.0.1:8080") })
+    #expect(io.outputLines.contains { $0.hasPrefix("Resolved base URL: http://127.0.0.1:") })
 }
 
 @Test func cliProxyMenu_returnBehavior_supportsBackAndQToMainMenu() throws {

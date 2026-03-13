@@ -17,12 +17,20 @@ public struct CacheInfo: Sendable, Equatable {
 
 public struct ProxyServerStatus: Sendable, Equatable {
     public let isRunning: Bool
+    public let state: ProxyRuntimeState
     public let host: String?
     public let port: Int?
     public let baseURL: URL?
 
-    public init(isRunning: Bool, host: String?, port: Int?, baseURL: URL?) {
+    public init(
+        isRunning: Bool,
+        host: String?,
+        port: Int?,
+        baseURL: URL?,
+        state: ProxyRuntimeState? = nil
+    ) {
         self.isRunning = isRunning
+        self.state = state ?? (isRunning ? .running : .stopped)
         self.host = host
         self.port = port
         self.baseURL = baseURL
@@ -40,8 +48,10 @@ public final class HLSCacheFacade: @unchecked Sendable {
     private let aliasRegistry: AliasRegistry
     private let logger: any StructuredLogger
     private let queue = DispatchQueue(label: "HLSCache.Facade", attributes: .concurrent)
+    private let proxyRuntime = ProxyServerRuntime()
 
     private var serverBaseURL: URL?
+    private var runtimeState: ProxyRuntimeState = .stopped
     private var plugins: [any HLSCachePlugin] = []
 
     public init(baseDirectory: URL, logger: any StructuredLogger = NoopStructuredLogger()) {
@@ -52,39 +62,68 @@ public final class HLSCacheFacade: @unchecked Sendable {
     }
 
     @discardableResult
-    public func startServer(host: String = "127.0.0.1", port: Int = 8080) -> URL {
+    public func startServer(host: String = "127.0.0.1", port: Int = 8080) throws -> URL {
         let correlationID = UUID().uuidString
-        return queue.sync(flags: .barrier) {
-            if let existing = serverBaseURL {
+        return try queue.sync(flags: .barrier) {
+            if runtimeState == .running, let existing = serverBaseURL {
                 return existing
             }
 
-            let resolvedPort = port == 0 ? 8080 : port
-            let resolvedURL = URL(string: "http://\(host):\(resolvedPort)")!
-            serverBaseURL = resolvedURL
-            logger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "startServer",
-                    level: .info,
-                    correlationID: correlationID,
-                    metadata: ["host": host, "port": String(resolvedPort)]
+            runtimeState = .starting
+            do {
+                let resolvedURL = try proxyRuntime.start(host: host, port: port)
+                serverBaseURL = resolvedURL
+                runtimeState = .running
+                logger.log(
+                    StructuredLogEvent(
+                        subsystem: "HLSCache",
+                        operation: "startServer",
+                        level: .info,
+                        correlationID: correlationID,
+                        metadata: [
+                            "host": resolvedURL.host ?? host,
+                            "port": resolvedURL.port.map(String.init) ?? String(port),
+                            "state": runtimeState.rawValue
+                        ]
+                    )
                 )
-            )
-            return resolvedURL
+                return resolvedURL
+            } catch {
+                runtimeState = .stopped
+                serverBaseURL = nil
+                logger.log(
+                    StructuredLogEvent(
+                        subsystem: "HLSCache",
+                        operation: "startServer",
+                        level: .error,
+                        correlationID: correlationID,
+                        metadata: [
+                            "host": host,
+                            "port": String(port),
+                            "state": runtimeState.rawValue,
+                            "error": String(describing: error)
+                        ]
+                    )
+                )
+                throw error
+            }
         }
     }
 
     public func stopServer() {
         let correlationID = UUID().uuidString
         queue.sync(flags: .barrier) {
+            runtimeState = .stopping
+            proxyRuntime.stop()
             serverBaseURL = nil
+            runtimeState = .stopped
             logger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "stopServer",
                     level: .info,
-                    correlationID: correlationID
+                    correlationID: correlationID,
+                    metadata: ["state": runtimeState.rawValue]
                 )
             )
         }
@@ -93,12 +132,13 @@ public final class HLSCacheFacade: @unchecked Sendable {
     public func proxyStatus() -> ProxyServerStatus {
         let correlationID = UUID().uuidString
         let status = queue.sync {
-            if let serverBaseURL {
+            if let serverBaseURL, runtimeState == .running {
                 return ProxyServerStatus(
                     isRunning: true,
                     host: serverBaseURL.host,
                     port: serverBaseURL.port,
-                    baseURL: serverBaseURL
+                    baseURL: serverBaseURL,
+                    state: runtimeState
                 )
             }
 
@@ -106,7 +146,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
                 isRunning: false,
                 host: nil,
                 port: nil,
-                baseURL: nil
+                baseURL: nil,
+                state: runtimeState
             )
         }
 
@@ -118,6 +159,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
                 correlationID: correlationID,
                 metadata: [
                     "running": String(status.isRunning),
+                    "state": status.state.rawValue,
                     "host": status.host ?? "",
                     "port": status.port.map(String.init) ?? ""
                 ]
@@ -432,8 +474,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
 
 private let sharedFacade = HLSCacheFacade(baseDirectory: defaultBaseDirectory())
 
-public func startServer(host: String = "127.0.0.1", port: Int = 8080) -> URL {
-    sharedFacade.startServer(host: host, port: port)
+public func startServer(host: String = "127.0.0.1", port: Int = 8080) throws -> URL {
+    try sharedFacade.startServer(host: host, port: port)
 }
 
 public func stopServer() {

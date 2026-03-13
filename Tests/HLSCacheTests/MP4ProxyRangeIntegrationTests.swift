@@ -19,7 +19,7 @@ private func makeMP4ResourceID(cacheKey: CacheKey, remoteURL: URL) -> ResourceID
     defer { try? FileManager.default.removeItem(at: directory) }
 
     let facade = HLSCacheFacade(baseDirectory: directory)
-    _ = facade.startServer(port: 18585)
+    _ = try facade.startServer(port: 0)
 
     let remoteURL = try #require(URL(string: "https://cdn.example.com/video/movie.mp4"))
     let record = try facade.register(

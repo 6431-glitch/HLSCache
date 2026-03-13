@@ -25,7 +25,8 @@ private func extractDirectiveURI(from directiveLine: String) -> String? {
     defer { try? FileManager.default.removeItem(at: directory) }
 
     let facade = HLSCacheFacade(baseDirectory: directory)
-    _ = facade.startServer(port: 18484)
+    let baseURL = try facade.startServer(port: 0)
+    let basePrefix = baseURL.absoluteString
     _ = try facade.register(
         alias: "MD0534",
         assetID: "asset-0534",
@@ -54,12 +55,14 @@ private func extractDirectiveURI(from directiveLine: String) -> String? {
 
     let lines = rewritten.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
     let keyLine = try #require(lines.first { $0.hasPrefix("#EXT-X-KEY:") })
-    let segmentLines = lines.filter { $0.hasPrefix("http://127.0.0.1:18484/MD0534/seg/") }
+    let segmentPrefix = "\(basePrefix)/MD0534/seg/"
+    let keyPrefix = "URI=\"\(basePrefix)/MD0534/key/"
+    let segmentLines = lines.filter { $0.hasPrefix(segmentPrefix) }
 
     #expect(lines.contains("#EXTM3U"))
     #expect(lines.contains("#EXT-X-VERSION:3"))
     #expect(lines.contains("#EXT-X-ENDLIST"))
-    #expect(keyLine.contains("URI=\"http://127.0.0.1:18484/MD0534/key/"))
+    #expect(keyLine.contains(keyPrefix))
     #expect(segmentLines.count == 2)
 
     let keyURI = try #require(extractKeyURI(from: keyLine))
@@ -82,7 +85,8 @@ private func extractDirectiveURI(from directiveLine: String) -> String? {
     defer { try? FileManager.default.removeItem(at: directory) }
 
     let facade = HLSCacheFacade(baseDirectory: directory)
-    _ = facade.startServer(port: 19484)
+    let baseURL = try facade.startServer(port: 0)
+    let basePrefix = baseURL.absoluteString
     _ = try facade.register(
         alias: "MD0560",
         assetID: "asset-0560",
@@ -111,7 +115,7 @@ private func extractDirectiveURI(from directiveLine: String) -> String? {
     let lines = rewritten.components(separatedBy: .newlines)
     let keyLine = try #require(lines.first { $0.contains("#EXT-X-KEY:") })
     let mapLine = try #require(lines.first { $0.contains("#EXT-X-MAP:") })
-    let segmentLine = try #require(lines.first { $0.hasPrefix("http://127.0.0.1:19484/MD0560/seg/") })
+    let segmentLine = try #require(lines.first { $0.hasPrefix("\(basePrefix)/MD0560/seg/") })
 
     let keyURI = try #require(extractDirectiveURI(from: keyLine))
     let mapURI = try #require(extractDirectiveURI(from: mapLine))

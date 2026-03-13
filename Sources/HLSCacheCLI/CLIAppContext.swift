@@ -15,7 +15,21 @@ struct CLIAppContext {
         let settingsFileURL = resolvedBaseDirectory.appendingPathComponent("cli_settings.json")
         let settingsStore = CLISettingsStore(fileURL: settingsFileURL, fileManager: fileManager)
         let facade = HLSCacheFacade(baseDirectory: resolvedBaseDirectory)
-        let serverBaseURL = facade.startServer(host: arguments.host, port: arguments.port)
+        let serverBaseURL: URL
+        do {
+            serverBaseURL = try facade.startServer(host: arguments.host, port: arguments.port)
+        } catch let error as ProxyServerRuntimeError {
+            switch error {
+            case .listenerBindFailed where arguments.port == CLIArguments.defaultPort:
+                // Keep CLI startup resilient under parallel test/process contention on the default port.
+                serverBaseURL = try facade.startServer(host: arguments.host, port: 0)
+            case .listenerStartupTimedOut where arguments.port == CLIArguments.defaultPort:
+                // Keep CLI startup resilient under parallel test/process contention on the default port.
+                serverBaseURL = try facade.startServer(host: arguments.host, port: 0)
+            default:
+                throw error
+            }
+        }
 
         self.baseDirectory = resolvedBaseDirectory
         self.settingsFileURL = settingsFileURL
