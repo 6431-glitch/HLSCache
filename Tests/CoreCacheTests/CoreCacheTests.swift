@@ -47,7 +47,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     let directory = try makeCoreCacheTempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let cache = CoreCache(baseDirectory: directory)
+    let cache = try CoreCache(baseDirectory: directory)
     let resource = try makeCoreCacheResourceID()
 
     _ = try cache.write(Data("AAAA".utf8), resource: resource, at: 0)
@@ -65,7 +65,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     let directory = try makeCoreCacheTempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let cache = CoreCache(baseDirectory: directory)
+    let cache = try CoreCache(baseDirectory: directory)
     let resource = try makeCoreCacheResourceID(suffix: "incremental.ts")
 
     _ = try cache.write(Data("abcd".utf8), resource: resource, at: 0)
@@ -82,7 +82,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-expected-length-write")
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let cache = CoreCache(baseDirectory: directory)
+    let cache = try CoreCache(baseDirectory: directory)
     let resource = try makeCoreCacheResourceID(suffix: "expected-length-write.ts")
 
     do {
@@ -106,7 +106,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-expected-length-finalize")
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let cache = CoreCache(baseDirectory: directory)
+    let cache = try CoreCache(baseDirectory: directory)
     let resource = try makeCoreCacheResourceID(suffix: "expected-length-finalize.ts")
 
     _ = try cache.write(Data(repeating: 0xCD, count: 8), resource: resource, at: 0)
@@ -129,7 +129,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-read")
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let cache = CoreCache(baseDirectory: directory)
+    let cache = try CoreCache(baseDirectory: directory)
     let resource = try makeCoreCacheResourceID(suffix: "read.ts")
 
     _ = try cache.write(Data("0123456789".utf8), resource: resource, at: 0)
@@ -141,7 +141,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-metrics")
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let cache = CoreCache(baseDirectory: directory)
+    let cache = try CoreCache(baseDirectory: directory)
 
     let assetAFirst = try makeCoreCacheResourceID(assetID: "asset-metrics-a", suffix: "metrics-a-1.ts")
     let assetASecond = try makeCoreCacheResourceID(assetID: "asset-metrics-a", suffix: "metrics-a-2.ts")
@@ -195,7 +195,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     defer { try? FileManager.default.removeItem(at: directory) }
 
     let logger = RecordingStructuredLogger()
-    let cache = CoreCache(baseDirectory: directory, diskQuotaBytes: 10, logger: logger)
+    let cache = try CoreCache(baseDirectory: directory, diskQuotaBytes: 10, logger: logger)
     let first = try makeCoreCacheResourceID(assetID: "asset-first", suffix: "lru-first.ts")
     let second = try makeCoreCacheResourceID(assetID: "asset-second", suffix: "lru-second.ts")
 
@@ -225,7 +225,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-quota-asset-group")
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let cache = CoreCache(baseDirectory: directory, diskQuotaBytes: 10)
+    let cache = try CoreCache(baseDirectory: directory, diskQuotaBytes: 10)
     let oldAssetFirst = try makeCoreCacheResourceID(assetID: "asset-old", suffix: "old-1.ts")
     let oldAssetSecond = try makeCoreCacheResourceID(assetID: "asset-old", suffix: "old-2.ts")
     let freshAsset = try makeCoreCacheResourceID(assetID: "asset-fresh", suffix: "fresh-1.ts")
@@ -249,7 +249,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-no-quota")
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let cache = CoreCache(baseDirectory: directory)
+    let cache = try CoreCache(baseDirectory: directory)
     let first = try makeCoreCacheResourceID(suffix: "keep-first.ts")
     let second = try makeCoreCacheResourceID(suffix: "keep-second.ts")
 
@@ -267,7 +267,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     defer { try? FileManager.default.removeItem(at: directory) }
 
     let logger = RecordingStructuredLogger()
-    let cache = CoreCache(baseDirectory: directory, logger: logger)
+    let cache = try CoreCache(baseDirectory: directory, logger: logger)
     let resource = try makeCoreCacheResourceID(suffix: "logging.ts")
 
     _ = try cache.write(Data(repeating: 7, count: 4), resource: resource, at: 0, expectedLength: 4)
@@ -290,24 +290,26 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-finalize")
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let first = CoreCache(baseDirectory: directory)
     let resource = try makeCoreCacheResourceID(suffix: "persisted.ts")
     let stamp = PluginStamp(id: "encrypt-at-rest", version: "1.0.0")
 
-    _ = try first.write(
-        Data("01234567".utf8),
-        resource: resource,
-        at: 0,
-        contentType: "video/mp2t",
-        pluginsApplied: [stamp]
-    )
-    let finalized = try first.finalizeWrite(resource: resource, expectedLength: 20, pluginsApplied: [stamp])
+    do {
+        let first = try CoreCache(baseDirectory: directory)
+        _ = try first.write(
+            Data("01234567".utf8),
+            resource: resource,
+            at: 0,
+            contentType: "video/mp2t",
+            pluginsApplied: [stamp]
+        )
+        let finalized = try first.finalizeWrite(resource: resource, expectedLength: 20, pluginsApplied: [stamp])
 
-    #expect(finalized.expectedLength == 20)
-    #expect(finalized.completedRanges.contains(try br(0, 8)))
-    #expect(finalized.pluginsApplied == [stamp])
+        #expect(finalized.expectedLength == 20)
+        #expect(finalized.completedRanges.contains(try br(0, 8)))
+        #expect(finalized.pluginsApplied == [stamp])
+    }
 
-    let second = CoreCache(baseDirectory: directory)
+    let second = try CoreCache(baseDirectory: directory)
     let restored = try #require(try second.resourceRecord(for: resource))
 
     #expect(restored.expectedLength == 20)
@@ -320,18 +322,20 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-recovery-corrupt-manifest")
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let cache = CoreCache(baseDirectory: directory)
     let resource = try makeCoreCacheResourceID(suffix: "recover-corrupt.ts")
     let initialPayload = Data("initial-segment".utf8)
 
-    _ = try cache.write(initialPayload, resource: resource, at: 0, expectedLength: Int64(initialPayload.count))
-    _ = try cache.finalizeWrite(resource: resource, expectedLength: Int64(initialPayload.count))
+    do {
+        let cache = try CoreCache(baseDirectory: directory)
+        _ = try cache.write(initialPayload, resource: resource, at: 0, expectedLength: Int64(initialPayload.count))
+        _ = try cache.finalizeWrite(resource: resource, expectedLength: Int64(initialPayload.count))
+    }
 
     let manifestStore = ManifestStore(baseDirectory: directory)
     let manifestURL = manifestStore.manifestFileURL(for: resource)
     try Data("{\"broken\":".utf8).write(to: manifestURL)
 
-    let restarted = CoreCache(baseDirectory: directory)
+    let restarted = try CoreCache(baseDirectory: directory)
     #expect(
         try restarted.plan(resource: resource, requested: try br(0, Int64(initialPayload.count)))
             == [.network(try br(0, Int64(initialPayload.count)))]
@@ -356,19 +360,21 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-recovery-temp-manifest")
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let cache = CoreCache(baseDirectory: directory)
     let resource = try makeCoreCacheResourceID(suffix: "recover-temp.ts")
     let payload = Data("123456".utf8)
 
-    _ = try cache.write(payload, resource: resource, at: 0, expectedLength: Int64(payload.count))
-    _ = try cache.finalizeWrite(resource: resource, expectedLength: Int64(payload.count))
+    do {
+        let cache = try CoreCache(baseDirectory: directory)
+        _ = try cache.write(payload, resource: resource, at: 0, expectedLength: Int64(payload.count))
+        _ = try cache.finalizeWrite(resource: resource, expectedLength: Int64(payload.count))
+    }
 
     let manifestStore = ManifestStore(baseDirectory: directory)
     let tempManifestURL = manifestStore.manifestFileURL(for: resource).appendingPathExtension("tmp")
     try Data("{\"partial\":".utf8).write(to: tempManifestURL)
     #expect(FileManager.default.fileExists(atPath: tempManifestURL.path))
 
-    let restarted = CoreCache(baseDirectory: directory)
+    let restarted = try CoreCache(baseDirectory: directory)
     _ = try restarted.write(Data("AB".utf8), resource: resource, at: 0, expectedLength: Int64(payload.count))
     _ = try restarted.finalizeWrite(resource: resource, expectedLength: Int64(payload.count))
 
@@ -385,7 +391,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(try diskStore.fileLength(for: resource) == 11)
 
     let logger = RecordingStructuredLogger()
-    let cache = CoreCache(baseDirectory: directory, logger: logger)
+    let cache = try CoreCache(baseDirectory: directory, logger: logger)
 
     #expect(try diskStore.fileLength(for: resource) == 0)
     #expect(try cache.resourceRecord(for: resource) == nil)
@@ -414,7 +420,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     try manifestStore.save(resourceID: resource, record: ResourceRecord(kind: .segment, expectedLength: 9))
 
     let logger = RecordingStructuredLogger()
-    let cache = CoreCache(baseDirectory: directory, logger: logger)
+    let cache = try CoreCache(baseDirectory: directory, logger: logger)
 
     #expect(try cache.resourceRecord(for: resource) == nil)
     #expect(try cache.metrics().assets.isEmpty)
@@ -436,7 +442,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-concurrency")
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let cache = CoreCache(baseDirectory: directory)
+    let cache = try CoreCache(baseDirectory: directory)
     let resource = try makeCoreCacheResourceID(suffix: "concurrency.ts")
     let totalLength: Int64 = 32 * 1024
 
@@ -477,45 +483,47 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-hardening")
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let cache = CoreCache(baseDirectory: directory)
     let resource = try makeCoreCacheResourceID(suffix: "hardening.ts")
     let totalLength: Int64 = 24 * 1024
 
-    _ = try cache.write(Data(repeating: 0, count: 512), resource: resource, at: 0, expectedLength: totalLength)
+    do {
+        let cache = try CoreCache(baseDirectory: directory)
+        _ = try cache.write(Data(repeating: 0, count: 512), resource: resource, at: 0, expectedLength: totalLength)
 
-    try await withThrowingTaskGroup(of: Void.self) { group in
-        for worker in 0..<5 {
-            group.addTask {
-                for iteration in 0..<250 {
-                    let start = Int64((worker * 59 + iteration * 37) % (Int(totalLength) - 512))
-                    let requested = try br(start, start + 512)
-                    let plan = try cache.plan(resource: resource, requested: requested)
-                    try assertPlanCoherent(plan, requested: requested)
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for worker in 0..<5 {
+                group.addTask {
+                    for iteration in 0..<250 {
+                        let start = Int64((worker * 59 + iteration * 37) % (Int(totalLength) - 512))
+                        let requested = try br(start, start + 512)
+                        let plan = try cache.plan(resource: resource, requested: requested)
+                        try assertPlanCoherent(plan, requested: requested)
+                    }
                 }
             }
-        }
 
-        group.addTask {
-            for iteration in 0..<250 {
-                let offset = Int64((iteration * 83) % (Int(totalLength) - 128))
-                let payload = Data(repeating: UInt8((iteration % 190) + 10), count: 128)
-                _ = try cache.write(payload, resource: resource, at: offset, expectedLength: totalLength)
+            group.addTask {
+                for iteration in 0..<250 {
+                    let offset = Int64((iteration * 83) % (Int(totalLength) - 128))
+                    let payload = Data(repeating: UInt8((iteration % 190) + 10), count: 128)
+                    _ = try cache.write(payload, resource: resource, at: offset, expectedLength: totalLength)
+                }
             }
-        }
 
-        group.addTask {
-            for _ in 0..<80 {
-                _ = try cache.finalizeWrite(resource: resource, expectedLength: totalLength)
+            group.addTask {
+                for _ in 0..<80 {
+                    _ = try cache.finalizeWrite(resource: resource, expectedLength: totalLength)
+                }
             }
+
+            try await group.waitForAll()
         }
 
-        try await group.waitForAll()
+        let finalized = try cache.finalizeWrite(resource: resource, expectedLength: totalLength)
+        #expect(finalized.expectedLength == totalLength)
     }
 
-    let finalized = try cache.finalizeWrite(resource: resource, expectedLength: totalLength)
-    #expect(finalized.expectedLength == totalLength)
-
-    let reloaded = CoreCache(baseDirectory: directory)
+    let reloaded = try CoreCache(baseDirectory: directory)
     let restored = try #require(try reloaded.resourceRecord(for: resource))
     #expect(restored.expectedLength == totalLength)
 
@@ -523,6 +531,34 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     for index in 1..<normalized.count {
         #expect(normalized[index - 1].endExclusive < normalized[index].start)
     }
+}
+
+@Test func coreCache_directoryLock_contentionFailsFastWithTypedError_andDataRemainsReadableAfterRelease() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-lock-contention")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let resource = try makeCoreCacheResourceID(assetID: "asset-lock", suffix: "lock.ts")
+    var first: CoreCache? = try CoreCache(baseDirectory: directory)
+    _ = try first?.write(Data("lock-safe".utf8), resource: resource, at: 0, expectedLength: 9)
+    _ = try first?.finalizeWrite(resource: resource, expectedLength: 9)
+
+    do {
+        _ = try CoreCache(baseDirectory: directory)
+        #expect(Bool(false))
+    } catch let error as CoreCacheDirectoryLockError {
+        switch error {
+        case let .directoryInUse(lockFilePath):
+            #expect(lockFilePath.hasSuffix(".corecache.lock"))
+        case .lockIOFailure:
+            #expect(Bool(false))
+        }
+    }
+
+    first = nil
+
+    let reopened = try CoreCache(baseDirectory: directory)
+    let readBack = try reopened.read(resource: resource, range: try br(0, 9))
+    #expect(String(decoding: readBack, as: UTF8.self) == "lock-safe")
 }
 
 private func assertPlanCoherent(_ parts: [ReadPlanPart], requested: ByteRange) throws {
