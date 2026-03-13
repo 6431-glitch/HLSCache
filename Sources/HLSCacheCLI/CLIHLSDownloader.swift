@@ -311,6 +311,33 @@ struct CLIHLSDownloader: @unchecked Sendable {
         }
     }
 
+    @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+    @available(
+        *,
+        deprecated,
+        message: "Use downloadProgressEvents(alias:) and consume ProgressEvent as AsyncSequence."
+    )
+    @discardableResult
+    func downloadLegacy(
+        alias: String,
+        planHandler: PlanHandler? = nil,
+        progressHandler: ProgressHandler? = nil,
+        completion: @escaping @Sendable (Result<CLIDownloadResult, Error>) -> Void
+    ) -> Task<Void, Never> {
+        Task {
+            do {
+                let result = try await download(
+                    alias: alias,
+                    planHandler: planHandler,
+                    progressHandler: progressHandler
+                )
+                completion(.success(result))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+    }
+
     private func buildDiscoveryPlan(rootURL: URL, headers: [String: String]?) async throws -> DiscoveryPlan {
         var pendingPlaylists: [URL] = [rootURL]
         var visitedPlaylists: Set<String> = []

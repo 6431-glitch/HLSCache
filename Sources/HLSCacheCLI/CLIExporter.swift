@@ -291,18 +291,18 @@ struct CLIExporter: @unchecked Sendable {
                     )
 
                     let snapshot = state.snapshot()
-                    if snapshot.processedUnits < snapshot.totalUnits {
-                        continuation.yield(
-                            ProgressEvent(
-                                operation: .export,
-                                state: .completed,
-                                processedUnits: snapshot.totalUnits,
-                                totalUnits: snapshot.totalUnits,
-                                bytesWritten: result.outputBytes,
-                                detail: "Export output generated"
-                            )
+                    let processedUnits = max(snapshot.processedUnits, snapshot.totalUnits)
+                    let totalUnits = max(snapshot.totalUnits, processedUnits)
+                    continuation.yield(
+                        ProgressEvent(
+                            operation: .export,
+                            state: .completed,
+                            processedUnits: processedUnits,
+                            totalUnits: totalUnits,
+                            bytesWritten: result.outputBytes,
+                            detail: "Export output generated"
                         )
-                    }
+                    )
                     continuation.finish()
                 } catch {
                     let snapshot = state.snapshot()
@@ -318,6 +318,32 @@ struct CLIExporter: @unchecked Sendable {
                     continuation.finish(throwing: error)
                 }
             }
+        }
+    }
+
+    @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+    @available(
+        *,
+        deprecated,
+        message: "Use exportProgressEvents(alias:outputURL:videoCodec:) and consume ProgressEvent as AsyncSequence."
+    )
+    func exportLegacy(
+        alias: String,
+        outputURL: URL,
+        videoCodec: ExportVideoCodec = .copy,
+        progressHandler: ProgressHandler? = nil,
+        completion: @escaping (Result<CLIExportResult, Error>) -> Void
+    ) {
+        do {
+            let result = try export(
+                alias: alias,
+                outputURL: outputURL,
+                videoCodec: videoCodec,
+                progressHandler: progressHandler
+            )
+            completion(.success(result))
+        } catch {
+            completion(.failure(error))
         }
     }
 

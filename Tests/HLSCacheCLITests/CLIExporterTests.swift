@@ -416,3 +416,57 @@ private func seedCachedMediaPlaylist(
     #expect(events.last?.state == .completed)
     #expect(events.last?.operation == .export)
 }
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+@Test func exporter_legacyWrapper_delegatesToAsyncCore() async throws {
+    final class WrapperState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var progressCount = 0
+
+        func markProgress() {
+            lock.lock()
+            progressCount += 1
+            lock.unlock()
+        }
+
+        func snapshotProgressCount() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return progressCount
+        }
+    }
+
+    let directory = try makeExporterTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedCachedMediaPlaylist(baseDirectory: directory, alias: "MDEXPORT9", completeCache: true, includeKeyTag: false)
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    let outputURL = directory.appendingPathComponent("out/video.mp4")
+    let exporter = CLIExporter(
+        baseDirectory: directory,
+        facade: facade,
+        exportRunner: { _, outputURL, _ in
+            try FileManager.default.createDirectory(
+                at: outputURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data("fake-mp4".utf8).write(to: outputURL)
+        }
+    )
+
+    let state = WrapperState()
+    let result = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CLIExportResult, Error>) in
+        _ = exporter.exportLegacy(
+            alias: "MDEXPORT9",
+            outputURL: outputURL,
+            progressHandler: { _ in state.markProgress() },
+            completion: { completion in
+                continuation.resume(with: completion)
+            }
+        )
+    }
+
+    #expect(state.snapshotProgressCount() > 0)
+    #expect(result.outputURL == outputURL)
+    #expect(result.outputBytes > 0)
+}

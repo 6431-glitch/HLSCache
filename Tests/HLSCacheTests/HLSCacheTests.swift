@@ -303,6 +303,51 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(events.last?.operation == .clear)
 }
 
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+@Test func facade_clearCacheLegacyWrapper_delegatesToAsyncCore() async throws {
+    final class WrapperState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var events: [ProgressEvent] = []
+
+        func append(_ event: ProgressEvent) {
+            lock.lock()
+            events.append(event)
+            lock.unlock()
+        }
+
+        func snapshot() -> [ProgressEvent] {
+            lock.lock()
+            defer { lock.unlock() }
+            return events
+        }
+    }
+
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-clear-legacy")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    _ = try facade.register(
+        alias: "MDCLEARLEGACY",
+        assetID: "asset-clear-legacy",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/clear-legacy.m3u8"))
+    )
+
+    let state = WrapperState()
+    _ = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        _ = facade.clearCacheLegacy(
+            alias: "MDCLEARLEGACY",
+            progressHandler: { event in state.append(event) },
+            completion: { completion in
+                continuation.resume(with: completion)
+            }
+        )
+    }
+
+    let events = state.snapshot()
+    #expect(events.first?.state == .started)
+    #expect(events.last?.state == .completed)
+}
+
 @Test func facade_removeAliasAndRemoveAllAliases_updateRegistryState() throws {
     let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-remove-alias")
     defer { try? FileManager.default.removeItem(at: directory) }
