@@ -90,6 +90,7 @@ public final class CoreCache: @unchecked Sendable {
     // Single synchronization strategy for mutable CoreCache state.
     // Reads use queue.sync; all mutations use barrier writes.
     private let queue = DispatchQueue(label: "CoreCache.CoreCache", attributes: .concurrent)
+    private let directoryLock: DirectoryLock
     private let diskStore: DiskStore
     private let manifestStore: ManifestStore
     private let diskQuotaBytes: Int64?
@@ -101,7 +102,8 @@ public final class CoreCache: @unchecked Sendable {
         baseDirectory: URL,
         diskQuotaBytes: Int64? = nil,
         logger: any StructuredLogger = NoopStructuredLogger()
-    ) {
+    ) throws {
+        self.directoryLock = try DirectoryLock(baseDirectory: baseDirectory)
         self.diskStore = DiskStore(baseDirectory: baseDirectory)
         self.manifestStore = ManifestStore(baseDirectory: baseDirectory)
         self.diskQuotaBytes = diskQuotaBytes.map { max($0, 0) }

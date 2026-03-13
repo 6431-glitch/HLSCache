@@ -131,7 +131,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     _ = try facade.startServer(port: 0)
     let proxyBefore = try facade.proxyURL(for: "MDROT")
 
-    let coreCache = CoreCache(baseDirectory: directory)
+    let coreCache = try CoreCache(baseDirectory: directory)
     let cachedSegmentID = ResourceID(
         cacheKey: record.cacheKey,
         kind: .segment,
@@ -245,7 +245,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     )
 
     // Seed cache bytes via CoreCache to validate cacheInfo/clearCache facade behavior.
-    let coreCache = CoreCache(baseDirectory: directory)
+    let coreCache = try CoreCache(baseDirectory: directory)
     let resource = makeResourceID(cacheKey: record.cacheKey, key: "segment-1")
     _ = try coreCache.write(Data(repeating: 1, count: 1024), resource: resource, at: 0)
     _ = try coreCache.finalizeWrite(resource: resource, expectedLength: 1024)

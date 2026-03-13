@@ -210,6 +210,13 @@ If a manifest is corrupted (for example after interruption), it is treated as a 
 - `updateRemoteURL(alias:remoteURL:)` only rotates the remote URL metadata and preserves stable `AssetID`/`CacheKey` identity.
 - Registry access is synchronized for safe concurrent reads and mutations.
 
+### Shared Directory Ownership Contract
+
+- `CoreCache` acquires an exclusive advisory lock at `BaseDirectory/.corecache.lock` during initialization.
+- If the directory is already owned, initialization fails fast with typed error `CoreCacheDirectoryLockError.directoryInUse`.
+- The lock is released on normal deinitialization and is also released by the OS on abnormal process termination.
+- Integrators should treat a cache base directory as single-owner at runtime and instantiate one active `CoreCache` per directory.
+
 ---
 
 ## Usage Example

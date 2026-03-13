@@ -35,7 +35,7 @@ private func makeMP4ResourceID(cacheKey: CacheKey, remoteURL: URL) -> ResourceID
 
     let totalLength: Int64 = 2048
     let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 251) })
-    let cache = CoreCache(baseDirectory: directory)
+    let cache = try CoreCache(baseDirectory: directory)
     let coordinator = ProxyCacheCoordinator(coreCache: cache)
     let resourceID = makeMP4ResourceID(cacheKey: record.cacheKey, remoteURL: remoteURL)
 

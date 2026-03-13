@@ -61,7 +61,7 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 241) })
     let resourceID = try makeCoordinatorResourceID()
 
-    let cache = CoreCache(baseDirectory: directory)
+    let cache = try CoreCache(baseDirectory: directory)
     let coordinator = ProxyCacheCoordinator(coreCache: cache)
 
     _ = try coordinator.serve(
@@ -112,7 +112,7 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let cache = CoreCache(baseDirectory: directory)
+    let cache = try CoreCache(baseDirectory: directory)
     let coordinator = ProxyCacheCoordinator(coreCache: cache)
     let resourceID = try makeCoordinatorResourceID()
 
@@ -141,7 +141,7 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 253) })
     let resourceID = try makeCoordinatorResourceID()
 
-    let cache = CoreCache(baseDirectory: directory)
+    let cache = try CoreCache(baseDirectory: directory)
     let pipeline = TransformPipeline(transformers: [EncryptAtRestPlugin(key: Data("encrypt-key".utf8))])
     let coordinator = ProxyCacheCoordinator(coreCache: cache, transformPipeline: pipeline)
 
@@ -198,7 +198,7 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 251) })
     let resourceID = try makeCoordinatorResourceID()
 
-    let cache = CoreCache(baseDirectory: directory)
+    let cache = try CoreCache(baseDirectory: directory)
     let coordinator = ProxyCacheCoordinator(coreCache: cache)
 
     _ = try coordinator.serve(
@@ -236,7 +236,7 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let cache = CoreCache(baseDirectory: directory)
+    let cache = try CoreCache(baseDirectory: directory)
     let coordinator = ProxyCacheCoordinator(coreCache: cache)
     let resourceID = try makeCoordinatorResourceID()
     var networkFetches = 0
@@ -273,7 +273,7 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     let remoteURL = try #require(URL(string: "https://cdn.example.com/video/async.ts"))
     let requestedRange = try #require(ByteRange(start: 0, endExclusive: 128))
 
-    let cache = CoreCache(baseDirectory: directory)
+    let cache = try CoreCache(baseDirectory: directory)
     let coordinator = ProxyCacheCoordinator(coreCache: cache)
     let resourceID = try makeCoordinatorResourceID()
     let recorder = AsyncRequestRecorder()
@@ -350,7 +350,7 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
         )
     )
 
-    let cache = CoreCache(baseDirectory: directory)
+    let cache = try CoreCache(baseDirectory: directory)
     let coordinator = ProxyCacheCoordinator(coreCache: cache)
     let resourceID = try makeCoordinatorResourceID()
     let networkClient = ClosureNetworkClient { _ in (payload, response) }

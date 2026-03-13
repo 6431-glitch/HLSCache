@@ -105,7 +105,7 @@ private actor RequestRecorder {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let coreCache = CoreCache(baseDirectory: directory)
+    let coreCache = try CoreCache(baseDirectory: directory)
     let coordinator = ProxyCacheCoordinator(coreCache: coreCache)
     let targetURL = try #require(URL(string: "https://cdn.example.com/segment.ts"))
     let requestedRange = try #require(ByteRange(start: 128, endExclusive: 136))

@@ -50,7 +50,7 @@ private func seedCacheBytes(baseDirectory: URL, alias: String, assetID: String) 
         remoteURL: try #require(URL(string: "https://cdn.example.com/\(alias).m3u8"))
     )
 
-    let coreCache = CoreCache(baseDirectory: baseDirectory)
+    let coreCache = try CoreCache(baseDirectory: baseDirectory)
     let resource = ResourceID(
         cacheKey: record.cacheKey,
         kind: .segment,
