@@ -22,6 +22,16 @@ The architecture cleanly separates playback proxying, storage, and background do
 - Offline playback mode toggle in `ProxyCacheCoordinator` (`allowNetworkFallback: false`)
 - Atomic manifest persistence and crash-safe writes
 - Thread-safe concurrent read/write support
+- Documented async-first API policy and Swift Concurrency ADR for migration work
+
+---
+
+## Architecture Decisions
+
+- [Swift Concurrency and Public API Policy ADR](Documents/ADR/ADR-0001-swift-concurrency-and-api-policy.md)
+- [Async API Policy (implementation checklist)](Documents/API_POLICY.md)
+
+All tickets in epic `HLS-98` should reference these documents when introducing async APIs, actor isolation, or sendability changes.
 
 ---
 
