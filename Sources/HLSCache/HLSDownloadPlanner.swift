@@ -254,7 +254,7 @@ public enum HLSDownloadPlanner {
     }
 
     private static func canonicalURLKey(for url: URL) -> String {
-        url.absoluteString
+        ResourceID.makeResourceKey(from: url)
     }
 
     private static func looksLikePlaylistURL(_ url: URL) -> Bool {
