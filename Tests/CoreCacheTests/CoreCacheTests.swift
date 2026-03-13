@@ -375,6 +375,63 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(!FileManager.default.fileExists(atPath: tempManifestURL.path))
 }
 
+@Test func coreCache_reconciliation_purgesOrphanDataFileAndEmitsDiagnostics() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-reconcile-orphan-data")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let resource = try makeCoreCacheResourceID(assetID: "asset-orphan-data", suffix: "orphan-data.ts")
+    let diskStore = DiskStore(baseDirectory: directory)
+    _ = try diskStore.write(Data(repeating: 0x7F, count: 11), for: resource, at: 0)
+    #expect(try diskStore.fileLength(for: resource) == 11)
+
+    let logger = RecordingStructuredLogger()
+    let cache = CoreCache(baseDirectory: directory, logger: logger)
+
+    #expect(try diskStore.fileLength(for: resource) == 0)
+    #expect(try cache.resourceRecord(for: resource) == nil)
+    #expect(try cache.metrics().totalBytesOnDisk == 0)
+
+    let events = logger.events()
+    let orphanEvent = try #require(events.first {
+        $0.operation == "reconcileStartup" && $0.metadata["action"] == "purgeOrphanData"
+    })
+    #expect(orphanEvent.level == .warning)
+    #expect(orphanEvent.metadata["cacheKey"] == resource.cacheKey.rawValue)
+
+    let summaryEvent = try #require(events.first {
+        $0.operation == "reconcileStartup" && $0.metadata["action"] == "summary"
+    })
+    #expect(summaryEvent.metadata["orphanDataCount"] == "1")
+    #expect(summaryEvent.metadata["purgedOrphanDataBytes"] == "11")
+}
+
+@Test func coreCache_reconciliation_purgesManifestWithoutDataAndEmitsDiagnostics() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-reconcile-orphan-manifest")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let resource = try makeCoreCacheResourceID(assetID: "asset-orphan-manifest", suffix: "orphan-manifest.ts")
+    let manifestStore = ManifestStore(baseDirectory: directory)
+    try manifestStore.save(resourceID: resource, record: ResourceRecord(kind: .segment, expectedLength: 9))
+
+    let logger = RecordingStructuredLogger()
+    let cache = CoreCache(baseDirectory: directory, logger: logger)
+
+    #expect(try cache.resourceRecord(for: resource) == nil)
+    #expect(try cache.metrics().assets.isEmpty)
+
+    let events = logger.events()
+    let orphanManifestEvent = try #require(events.first {
+        $0.operation == "reconcileStartup" && $0.metadata["action"] == "purgeOrphanManifest"
+    })
+    #expect(orphanManifestEvent.level == .warning)
+    #expect(orphanManifestEvent.metadata["cacheKey"] == resource.cacheKey.rawValue)
+
+    let summaryEvent = try #require(events.first {
+        $0.operation == "reconcileStartup" && $0.metadata["action"] == "summary"
+    })
+    #expect(summaryEvent.metadata["orphanManifestCount"] == "1")
+}
+
 @Test func coreCache_concurrencySmoke_planAndWriteAreThreadSafe() async throws {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-concurrency")
     defer { try? FileManager.default.removeItem(at: directory) }
