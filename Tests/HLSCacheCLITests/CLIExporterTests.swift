@@ -384,3 +384,35 @@ private func seedCachedMediaPlaylist(
     #expect(progressEvents.last?.phase == .completed)
     #expect(progressEvents.last?.processedUnits == progressEvents.last?.totalUnits)
 }
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+@Test func exporter_progressEvents_emitStartedRunningCompleted() async throws {
+    let directory = try makeExporterTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedCachedMediaPlaylist(baseDirectory: directory, alias: "MDEXPORT8", completeCache: true, includeKeyTag: false)
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    let outputURL = directory.appendingPathComponent("out/video.mp4")
+    let exporter = CLIExporter(
+        baseDirectory: directory,
+        facade: facade,
+        exportRunner: { _, outputURL, _ in
+            try FileManager.default.createDirectory(
+                at: outputURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data("fake-mp4".utf8).write(to: outputURL)
+        }
+    )
+
+    var events: [ProgressEvent] = []
+    for try await event in exporter.exportProgressEvents(alias: "MDEXPORT8", outputURL: outputURL) {
+        events.append(event)
+    }
+
+    #expect(!events.isEmpty)
+    #expect(events.first?.state == .started)
+    #expect(events.contains { $0.state == .running })
+    #expect(events.last?.state == .completed)
+    #expect(events.last?.operation == .export)
+}
