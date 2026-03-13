@@ -59,6 +59,7 @@ struct ProxyServerHTTPResponse: Sendable {
     }
 }
 
+// Wraps runtime mutation behind a private serial dispatch queue.
 final class ProxyServerRuntime: @unchecked Sendable {
 #if canImport(Network)
     private var networkRuntime: AnyObject?
@@ -103,6 +104,7 @@ final class ProxyServerRuntime: @unchecked Sendable {
 
 #if canImport(Network)
 @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+// Owns mutable socket/listener lifecycle state guarded by a private queue.
 private final class NetworkProxyServerRuntime: @unchecked Sendable {
     private let queue = DispatchQueue(label: "HLSCache.ProxyRuntime")
     private let startupTimeoutSeconds: TimeInterval = 2
@@ -383,6 +385,7 @@ private final class NetworkProxyServerRuntime: @unchecked Sendable {
 }
 
 @available(macOS 10.14, iOS 12.0, tvOS 12.0, watchOS 6.0, *)
+// Uses an NSLock to synchronize startup result publication across threads.
 private final class StartupBox: @unchecked Sendable {
     private let lock = NSLock()
     private var storedURL: URL?

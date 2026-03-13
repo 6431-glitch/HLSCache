@@ -52,6 +52,7 @@ public struct BackgroundDownloadRecoveryResult: Equatable, Sendable {
     }
 }
 
+// Task mapping mutations are serialized through an internal concurrent queue + barriers.
 public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
     private let fileManager: FileManager
     private let baseDirectory: URL
@@ -180,6 +181,7 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
     }
 }
 
+// Coordinates file moves and manifest updates via a barrier queue.
 public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable {
     private let fileManager: FileManager
     public let registry: BackgroundDownloadTaskRegistry

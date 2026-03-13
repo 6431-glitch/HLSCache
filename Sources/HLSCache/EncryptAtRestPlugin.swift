@@ -27,6 +27,7 @@ public struct EncryptAtRestPlugin: HLSCachePlugin, ReversibleByteTransformer, Ha
     }
 }
 
+// Maintains mutable stream offset protected by an NSLock.
 private final class XORCipherStreamTransformer: ByteStreamTransformer, @unchecked Sendable {
     private let keyBytes: [UInt8]
     private let lock = NSLock()

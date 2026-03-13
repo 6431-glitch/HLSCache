@@ -46,6 +46,7 @@ public enum HLSCacheError: Error, Equatable, Sendable {
     case aliasNotFound(Alias)
 }
 
+// Protects mutable runtime fields (server state/plugins) with a dedicated dispatch queue.
 public final class HLSCacheFacade: @unchecked Sendable {
     private let fileManager: FileManager
     private let baseDirectory: URL

@@ -22,6 +22,7 @@ extension CoreCacheDirectoryLockError: LocalizedError {
     }
 }
 
+// Wraps a process-wide OS file lock and NSLock-protected reservation set.
 final class DirectoryLock: @unchecked Sendable {
     private static let reservationLock = NSLock()
     private nonisolated(unsafe) static var reservedLockFilePaths: Set<String> = []

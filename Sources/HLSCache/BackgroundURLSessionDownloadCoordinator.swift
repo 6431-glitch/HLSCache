@@ -5,6 +5,7 @@ import Foundation
 import FoundationNetworking
 #endif
 
+// Delegates all mutable state to the recovery coordinator.
 public final class BackgroundURLSessionDownloadCoordinator: @unchecked Sendable {
     public let recoveryCoordinator: BackgroundDownloadRecoveryCoordinator
 
