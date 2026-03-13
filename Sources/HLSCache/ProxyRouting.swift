@@ -5,6 +5,17 @@ public enum ProxyResourceKind: String, CaseIterable, Sendable {
     case segment = "seg"
     case key
     case raw
+
+    var coreCacheKind: ResourceKind {
+        switch self {
+        case .segment:
+            return .segment
+        case .key:
+            return .key
+        case .raw:
+            return .other
+        }
+    }
 }
 
 public struct ProxyRoute: Equatable, Sendable {

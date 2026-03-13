@@ -396,3 +396,164 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
         }
     }
 }
+
+@Test func facade_proxyRuntime_servesRawAndKeyRoutes_overLocalhostTransport() async throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-runtime-routes")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let rawRemoteURL = try #require(URL(string: "https://origin.example.com/video/movie.mp4"))
+    let keyRemoteURL = try #require(URL(string: "https://origin.example.com/keys/enc.key"))
+    let rawPayload = Data((0..<32).map { UInt8($0) })
+    let keyPayload = Data([9, 8, 7, 6, 5, 4, 3, 2])
+
+    let originHeaders = ["X-Origin-Token": "token-123"]
+    let sessionConfiguration = URLSessionConfiguration.ephemeral
+    sessionConfiguration.protocolClasses = [ProxyRuntimeOriginURLProtocol.self]
+    let originSession = URLSession(configuration: sessionConfiguration)
+
+    ProxyRuntimeOriginURLProtocol.setHandler { request in
+        #expect(request.value(forHTTPHeaderField: "X-Origin-Token") == originHeaders["X-Origin-Token"])
+        let url = try #require(request.url)
+
+        let payload: Data
+        let contentType: String
+        switch url {
+        case rawRemoteURL:
+            payload = rawPayload
+            contentType = "video/mp4"
+        case keyRemoteURL:
+            payload = keyPayload
+            contentType = "application/octet-stream"
+        default:
+            let response = try #require(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 404,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Length": "0"]
+                )
+            )
+            return (response, Data())
+        }
+
+        let method = (request.httpMethod ?? "GET").uppercased()
+        if method == "HEAD" {
+            let response = try #require(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: [
+                        "Content-Length": String(payload.count),
+                        "Content-Type": contentType
+                    ]
+                )
+            )
+            return (response, Data())
+        }
+
+        let totalLength = Int64(payload.count)
+        let rangeValue = request.value(forHTTPHeaderField: "Range")
+        let parsedRange = rangeValue.flatMap { ByteRange.parseHTTPRange($0, totalLength: totalLength) }
+            ?? ByteRange(start: 0, endExclusive: totalLength)
+        let range = try #require(parsedRange)
+        let start = Int(range.start)
+        let endExclusive = Int(range.endExclusive)
+        let slice = Data(payload[start..<endExclusive])
+        let response = try #require(
+            HTTPURLResponse(
+                url: url,
+                statusCode: 206,
+                httpVersion: "HTTP/1.1",
+                headerFields: [
+                    "Content-Length": String(slice.count),
+                    "Content-Range": "bytes \(range.start)-\(range.endExclusive - 1)/\(payload.count)",
+                    "Content-Type": contentType
+                ]
+            )
+        )
+        return (response, slice)
+    }
+    defer { ProxyRuntimeOriginURLProtocol.resetHandler() }
+
+    let facade = HLSCacheFacade(baseDirectory: directory, networkSession: originSession)
+    _ = try facade.register(
+        alias: "MDRUNTIME",
+        assetID: "asset-runtime",
+        remoteURL: rawRemoteURL,
+        headers: originHeaders
+    )
+    _ = try facade.startServer(host: "127.0.0.1", port: 0)
+    defer { facade.stopServer() }
+
+    let proxySession = URLSession(configuration: .ephemeral)
+    let rawProxyURL = try facade.proxyURL(for: "MDRUNTIME", kind: .raw, remoteURL: rawRemoteURL)
+    let (rawData, rawResponse) = try await proxySession.data(from: rawProxyURL)
+    let rawHTTPResponse = try #require(rawResponse as? HTTPURLResponse)
+    #expect(rawHTTPResponse.statusCode == 200)
+    #expect(rawHTTPResponse.value(forHTTPHeaderField: "Accept-Ranges") == "bytes")
+    #expect(rawHTTPResponse.value(forHTTPHeaderField: "Content-Length") == String(rawPayload.count))
+    #expect(rawData == rawPayload)
+
+    let keyProxyURL = try facade.proxyURL(for: "MDRUNTIME", kind: .key, remoteURL: keyRemoteURL)
+    var keyRequest = URLRequest(url: keyProxyURL)
+    keyRequest.httpMethod = "GET"
+    keyRequest.setValue("bytes=2-5", forHTTPHeaderField: "Range")
+
+    let (keyData, keyResponse) = try await proxySession.data(for: keyRequest)
+    let keyHTTPResponse = try #require(keyResponse as? HTTPURLResponse)
+    #expect(keyHTTPResponse.statusCode == 206)
+    #expect(keyHTTPResponse.value(forHTTPHeaderField: "Content-Range") == "bytes 2-5/\(keyPayload.count)")
+    #expect(keyData == Data(keyPayload[2..<6]))
+}
+
+private final class ProxyRuntimeOriginURLProtocol: URLProtocol, @unchecked Sendable {
+    typealias Handler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var handler: Handler?
+
+    static func setHandler(_ handler: @escaping Handler) {
+        lock.lock()
+        self.handler = handler
+        lock.unlock()
+    }
+
+    static func resetHandler() {
+        lock.lock()
+        handler = nil
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.lock.lock()
+        let handler = Self.handler
+        Self.lock.unlock()
+
+        guard let handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unknown))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if !data.isEmpty {
+                client?.urlProtocol(self, didLoad: data)
+            }
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
