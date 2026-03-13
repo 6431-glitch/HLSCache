@@ -9,6 +9,47 @@ private func makeCoordinatorResourceID() throws -> ResourceID {
     return ResourceID(cacheKey: cacheKey, kind: .other, resourceKey: ResourceID.makeResourceKey(from: remoteURL))
 }
 
+private enum AsyncProxyCoordinatorTestError: Error, Equatable {
+    case emitFailed
+    case missingRangeHeader
+    case invalidRangeHeader(String)
+}
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+private actor AsyncRequestRecorder {
+    private var requests: [URLRequest] = []
+
+    func append(_ request: URLRequest) {
+        requests.append(request)
+    }
+
+    func count() -> Int {
+        requests.count
+    }
+
+    func rangeHeaders() -> [String] {
+        requests.compactMap { $0.value(forHTTPHeaderField: "Range") }
+    }
+}
+
+private func parseByteRange(from request: URLRequest) throws -> ByteRange {
+    guard let rangeHeader = request.value(forHTTPHeaderField: "Range") else {
+        throw AsyncProxyCoordinatorTestError.missingRangeHeader
+    }
+    guard rangeHeader.hasPrefix("bytes=") else {
+        throw AsyncProxyCoordinatorTestError.invalidRangeHeader(rangeHeader)
+    }
+    let payload = String(rangeHeader.dropFirst("bytes=".count))
+    let parts = payload.split(separator: "-", omittingEmptySubsequences: false)
+    guard parts.count == 2,
+          let start = Int64(parts[0]),
+          let endInclusive = Int64(parts[1]),
+          let range = ByteRange(start: start, endExclusive: endInclusive + 1) else {
+        throw AsyncProxyCoordinatorTestError.invalidRangeHeader(rangeHeader)
+    }
+    return range
+}
+
 @Test func proxyCacheCoordinator_corruptedCachedRange_fetchesMissingTailFromNetwork() throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("hlscache-proxy-coordinator")
@@ -216,5 +257,115 @@ private func makeCoordinatorResourceID() throws -> ResourceID {
     } catch let error as ProxyCacheCoordinatorError {
         #expect(networkFetches == 0)
         #expect(error == .offlineCacheMiss(range: try #require(ByteRange(start: 0, endExclusive: 128))))
+    }
+}
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+@Test func proxyCacheCoordinator_asyncServe_ordersNetworkThenCacheAndPreservesPayload() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-async-serve")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 512
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 239) })
+    let remoteURL = try #require(URL(string: "https://cdn.example.com/video/async.ts"))
+    let requestedRange = try #require(ByteRange(start: 0, endExclusive: 128))
+
+    let cache = CoreCache(baseDirectory: directory)
+    let coordinator = ProxyCacheCoordinator(coreCache: cache)
+    let resourceID = try makeCoordinatorResourceID()
+    let recorder = AsyncRequestRecorder()
+    let networkClient = ClosureNetworkClient { request in
+        await recorder.append(request)
+        let byteRange = try parseByteRange(from: request)
+        let chunk = Data(originData[Int(byteRange.start)..<Int(byteRange.endExclusive)])
+        let response = try #require(
+            HTTPURLResponse(
+                url: remoteURL,
+                statusCode: 206,
+                httpVersion: "HTTP/1.1",
+                headerFields: [
+                    "Content-Range": "bytes \(byteRange.start)-\(byteRange.endExclusive - 1)/\(totalLength)"
+                ]
+            )
+        )
+        return (chunk, response)
+    }
+
+    var firstPayload = Data()
+    let firstResult = try await coordinator.serve(
+        resourceID: resourceID,
+        remoteURL: remoteURL,
+        rangeHeader: "bytes=0-127",
+        totalLength: totalLength,
+        networkClient: networkClient,
+        emit: { firstPayload.append($0) }
+    )
+
+    #expect(firstResult.chunks == [
+        ProxyStreamChunk(source: .network, range: requestedRange, byteCount: 128)
+    ])
+    #expect(firstPayload == Data(originData[0..<128]))
+    #expect(await recorder.count() == 1)
+    #expect(await recorder.rangeHeaders() == ["bytes=0-127"])
+
+    var secondPayload = Data()
+    let secondResult = try await coordinator.serve(
+        resourceID: resourceID,
+        remoteURL: remoteURL,
+        rangeHeader: "bytes=0-127",
+        totalLength: totalLength,
+        allowNetworkFallback: false,
+        networkClient: networkClient,
+        emit: { secondPayload.append($0) }
+    )
+
+    #expect(secondResult.chunks == [
+        ProxyStreamChunk(source: .cache, range: requestedRange, byteCount: 128)
+    ])
+    #expect(secondPayload == Data(originData[0..<128]))
+    #expect(await recorder.count() == 1)
+}
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+@Test func proxyCacheCoordinator_asyncServe_emitErrorBubbles() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-async-emit-error")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 128
+    let remoteURL = try #require(URL(string: "https://cdn.example.com/video/emit-error.ts"))
+    let requestedRange = try #require(ByteRange(start: 0, endExclusive: 64))
+    let payload = Data(repeating: 0xAA, count: Int(requestedRange.length))
+    let response = try #require(
+        HTTPURLResponse(
+            url: remoteURL,
+            statusCode: 206,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Range": "bytes 0-63/\(totalLength)"]
+        )
+    )
+
+    let cache = CoreCache(baseDirectory: directory)
+    let coordinator = ProxyCacheCoordinator(coreCache: cache)
+    let resourceID = try makeCoordinatorResourceID()
+    let networkClient = ClosureNetworkClient { _ in (payload, response) }
+
+    do {
+        _ = try await coordinator.serve(
+            resourceID: resourceID,
+            remoteURL: remoteURL,
+            rangeHeader: "bytes=0-63",
+            totalLength: totalLength,
+            networkClient: networkClient,
+            emit: { _ in throw AsyncProxyCoordinatorTestError.emitFailed }
+        )
+        #expect(Bool(false))
+    } catch let error as AsyncProxyCoordinatorTestError {
+        #expect(error == .emitFailed)
     }
 }

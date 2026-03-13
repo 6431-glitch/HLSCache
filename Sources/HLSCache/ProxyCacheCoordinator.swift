@@ -55,6 +55,122 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         try await networkClient.data(from: remoteURL, byteRange: range, headers: headers)
     }
 
+    @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+    @discardableResult
+    public func serve(
+        resourceID: ResourceID,
+        remoteURL: URL,
+        headers: [String: String] = [:],
+        rangeHeader: String?,
+        totalLength: Int64,
+        contentType: String? = nil,
+        allowNetworkFallback: Bool = true,
+        networkClient: any NetworkClient,
+        emit: (Data) async throws -> Void
+    ) async throws -> ProxyCacheServeResult {
+        let response = try ProxyRangeResponse.make(rangeHeader: rangeHeader, totalLength: totalLength)
+        let plan = try coreCache.plan(resource: resourceID, requested: response.requestedRange)
+
+        var chunks: [ProxyStreamChunk] = []
+        var totalStreamed: Int64 = 0
+        var wroteNetworkData = false
+
+        for part in plan {
+            switch part {
+            case let .network(range):
+                guard allowNetworkFallback else {
+                    throw ProxyCacheCoordinatorError.offlineCacheMiss(range: range)
+                }
+                let networkData = try await fetchRange(
+                    from: remoteURL,
+                    range: range,
+                    headers: headers,
+                    using: networkClient
+                )
+                let writeProcessor = transformPipeline.makeProcessor(
+                    context: TransformContext(resourceID: resourceID, byteOffset: range.start),
+                    direction: .writeToCache
+                )
+                let cachePayload = try writeProcessor.process(networkData, isFinal: true)
+                _ = try coreCache.write(
+                    cachePayload,
+                    resource: resourceID,
+                    at: range.start,
+                    contentType: contentType,
+                    expectedLength: totalLength,
+                    pluginsApplied: writeProcessor.pluginStamps
+                )
+                try await emit(networkData)
+                chunks.append(ProxyStreamChunk(source: .network, range: range, byteCount: networkData.count))
+                totalStreamed += Int64(networkData.count)
+                wroteNetworkData = true
+
+            case let .file(range):
+                let cachedData = try coreCache.read(resource: resourceID, range: range)
+                let readProcessor = transformPipeline.makeProcessor(
+                    context: TransformContext(resourceID: resourceID, byteOffset: range.start),
+                    direction: .readFromCache
+                )
+                if cachedData.count >= Int(range.length) {
+                    let expectedCount = Int(range.length)
+                    let payload = Data(cachedData.prefix(expectedCount))
+                    let decodedPayload = try readProcessor.process(payload, isFinal: true)
+                    try await emit(decodedPayload)
+                    chunks.append(ProxyStreamChunk(source: .cache, range: range, byteCount: expectedCount))
+                    totalStreamed += Int64(expectedCount)
+                    continue
+                }
+
+                let missingStart = range.start + Int64(cachedData.count)
+                let missingRange = try requireRange(start: missingStart, endExclusive: range.endExclusive)
+                guard allowNetworkFallback else {
+                    throw ProxyCacheCoordinatorError.offlineCacheMiss(range: missingRange)
+                }
+
+                if !cachedData.isEmpty {
+                    let decodedPayload = try readProcessor.process(cachedData, isFinal: true)
+                    try await emit(decodedPayload)
+                    let availableRange = try requireRange(
+                        start: range.start,
+                        endExclusive: range.start + Int64(cachedData.count)
+                    )
+                    chunks.append(ProxyStreamChunk(source: .cache, range: availableRange, byteCount: cachedData.count))
+                    totalStreamed += Int64(cachedData.count)
+                }
+
+                let networkData = try await fetchRange(
+                    from: remoteURL,
+                    range: missingRange,
+                    headers: headers,
+                    using: networkClient
+                )
+                let missingWriteProcessor = transformPipeline.makeProcessor(
+                    context: TransformContext(resourceID: resourceID, byteOffset: missingRange.start),
+                    direction: .writeToCache
+                )
+                let cachePayload = try missingWriteProcessor.process(networkData, isFinal: true)
+                _ = try coreCache.write(
+                    cachePayload,
+                    resource: resourceID,
+                    at: missingRange.start,
+                    contentType: contentType,
+                    expectedLength: totalLength,
+                    pluginsApplied: missingWriteProcessor.pluginStamps
+                )
+                try await emit(networkData)
+                chunks.append(ProxyStreamChunk(source: .network, range: missingRange, byteCount: networkData.count))
+                totalStreamed += Int64(networkData.count)
+                wroteNetworkData = true
+            }
+        }
+
+        if wroteNetworkData {
+            _ = try coreCache.finalizeWrite(resource: resourceID, expectedLength: totalLength)
+        }
+
+        return ProxyCacheServeResult(response: response, chunks: chunks, totalBytesStreamed: totalStreamed)
+    }
+
     @discardableResult
     public func serve(
         resourceID: ResourceID,
