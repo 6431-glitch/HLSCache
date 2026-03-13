@@ -20,6 +20,7 @@ The architecture cleanly separates playback proxying, storage, and background do
 - Designed for AVPlayer compatibility (HLS + MP4)
 - Server-agnostic `CoreCache` module usable outside proxy context
 - Offline playback mode toggle in `ProxyCacheCoordinator` (`allowNetworkFallback: false`)
+- Async serve API in `ProxyCacheCoordinator` with `NetworkClient` range fetching
 - Atomic manifest persistence and crash-safe writes
 - Thread-safe concurrent read/write support
 - Documented async-first API policy and Swift Concurrency ADR for migration work
