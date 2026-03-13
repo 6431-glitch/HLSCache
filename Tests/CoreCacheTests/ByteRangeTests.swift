@@ -47,3 +47,41 @@ import Testing
     #expect(ByteRange.parseHTTPRange("bytes=-1-2", totalLength: nil) == nil)
     #expect(ByteRange.parseHTTPRange("bytes=-10", totalLength: nil) == nil)
 }
+
+@Test func parseHTTPRangeValidated_validInput_matchesOptionalParserBehavior() throws {
+    let strict = try ByteRange.parseHTTPRangeValidated("bytes=95-200", totalLength: 100)
+    let optional = ByteRange.parseHTTPRange("bytes=95-200", totalLength: 100)
+    #expect(strict == ByteRange(start: 95, endExclusive: 100))
+    #expect(optional == strict)
+}
+
+@Test func parseHTTPRangeValidated_overflowOnInclusiveEnd_throwsTypedError() {
+    do {
+        _ = try ByteRange.parseHTTPRangeValidated("bytes=0-9223372036854775807", totalLength: nil)
+        #expect(Bool(false))
+    } catch let error as HTTPRangeParseError {
+        #expect(error == .overflow)
+    } catch {
+        #expect(Bool(false))
+    }
+}
+
+@Test func parseHTTPRangeValidated_extremeMalformedValues_throwsDeterministicErrors() {
+    do {
+        _ = try ByteRange.parseHTTPRangeValidated("bytes=0-999999999999999999999999999999", totalLength: nil)
+        #expect(Bool(false))
+    } catch let error as HTTPRangeParseError {
+        #expect(error == .invalidEnd)
+    } catch {
+        #expect(Bool(false))
+    }
+
+    do {
+        _ = try ByteRange.parseHTTPRangeValidated("bytes=10-", totalLength: nil)
+        #expect(Bool(false))
+    } catch let error as HTTPRangeParseError {
+        #expect(error == .missingTotalLength)
+    } catch {
+        #expect(Bool(false))
+    }
+}

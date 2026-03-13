@@ -1,5 +1,19 @@
 import Foundation
 
+public enum HTTPRangeParseError: Error, Equatable, Sendable {
+    case emptyHeader
+    case invalidUnit
+    case emptyRange
+    case multipleRangesNotSupported
+    case missingDash
+    case invalidStart
+    case invalidEnd
+    case invalidSuffix
+    case missingTotalLength
+    case overflow
+    case rangeNotSatisfiable
+}
+
 /// Internal byte-range model used by cache and proxy layers.
 ///
 /// - Important: Ranges are half-open (`[start, endExclusive)`) for safer arithmetic and easy length math.
@@ -49,81 +63,106 @@ public struct ByteRange: Codable, Hashable, Sendable {
     /// If `totalLength` is provided, open and suffix ranges are resolved against it and end values are clamped.
     /// Returns `nil` for invalid/multiple/empty ranges.
     public static func parseHTTPRange(_ headerValue: String, totalLength: Int64?) -> ByteRange? {
+        try? parseHTTPRangeValidated(headerValue, totalLength: totalLength)
+    }
+
+    /// Strict HTTP range parser with deterministic typed errors.
+    ///
+    /// This variant mirrors `parseHTTPRange(_:totalLength:)` semantics for valid values but provides explicit
+    /// failure reasons and overflow-safe `endInclusive + 1` conversion.
+    public static func parseHTTPRangeValidated(_ headerValue: String, totalLength: Int64?) throws -> ByteRange {
         let trimmed = headerValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            return nil
+            throw HTTPRangeParseError.emptyHeader
         }
 
         let lower = trimmed.lowercased()
         guard lower.hasPrefix("bytes=") else {
-            return nil
+            throw HTTPRangeParseError.invalidUnit
         }
 
         let rawSpec = String(trimmed.dropFirst(6)).trimmingCharacters(in: .whitespaces)
-        guard !rawSpec.isEmpty, !rawSpec.contains(",") else {
-            return nil
+        guard !rawSpec.isEmpty else {
+            throw HTTPRangeParseError.emptyRange
+        }
+        guard !rawSpec.contains(",") else {
+            throw HTTPRangeParseError.multipleRangesNotSupported
         }
 
         guard let dashIndex = rawSpec.firstIndex(of: "-") else {
-            return nil
+            throw HTTPRangeParseError.missingDash
         }
 
         let startPart = String(rawSpec[..<dashIndex]).trimmingCharacters(in: .whitespaces)
         let endPart = String(rawSpec[rawSpec.index(after: dashIndex)...]).trimmingCharacters(in: .whitespaces)
 
         if startPart.isEmpty {
-            return parseSuffixRange(endPart, totalLength: totalLength)
+            return try parseSuffixRangeValidated(endPart, totalLength: totalLength)
         }
 
         guard let start = parseNonNegativeInt(startPart) else {
-            return nil
+            throw HTTPRangeParseError.invalidStart
         }
 
         if endPart.isEmpty {
             guard let totalLength else {
-                return nil
+                throw HTTPRangeParseError.missingTotalLength
             }
 
             let endExclusive = max(start, totalLength)
             guard endExclusive > start else {
-                return nil
+                throw HTTPRangeParseError.rangeNotSatisfiable
             }
-            return ByteRange(start: start, endExclusive: endExclusive)
+            guard let range = ByteRange(start: start, endExclusive: endExclusive) else {
+                throw HTTPRangeParseError.rangeNotSatisfiable
+            }
+            return range
         }
 
         guard let endInclusive = parseNonNegativeInt(endPart), endInclusive >= start else {
-            return nil
+            throw HTTPRangeParseError.invalidEnd
         }
 
-        var endExclusive = endInclusive + 1
+        let (convertedEndExclusive, overflowed) = endInclusive.addingReportingOverflow(1)
+        guard !overflowed else {
+            throw HTTPRangeParseError.overflow
+        }
+
+        var endExclusive = convertedEndExclusive
         if let totalLength {
             endExclusive = min(endExclusive, totalLength)
         }
 
         guard endExclusive > start else {
-            return nil
+            throw HTTPRangeParseError.rangeNotSatisfiable
         }
 
-        return ByteRange(start: start, endExclusive: endExclusive)
+        guard let range = ByteRange(start: start, endExclusive: endExclusive) else {
+            throw HTTPRangeParseError.rangeNotSatisfiable
+        }
+        return range
     }
 
-    private static func parseSuffixRange(_ suffixPart: String, totalLength: Int64?) -> ByteRange? {
+    private static func parseSuffixRangeValidated(_ suffixPart: String, totalLength: Int64?) throws -> ByteRange {
         guard let totalLength else {
-            return nil
+            throw HTTPRangeParseError.missingTotalLength
         }
 
         guard let suffixLength = parseNonNegativeInt(suffixPart), suffixLength > 0 else {
-            return nil
+            throw HTTPRangeParseError.invalidSuffix
         }
 
         let start = max(0, totalLength - suffixLength)
         let endExclusive = max(0, totalLength)
 
         guard endExclusive > start else {
-            return nil
+            throw HTTPRangeParseError.rangeNotSatisfiable
         }
 
-        return ByteRange(start: start, endExclusive: endExclusive)
+        guard let range = ByteRange(start: start, endExclusive: endExclusive) else {
+            throw HTTPRangeParseError.rangeNotSatisfiable
+        }
+        return range
     }
 
     private static func parseNonNegativeInt(_ value: String) -> Int64? {
