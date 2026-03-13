@@ -36,12 +36,39 @@ extension ProxyServerRuntimeError: LocalizedError {
     }
 }
 
+struct ProxyServerHTTPRequest: Sendable {
+    let method: String
+    let target: String
+    let path: String
+    let headers: [String: String]
+}
+
+struct ProxyServerHTTPResponse: Sendable {
+    let statusCode: Int
+    let reasonPhrase: String
+    let headers: [String: String]
+    let body: Data
+
+    static func text(statusCode: Int, reasonPhrase: String, body: String) -> ProxyServerHTTPResponse {
+        ProxyServerHTTPResponse(
+            statusCode: statusCode,
+            reasonPhrase: reasonPhrase,
+            headers: ["Content-Type": "text/plain; charset=utf-8"],
+            body: Data(body.utf8)
+        )
+    }
+}
+
 final class ProxyServerRuntime: @unchecked Sendable {
 #if canImport(Network)
     private var networkRuntime: AnyObject?
 #endif
 
-    func start(host: String, port: Int) throws -> URL {
+    func start(
+        host: String,
+        port: Int,
+        requestHandler: (@Sendable (ProxyServerHTTPRequest) async -> ProxyServerHTTPResponse)? = nil
+    ) throws -> URL {
         let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedHost.isEmpty else {
             throw ProxyServerRuntimeError.invalidHost(host)
@@ -51,14 +78,14 @@ final class ProxyServerRuntime: @unchecked Sendable {
         }
 
 #if canImport(Network)
-        if #available(macOS 10.14, iOS 12.0, tvOS 12.0, watchOS 6.0, *) {
+        if #available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *) {
             if networkRuntime == nil {
                 networkRuntime = NetworkProxyServerRuntime()
             }
             guard let runtime = networkRuntime as? NetworkProxyServerRuntime else {
                 throw ProxyServerRuntimeError.networkStackUnavailable
             }
-            return try runtime.start(host: trimmedHost, port: port)
+            return try runtime.start(host: trimmedHost, port: port, requestHandler: requestHandler)
         }
 #endif
 
@@ -67,7 +94,7 @@ final class ProxyServerRuntime: @unchecked Sendable {
 
     func stop() {
 #if canImport(Network)
-        if #available(macOS 10.14, iOS 12.0, tvOS 12.0, watchOS 6.0, *) {
+        if #available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *) {
             (networkRuntime as? NetworkProxyServerRuntime)?.stop()
         }
 #endif
@@ -75,15 +102,20 @@ final class ProxyServerRuntime: @unchecked Sendable {
 }
 
 #if canImport(Network)
-@available(macOS 10.14, iOS 12.0, tvOS 12.0, watchOS 6.0, *)
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
 private final class NetworkProxyServerRuntime: @unchecked Sendable {
     private let queue = DispatchQueue(label: "HLSCache.ProxyRuntime")
     private let startupTimeoutSeconds: TimeInterval = 2
     private var listener: NWListener?
     private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
     private var runningBaseURL: URL?
+    private var requestHandler: (@Sendable (ProxyServerHTTPRequest) async -> ProxyServerHTTPResponse)?
 
-    func start(host: String, port: Int) throws -> URL {
+    func start(
+        host: String,
+        port: Int,
+        requestHandler: (@Sendable (ProxyServerHTTPRequest) async -> ProxyServerHTTPResponse)?
+    ) throws -> URL {
         if let existing = queue.sync(execute: { runningBaseURL }) {
             return existing
         }
@@ -158,6 +190,7 @@ private final class NetworkProxyServerRuntime: @unchecked Sendable {
         queue.sync {
             self.listener = listener
             self.runningBaseURL = startedURL
+            self.requestHandler = requestHandler
         }
         return startedURL
     }
@@ -169,6 +202,7 @@ private final class NetworkProxyServerRuntime: @unchecked Sendable {
             listener?.cancel()
             listener = nil
             runningBaseURL = nil
+            requestHandler = nil
         }
     }
 
@@ -198,18 +232,26 @@ private final class NetworkProxyServerRuntime: @unchecked Sendable {
         }
 
         connection.start(queue: queue)
-        receiveAndRespond(connection, identifier: identifier)
+        receiveAndRespond(connection, identifier: identifier, accumulated: Data())
     }
 
-    private func receiveAndRespond(_ connection: NWConnection, identifier: ObjectIdentifier) {
+    private func receiveAndRespond(
+        _ connection: NWConnection,
+        identifier: ObjectIdentifier,
+        accumulated: Data
+    ) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, _, _ in
             guard let self else {
                 connection.cancel()
                 return
             }
 
-            guard let data,
-                  !data.isEmpty else {
+            var buffer = accumulated
+            if let data, !data.isEmpty {
+                buffer.append(data)
+            }
+
+            guard !buffer.isEmpty else {
                 connection.cancel()
                 self.queue.async {
                     self.activeConnections.removeValue(forKey: identifier)
@@ -217,51 +259,126 @@ private final class NetworkProxyServerRuntime: @unchecked Sendable {
                 return
             }
 
-            let request = String(data: data, encoding: .utf8) ?? ""
-            let response = self.httpResponse(for: request)
-            connection.send(content: response, completion: .contentProcessed { _ in
-                connection.cancel()
-                self.queue.async {
-                    self.activeConnections.removeValue(forKey: identifier)
+            guard self.requestHeadersComplete(in: buffer) else {
+                self.receiveAndRespond(connection, identifier: identifier, accumulated: buffer)
+                return
+            }
+
+            Task { [weak self] in
+                guard let self else {
+                    connection.cancel()
+                    return
                 }
-            })
+                let responseData = await self.httpResponse(for: buffer)
+                self.queue.async {
+                    connection.send(content: responseData, completion: .contentProcessed { _ in
+                        connection.cancel()
+                        self.queue.async {
+                            self.activeConnections.removeValue(forKey: identifier)
+                        }
+                    })
+                }
+            }
         }
     }
 
-    private func httpResponse(for request: String) -> Data {
-        let requestLine = request.components(separatedBy: "\r\n").first ?? ""
+    private func requestHeadersComplete(in data: Data) -> Bool {
+        data.range(of: Data("\r\n\r\n".utf8)) != nil
+    }
+
+    private func parseHTTPRequest(_ requestData: Data) -> ProxyServerHTTPRequest? {
+        guard let request = String(data: requestData, encoding: .utf8) else {
+            return nil
+        }
+        let lines = request.components(separatedBy: "\r\n")
+        guard let requestLine = lines.first else {
+            return nil
+        }
         let components = requestLine.split(separator: " ", omittingEmptySubsequences: true)
-
         guard components.count >= 2 else {
-            return makeHTTPResponse(status: "400 Bad Request", body: "bad request\n", includeBody: true)
+            return nil
         }
 
-        let method = components[0].uppercased()
-        let path = String(components[1])
-        let includeBody = method != "HEAD"
+        let method = String(components[0]).uppercased()
+        let target = String(components[1])
+        let path = pathFromRequestTarget(target)
 
-        if method != "GET", method != "HEAD" {
-            return makeHTTPResponse(status: "405 Method Not Allowed", body: "method not allowed\n", includeBody: includeBody)
+        var headers: [String: String] = [:]
+        for line in lines.dropFirst() {
+            if line.isEmpty {
+                break
+            }
+            guard let separator = line.firstIndex(of: ":") else {
+                continue
+            }
+            let name = line[..<separator].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
+            headers[name] = value
         }
 
-        if path == "/" || path == "/health" {
-            return makeHTTPResponse(status: "200 OK", body: "ok\n", includeBody: includeBody)
-        }
-
-        return makeHTTPResponse(status: "404 Not Found", body: "not found\n", includeBody: includeBody)
+        return ProxyServerHTTPRequest(method: method, target: target, path: path, headers: headers)
     }
 
-    private func makeHTTPResponse(status: String, body: String, includeBody: Bool) -> Data {
-        let payload = includeBody ? body : ""
-        let header = [
-            "HTTP/1.1 \(status)",
-            "Content-Type: text/plain; charset=utf-8",
-            "Content-Length: \(payload.utf8.count)",
-            "Connection: close",
-            "",
-            ""
-        ].joined(separator: "\r\n")
-        return Data(header.utf8) + Data(payload.utf8)
+    private func pathFromRequestTarget(_ target: String) -> String {
+        let rawPath = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? target
+        if rawPath.hasPrefix("/") {
+            return rawPath
+        }
+        return "/" + rawPath
+    }
+
+    private func httpResponse(for requestData: Data) async -> Data {
+        guard let request = parseHTTPRequest(requestData) else {
+            return makeHTTPResponse(
+                from: .text(statusCode: 400, reasonPhrase: "Bad Request", body: "bad request\n"),
+                includeBody: true
+            )
+        }
+
+        let includeBody = request.method != "HEAD"
+        if request.method != "GET", request.method != "HEAD" {
+            return makeHTTPResponse(
+                from: .text(statusCode: 405, reasonPhrase: "Method Not Allowed", body: "method not allowed\n"),
+                includeBody: includeBody
+            )
+        }
+
+        if request.path == "/" || request.path == "/health" {
+            return makeHTTPResponse(
+                from: .text(statusCode: 200, reasonPhrase: "OK", body: "ok\n"),
+                includeBody: includeBody
+            )
+        }
+
+        if let requestHandler {
+            let response = await requestHandler(request)
+            return makeHTTPResponse(from: response, includeBody: includeBody)
+        }
+
+        return makeHTTPResponse(
+            from: .text(statusCode: 404, reasonPhrase: "Not Found", body: "not found\n"),
+            includeBody: includeBody
+        )
+    }
+
+    private func makeHTTPResponse(from response: ProxyServerHTTPResponse, includeBody: Bool) -> Data {
+        let payload = includeBody ? response.body : Data()
+        var headers = response.headers
+        if headers["Content-Length"] == nil {
+            headers["Content-Length"] = String(response.body.count)
+        }
+        headers["Connection"] = "close"
+
+        var lines = ["HTTP/1.1 \(response.statusCode) \(response.reasonPhrase)"]
+        for key in headers.keys.sorted() {
+            if let value = headers[key] {
+                lines.append("\(key): \(value)")
+            }
+        }
+        lines.append("")
+        lines.append("")
+        let headerData = Data(lines.joined(separator: "\r\n").utf8)
+        return headerData + payload
     }
 }
 

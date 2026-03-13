@@ -1,6 +1,10 @@
 import CoreCache
 import Foundation
 
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+
 public protocol HLSCachePlugin: Sendable {
     var id: String { get }
     var version: String { get }
@@ -47,6 +51,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
     private let baseDirectory: URL
     private let aliasRegistry: AliasRegistry
     private let logger: any StructuredLogger
+    private let networkSession: URLSession
     private let queue = DispatchQueue(label: "HLSCache.Facade", attributes: .concurrent)
     private let proxyRuntime = ProxyServerRuntime()
 
@@ -54,11 +59,16 @@ public final class HLSCacheFacade: @unchecked Sendable {
     private var runtimeState: ProxyRuntimeState = .stopped
     private var plugins: [any HLSCachePlugin] = []
 
-    public init(baseDirectory: URL, logger: any StructuredLogger = NoopStructuredLogger()) {
+    public init(
+        baseDirectory: URL,
+        logger: any StructuredLogger = NoopStructuredLogger(),
+        networkSession: URLSession = .shared
+    ) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
         self.aliasRegistry = AliasRegistry(baseDirectory: baseDirectory, logger: logger)
         self.logger = logger
+        self.networkSession = networkSession
     }
 
     @discardableResult
@@ -71,7 +81,11 @@ public final class HLSCacheFacade: @unchecked Sendable {
 
             runtimeState = .starting
             do {
-                let resolvedURL = try proxyRuntime.start(host: host, port: port)
+                let resolvedURL = try proxyRuntime.start(
+                    host: host,
+                    port: port,
+                    requestHandler: makeProxyRequestHandler()
+                )
                 serverBaseURL = resolvedURL
                 runtimeState = .running
                 logger.log(
@@ -469,6 +483,345 @@ public final class HLSCacheFacade: @unchecked Sendable {
             }
         }
         return total
+    }
+
+    private func makeProxyRequestHandler() -> @Sendable (ProxyServerHTTPRequest) async -> ProxyServerHTTPResponse {
+        { [weak self] request in
+            guard let self else {
+                return ProxyServerHTTPResponse.text(
+                    statusCode: 500,
+                    reasonPhrase: "Internal Server Error",
+                    body: "runtime unavailable\n"
+                )
+            }
+
+            if #available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *) {
+                return await self.handleProxyRequest(request)
+            }
+
+            return ProxyServerHTTPResponse.text(
+                statusCode: 501,
+                reasonPhrase: "Not Implemented",
+                body: "proxy request handling requires async runtime support\n"
+            )
+        }
+    }
+
+    @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+    private func handleProxyRequest(_ request: ProxyServerHTTPRequest) async -> ProxyServerHTTPResponse {
+        let correlationID = UUID().uuidString
+
+        let requestURL: URL
+        do {
+            requestURL = try makeRequestURL(for: request.path)
+        } catch {
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "proxyRequest",
+                    level: .warning,
+                    correlationID: correlationID,
+                    metadata: [
+                        "path": request.path,
+                        "method": request.method,
+                        "status": "400",
+                        "error": String(describing: error)
+                    ]
+                )
+            )
+            return .text(statusCode: 400, reasonPhrase: "Bad Request", body: "invalid route\n")
+        }
+
+        let route: ProxyRoute
+        let asset: AssetRecord
+        do {
+            route = try decodeProxyRequestURL(requestURL)
+            guard let resolved = aliasRegistry.resolve(alias: route.alias) else {
+                throw HLSCacheError.aliasNotFound(route.alias)
+            }
+            asset = resolved
+        } catch HLSCacheError.aliasNotFound {
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "proxyRequest",
+                    level: .warning,
+                    correlationID: correlationID,
+                    metadata: [
+                        "path": request.path,
+                        "method": request.method,
+                        "status": "404"
+                    ]
+                )
+            )
+            return .text(statusCode: 404, reasonPhrase: "Not Found", body: "alias not found\n")
+        } catch {
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "proxyRequest",
+                    level: .warning,
+                    correlationID: correlationID,
+                    metadata: [
+                        "path": request.path,
+                        "method": request.method,
+                        "status": "400",
+                        "error": String(describing: error)
+                    ]
+                )
+            )
+            return .text(statusCode: 400, reasonPhrase: "Bad Request", body: "invalid route\n")
+        }
+
+        let resourceID = ResourceID(
+            cacheKey: asset.cacheKey,
+            kind: route.kind.coreCacheKind,
+            resourceKey: ResourceID.makeResourceKey(from: route.remoteURL)
+        )
+
+        let coordinator: ProxyCacheCoordinator
+        let totalLength: Int64
+        let contentType: String?
+        let requestHeaders = asset.headers ?? [:]
+        do {
+            let cache = try CoreCache(baseDirectory: baseDirectory, logger: logger)
+            coordinator = ProxyCacheCoordinator(
+                coreCache: cache,
+                transformPipeline: makeTransformPipeline()
+            )
+            let cachedRecord = try cache.record(resource: resourceID)
+            let metadata = try await resolveRemoteMetadataIfNeeded(
+                cachedRecord: cachedRecord,
+                remoteURL: route.remoteURL,
+                requestHeaders: requestHeaders,
+                networkClient: URLSessionNetworkClient(session: networkSession)
+            )
+            totalLength = metadata.totalLength
+            contentType = metadata.contentType
+        } catch {
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "proxyRequest",
+                    level: .error,
+                    correlationID: correlationID,
+                    metadata: [
+                        "path": request.path,
+                        "method": request.method,
+                        "status": "502",
+                        "error": String(describing: error)
+                    ]
+                )
+            )
+            return .text(statusCode: 502, reasonPhrase: "Bad Gateway", body: "upstream metadata unavailable\n")
+        }
+
+        let rangeHeader = request.headers["range"]
+        do {
+            if request.method == "HEAD" {
+                let response = try ProxyRangeResponse.make(
+                    rangeHeader: rangeHeader,
+                    totalLength: totalLength
+                )
+                var headers = response.headers
+                if let contentType {
+                    headers["Content-Type"] = contentType
+                }
+                logger.log(
+                    StructuredLogEvent(
+                        subsystem: "HLSCache",
+                        operation: "proxyRequest",
+                        level: .debug,
+                        correlationID: correlationID,
+                        metadata: [
+                            "alias": route.alias,
+                            "kind": route.kind.rawValue,
+                            "status": String(response.statusCode),
+                            "bytes": headers["Content-Length"] ?? "0"
+                        ]
+                    )
+                )
+                return ProxyServerHTTPResponse(
+                    statusCode: response.statusCode,
+                    reasonPhrase: reasonPhrase(for: response.statusCode),
+                    headers: headers,
+                    body: Data()
+                )
+            }
+
+            let networkClient = URLSessionNetworkClient(session: networkSession)
+            var payload = Data()
+            let result = try await coordinator.serveStreaming(
+                resourceID: resourceID,
+                remoteURL: route.remoteURL,
+                headers: requestHeaders,
+                rangeHeader: rangeHeader,
+                totalLength: totalLength,
+                contentType: contentType,
+                allowNetworkFallback: true,
+                networkClient: networkClient
+            ) { _, chunk in
+                payload.append(chunk)
+            }
+
+            var headers = result.response.headers
+            if let contentType {
+                headers["Content-Type"] = contentType
+            }
+
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "proxyRequest",
+                    level: .debug,
+                    correlationID: correlationID,
+                    metadata: [
+                        "alias": route.alias,
+                        "kind": route.kind.rawValue,
+                        "status": String(result.response.statusCode),
+                        "bytes": String(payload.count)
+                    ]
+                )
+            )
+
+            return ProxyServerHTTPResponse(
+                statusCode: result.response.statusCode,
+                reasonPhrase: reasonPhrase(for: result.response.statusCode),
+                headers: headers,
+                body: payload
+            )
+        } catch {
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "proxyRequest",
+                    level: .error,
+                    correlationID: correlationID,
+                    metadata: [
+                        "alias": route.alias,
+                        "kind": route.kind.rawValue,
+                        "path": request.path,
+                        "method": request.method,
+                        "status": "502",
+                        "error": String(describing: error)
+                    ]
+                )
+            )
+            return .text(statusCode: 502, reasonPhrase: "Bad Gateway", body: "proxy upstream error\n")
+        }
+    }
+
+    private func makeRequestURL(for path: String) throws -> URL {
+        guard var components = URLComponents(string: "http://localhost") else {
+            throw ProxyRouteError.invalidRoutePath(path)
+        }
+        let normalizedPath = path.hasPrefix("/") ? path : "/" + path
+        components.percentEncodedPath = normalizedPath
+        guard let url = components.url else {
+            throw ProxyRouteError.invalidRoutePath(path)
+        }
+        return url
+    }
+
+    @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+    private func resolveRemoteMetadataIfNeeded(
+        cachedRecord: ResourceRecord?,
+        remoteURL: URL,
+        requestHeaders: [String: String],
+        networkClient: any NetworkClient
+    ) async throws -> (totalLength: Int64, contentType: String?) {
+        if let expectedLength = cachedRecord?.expectedLength, expectedLength >= 0 {
+            return (expectedLength, cachedRecord?.contentType)
+        }
+
+        var headRequest = URLRequest(url: remoteURL)
+        headRequest.httpMethod = "HEAD"
+        for (name, value) in requestHeaders {
+            headRequest.setValue(value, forHTTPHeaderField: name)
+        }
+
+        do {
+            let (_, response) = try await networkClient.data(for: headRequest)
+            if let httpResponse = response as? HTTPURLResponse,
+               (200...299).contains(httpResponse.statusCode),
+               let contentLength = parseContentLength(from: httpResponse) {
+                return (contentLength, parseContentType(from: httpResponse))
+            }
+        } catch {
+            // Fall back to range probe when HEAD is unsupported or unavailable.
+        }
+
+        var probeRequest = URLRequest(url: remoteURL)
+        probeRequest.httpMethod = "GET"
+        probeRequest.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        for (name, value) in requestHeaders {
+            probeRequest.setValue(value, forHTTPHeaderField: name)
+        }
+
+        let (probeData, probeResponse) = try await networkClient.data(for: probeRequest)
+        guard let probeHTTPResponse = probeResponse as? HTTPURLResponse else {
+            throw NetworkClientError.nonHTTPResponse
+        }
+        let totalLength = parseTotalLengthFromContentRange(headerValue("Content-Range", in: probeHTTPResponse))
+            ?? parseContentLength(from: probeHTTPResponse)
+            ?? Int64(probeData.count)
+        return (totalLength, parseContentType(from: probeHTTPResponse))
+    }
+
+    private func parseContentLength(from response: HTTPURLResponse) -> Int64? {
+        guard let value = headerValue("Content-Length", in: response) else {
+            return nil
+        }
+        return Int64(value.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func parseContentType(from response: HTTPURLResponse) -> String? {
+        headerValue("Content-Type", in: response) ?? response.mimeType
+    }
+
+    private func parseTotalLengthFromContentRange(_ header: String?) -> Int64? {
+        guard let header else {
+            return nil
+        }
+        guard let slashIndex = header.lastIndex(of: "/") else {
+            return nil
+        }
+        let lengthPart = header[header.index(after: slashIndex)...].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard lengthPart != "*" else {
+            return nil
+        }
+        return Int64(lengthPart)
+    }
+
+    private func reasonPhrase(for statusCode: Int) -> String {
+        switch statusCode {
+        case 200:
+            return "OK"
+        case 206:
+            return "Partial Content"
+        case 400:
+            return "Bad Request"
+        case 404:
+            return "Not Found"
+        case 416:
+            return "Range Not Satisfiable"
+        case 502:
+            return "Bad Gateway"
+        default:
+            return "Internal Server Error"
+        }
+    }
+
+    private func headerValue(_ name: String, in response: HTTPURLResponse) -> String? {
+        for (headerName, headerValue) in response.allHeaderFields {
+            guard let key = headerName as? String else {
+                continue
+            }
+            if key.caseInsensitiveCompare(name) == .orderedSame {
+                return String(describing: headerValue)
+            }
+        }
+        return nil
     }
 }
 

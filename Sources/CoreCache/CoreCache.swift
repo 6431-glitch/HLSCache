@@ -147,6 +147,12 @@ public final class CoreCache: @unchecked Sendable {
         }
     }
 
+    public func record(resource: ResourceID) throws -> ResourceRecord? {
+        try queue.sync {
+            try manifestStore.load(resourceID: resource)
+        }
+    }
+
     public func metrics() throws -> CoreCacheMetrics {
         let planSnapshot: PlanMetricsAccumulator = {
             metricsLock.lock()
