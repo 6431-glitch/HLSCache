@@ -15,6 +15,17 @@ import Testing
     #expect(rawRoute.remoteURL.absoluteString == "https://cdn.example.com/movie.mp4")
 }
 
+@Test func proxyRoute_from_prefixedPath_parsesTrailingRouteComponents() throws {
+    let prefixedURL = try #require(
+        URL(string: "http://127.0.0.1:8080/proxy/v1/MD0534/seg/https%3A%2F%2Fcdn.example.com%2Fv.ts%3Ftoken%3Dabc")
+    )
+
+    let route = try ProxyRoute.from(url: prefixedURL)
+    #expect(route.alias == "MD0534")
+    #expect(route.kind == .segment)
+    #expect(route.remoteURL.absoluteString == "https://cdn.example.com/v.ts?token=abc")
+}
+
 @Test func proxyRoute_from_invalidPath_throws() throws {
     let invalidURL = try #require(URL(string: "http://127.0.0.1:8080/MD0534/seg"))
 

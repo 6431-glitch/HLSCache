@@ -36,19 +36,27 @@ public struct ProxyRoute: Equatable, Sendable {
         return decoded
     }
 
+    // Route-prefix policy:
+    // The parser accepts optional leading deployment prefixes and interprets
+    // the trailing 3 components as `<alias>/<kind>/<encoded-remote-url>`.
     static func parse(pathComponents: [Substring], originalPath: String) throws -> ProxyRoute {
-        guard pathComponents.count == 3 else {
+        guard pathComponents.count >= 3 else {
             throw ProxyRouteError.invalidRoutePath(originalPath)
         }
 
-        let alias = try decodePathComponent(String(pathComponents[0]))
-        guard let kind = ProxyResourceKind(rawValue: String(pathComponents[1])) else {
-            throw ProxyRouteError.unsupportedRouteKind(String(pathComponents[1]))
+        let routeTail = pathComponents.suffix(3)
+        let aliasComponent = String(routeTail[routeTail.startIndex])
+        let kindComponent = String(routeTail[routeTail.index(routeTail.startIndex, offsetBy: 1)])
+        let remoteComponent = String(routeTail[routeTail.index(routeTail.startIndex, offsetBy: 2)])
+
+        let alias = try decodePathComponent(aliasComponent)
+        guard let kind = ProxyResourceKind(rawValue: kindComponent) else {
+            throw ProxyRouteError.unsupportedRouteKind(kindComponent)
         }
 
-        let decodedURL = try decodePathComponent(String(pathComponents[2]))
+        let decodedURL = try decodePathComponent(remoteComponent)
         guard let remoteURL = URL(string: decodedURL), remoteURL.scheme != nil else {
-            throw ProxyRouteError.invalidEncodedURL(String(pathComponents[2]))
+            throw ProxyRouteError.invalidEncodedURL(remoteComponent)
         }
 
         return ProxyRoute(alias: alias, kind: kind, remoteURL: remoteURL)
