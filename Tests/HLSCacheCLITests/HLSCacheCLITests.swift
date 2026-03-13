@@ -1301,6 +1301,100 @@ private func loadRepositoryREADME() throws -> String {
     }
 }
 
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+@Test func cliDownloader_legacyWrapper_delegatesToAsyncCore() async throws {
+    final class WrapperState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var sawPlan = false
+        private var sawProgress = false
+
+        func markPlan() {
+            lock.lock()
+            sawPlan = true
+            lock.unlock()
+        }
+
+        func markProgress() {
+            lock.lock()
+            sawProgress = true
+            lock.unlock()
+        }
+
+        func snapshot() -> (sawPlan: Bool, sawProgress: Bool) {
+            lock.lock()
+            defer { lock.unlock() }
+            return (sawPlan, sawProgress)
+        }
+    }
+
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    _ = try context.facade.register(
+        alias: "MDLEGACY",
+        assetID: "asset-download-legacy",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/legacy/root.m3u8"))
+    )
+
+    let playlistBody = Data(
+        """
+        #EXTM3U
+        #EXT-X-VERSION:3
+        #EXT-X-TARGETDURATION:8
+        #EXTINF:8.0,
+        seg-1.ts
+        #EXT-X-ENDLIST
+        """.utf8
+    )
+
+    let downloader = CLIHLSDownloader(
+        baseDirectory: context.baseDirectory,
+        facade: context.facade,
+        fetcher: { request in
+            let url = try #require(request.url)
+            if url.absoluteString.hasSuffix("root.m3u8") {
+                let response = try #require(
+                    HTTPURLResponse(
+                        url: url,
+                        statusCode: 200,
+                        httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "application/vnd.apple.mpegurl"]
+                    )
+                )
+                return (playlistBody, response)
+            }
+
+            let response = try #require(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "video/mp2t"]
+                )
+            )
+            return (Data(repeating: 0x11, count: 188), response)
+        }
+    )
+
+    let state = WrapperState()
+    let result = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CLIDownloadResult, Error>) in
+        _ = downloader.downloadLegacy(
+            alias: "MDLEGACY",
+            planHandler: { _ in state.markPlan() },
+            progressHandler: { _ in state.markProgress() },
+            completion: { completion in
+                continuation.resume(with: completion)
+            }
+        )
+    }
+
+    let snapshot = state.snapshot()
+    #expect(snapshot.sawPlan)
+    #expect(snapshot.sawProgress)
+    #expect(result.segmentCount == 1)
+}
+
 @Test func cliInteractive_quickstartFlow_coversCoreCommandsAndNavigation() throws {
     let directory = try makeCLITempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }

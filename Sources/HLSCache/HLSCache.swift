@@ -432,6 +432,30 @@ public final class HLSCacheFacade: @unchecked Sendable {
         }
     }
 
+    @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+    @available(
+        *,
+        deprecated,
+        message: "Use clearCacheProgressEvents(alias:) and consume ProgressEvent as AsyncSequence."
+    )
+    @discardableResult
+    public func clearCacheLegacy(
+        alias: Alias? = nil,
+        progressHandler: @escaping @Sendable (ProgressEvent) -> Void,
+        completion: @escaping @Sendable (Result<Void, Error>) -> Void
+    ) -> Task<Void, Never> {
+        Task {
+            do {
+                for try await event in clearCacheProgressEvents(alias: alias) {
+                    progressHandler(event)
+                }
+                completion(.success(()))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+    }
+
     @discardableResult
     public func removeAlias(alias: Alias) throws -> AssetRecord {
         let correlationID = UUID().uuidString
@@ -930,6 +954,25 @@ public func clearCache(alias: Alias? = nil) throws {
 @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
 public func clearCacheProgressEvents(alias: Alias? = nil) -> AsyncThrowingStream<ProgressEvent, Error> {
     sharedFacade.clearCacheProgressEvents(alias: alias)
+}
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+@available(
+    *,
+    deprecated,
+    message: "Use clearCacheProgressEvents(alias:) and consume ProgressEvent as AsyncSequence."
+)
+@discardableResult
+public func clearCacheLegacy(
+    alias: Alias? = nil,
+    progressHandler: @escaping @Sendable (ProgressEvent) -> Void,
+    completion: @escaping @Sendable (Result<Void, Error>) -> Void
+) -> Task<Void, Never> {
+    sharedFacade.clearCacheLegacy(
+        alias: alias,
+        progressHandler: progressHandler,
+        completion: completion
+    )
 }
 
 @discardableResult
