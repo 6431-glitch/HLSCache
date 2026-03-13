@@ -47,7 +47,8 @@ struct CLIExportProgress: Equatable {
     let detail: String?
 }
 
-struct CLIExporter {
+// Uses synchronized facade/cache interactions and immutable configuration.
+struct CLIExporter: @unchecked Sendable {
     typealias ExportRunner = (_ playlistURL: URL, _ outputURL: URL, _ videoCodec: ExportVideoCodec) throws -> Void
     typealias EncoderAvailabilityChecker = (_ encoderName: String) throws -> Void
     typealias ProgressHandler = (_ progress: CLIExportProgress) -> Void
@@ -230,6 +231,94 @@ struct CLIExporter {
         let attributes = try fileManager.attributesOfItem(atPath: outputURL.path)
         let bytes = (attributes[.size] as? NSNumber)?.int64Value ?? 0
         return CLIExportResult(outputURL: outputURL, outputBytes: bytes)
+    }
+
+    @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+    func exportProgressEvents(
+        alias: String,
+        outputURL: URL,
+        videoCodec: ExportVideoCodec = .copy
+    ) -> AsyncThrowingStream<ProgressEvent, Error> {
+        AsyncThrowingStream { continuation in
+            final class ExportEventState: @unchecked Sendable {
+                private let lock = NSLock()
+                private var processedUnits = 0
+                private var totalUnits = 0
+
+                func update(processedUnits: Int, totalUnits: Int) {
+                    lock.lock()
+                    self.processedUnits = processedUnits
+                    self.totalUnits = totalUnits
+                    lock.unlock()
+                }
+
+                func snapshot() -> (processedUnits: Int, totalUnits: Int) {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    return (processedUnits, totalUnits)
+                }
+            }
+
+            let state = ExportEventState()
+            continuation.yield(
+                ProgressEvent(
+                    operation: .export,
+                    state: .started,
+                    detail: "Starting export for alias \(alias)"
+                )
+            )
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let result = try export(
+                        alias: alias,
+                        outputURL: outputURL,
+                        videoCodec: videoCodec,
+                        progressHandler: { progress in
+                            state.update(processedUnits: progress.processedUnits, totalUnits: progress.totalUnits)
+                            let mappedState: ProgressEvent.State = progress.phase == .completed ? .completed : .running
+                            continuation.yield(
+                                ProgressEvent(
+                                    operation: .export,
+                                    state: mappedState,
+                                    processedUnits: progress.processedUnits,
+                                    totalUnits: progress.totalUnits,
+                                    bytesWritten: nil,
+                                    detail: progress.detail
+                                )
+                            )
+                        }
+                    )
+
+                    let snapshot = state.snapshot()
+                    if snapshot.processedUnits < snapshot.totalUnits {
+                        continuation.yield(
+                            ProgressEvent(
+                                operation: .export,
+                                state: .completed,
+                                processedUnits: snapshot.totalUnits,
+                                totalUnits: snapshot.totalUnits,
+                                bytesWritten: result.outputBytes,
+                                detail: "Export output generated"
+                            )
+                        )
+                    }
+                    continuation.finish()
+                } catch {
+                    let snapshot = state.snapshot()
+                    continuation.yield(
+                        ProgressEvent(
+                            operation: .export,
+                            state: .failed,
+                            processedUnits: snapshot.processedUnits,
+                            totalUnits: snapshot.totalUnits,
+                            detail: error.localizedDescription
+                        )
+                    )
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
     }
 
     private func selectPlayablePlaylist(

@@ -384,6 +384,54 @@ public final class HLSCacheFacade: @unchecked Sendable {
         }
     }
 
+    @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+    public func clearCacheProgressEvents(alias: Alias? = nil) -> AsyncThrowingStream<ProgressEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let aliasDetail = alias ?? "all"
+            continuation.yield(
+                ProgressEvent(
+                    operation: .clear,
+                    state: .started,
+                    detail: "Starting clear operation for \(aliasDetail)"
+                )
+            )
+
+            Task {
+                do {
+                    try clearCache(alias: alias)
+                    continuation.yield(
+                        ProgressEvent(
+                            operation: .clear,
+                            state: .completed,
+                            processedUnits: 1,
+                            totalUnits: 1,
+                            detail: "Clear operation completed for \(aliasDetail)"
+                        )
+                    )
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.yield(
+                        ProgressEvent(
+                            operation: .clear,
+                            state: .cancelled,
+                            detail: "Clear operation cancelled for \(aliasDetail)"
+                        )
+                    )
+                    continuation.finish(throwing: CancellationError())
+                } catch {
+                    continuation.yield(
+                        ProgressEvent(
+                            operation: .clear,
+                            state: .failed,
+                            detail: error.localizedDescription
+                        )
+                    )
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+
     @discardableResult
     public func removeAlias(alias: Alias) throws -> AssetRecord {
         let correlationID = UUID().uuidString
@@ -877,6 +925,11 @@ public func listAliases() -> [AssetRecord] {
 
 public func clearCache(alias: Alias? = nil) throws {
     try sharedFacade.clearCache(alias: alias)
+}
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+public func clearCacheProgressEvents(alias: Alias? = nil) -> AsyncThrowingStream<ProgressEvent, Error> {
+    sharedFacade.clearCacheProgressEvents(alias: alias)
 }
 
 @discardableResult

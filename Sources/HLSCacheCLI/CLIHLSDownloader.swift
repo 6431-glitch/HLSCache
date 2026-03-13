@@ -210,6 +210,107 @@ struct CLIHLSDownloader: @unchecked Sendable {
         )
     }
 
+    @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+    func downloadProgressEvents(alias: String) -> AsyncThrowingStream<ProgressEvent, Error> {
+        AsyncThrowingStream { continuation in
+            final class DownloadEventState: @unchecked Sendable {
+                private let lock = NSLock()
+                private var totalUnits = 0
+
+                func setTotalUnits(_ totalUnits: Int) {
+                    lock.lock()
+                    self.totalUnits = totalUnits
+                    lock.unlock()
+                }
+
+                func snapshotTotalUnits() -> Int {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    return totalUnits
+                }
+            }
+
+            let state = DownloadEventState()
+            continuation.yield(
+                ProgressEvent(
+                    operation: .download,
+                    state: .started,
+                    detail: "Starting download for alias \(alias)"
+                )
+            )
+
+            Task {
+                do {
+                    let result = try await download(
+                        alias: alias,
+                        planHandler: { plan in
+                            state.setTotalUnits(plan.totalUnits)
+                            continuation.yield(
+                                ProgressEvent(
+                                    operation: .download,
+                                    state: .running,
+                                    processedUnits: 0,
+                                    totalUnits: plan.totalUnits,
+                                    detail: "Planned \(plan.totalUnits) resources"
+                                )
+                            )
+                        },
+                        progressHandler: { progress in
+                            continuation.yield(
+                                ProgressEvent(
+                                    operation: .download,
+                                    state: .running,
+                                    processedUnits: progress.processedUnits,
+                                    totalUnits: progress.totalUnits,
+                                    bytesWritten: progress.bytesWritten,
+                                    detail: "\(progress.currentKind.rawValue) \(progress.currentURL.lastPathComponent)"
+                                )
+                            )
+                        }
+                    )
+
+                    let discoveredTotalUnits = state.snapshotTotalUnits()
+                    let totalUnits = discoveredTotalUnits > 0 ? discoveredTotalUnits : (result.playlistCount + result.segmentCount + result.keyCount)
+                    continuation.yield(
+                        ProgressEvent(
+                            operation: .download,
+                            state: .completed,
+                            processedUnits: totalUnits,
+                            totalUnits: totalUnits,
+                            bytesWritten: result.bytesWritten,
+                            detail: "Download completed for alias \(alias)"
+                        )
+                    )
+                    continuation.finish()
+                } catch is CancellationError {
+                    let discoveredTotalUnits = state.snapshotTotalUnits()
+                    continuation.yield(
+                        ProgressEvent(
+                            operation: .download,
+                            state: .cancelled,
+                            processedUnits: 0,
+                            totalUnits: discoveredTotalUnits,
+                            detail: "Download cancelled for alias \(alias)"
+                        )
+                    )
+                    continuation.finish(throwing: CancellationError())
+                } catch {
+                    let discoveredTotalUnits = state.snapshotTotalUnits()
+                    continuation.yield(
+                        ProgressEvent(
+                            operation: .download,
+                            state: .failed,
+                            processedUnits: 0,
+                            totalUnits: discoveredTotalUnits,
+                            detail: error.localizedDescription
+                        )
+                    )
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+
     private func buildDiscoveryPlan(rootURL: URL, headers: [String: String]?) async throws -> DiscoveryPlan {
         var pendingPlaylists: [URL] = [rootURL]
         var visitedPlaylists: Set<String> = []

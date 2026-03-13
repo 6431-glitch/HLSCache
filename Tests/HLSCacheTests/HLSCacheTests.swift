@@ -280,6 +280,29 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(after.totalBytesOnDisk == 0)
 }
 
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+@Test func facade_clearCacheProgressEvents_emitStartedAndCompleted() async throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-clear-events")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    _ = try facade.register(
+        alias: "MDCLEAR",
+        assetID: "asset-clear-events",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/clear.m3u8"))
+    )
+
+    var events: [ProgressEvent] = []
+    for try await event in facade.clearCacheProgressEvents(alias: "MDCLEAR") {
+        events.append(event)
+    }
+
+    #expect(!events.isEmpty)
+    #expect(events.first?.state == .started)
+    #expect(events.last?.state == .completed)
+    #expect(events.last?.operation == .clear)
+}
+
 @Test func facade_removeAliasAndRemoveAllAliases_updateRegistryState() throws {
     let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-remove-alias")
     defer { try? FileManager.default.removeItem(at: directory) }

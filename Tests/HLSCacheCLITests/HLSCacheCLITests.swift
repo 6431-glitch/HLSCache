@@ -1195,6 +1195,112 @@ private func loadRepositoryREADME() throws -> String {
     }
 }
 
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+@Test func cliDownloader_progressEvents_emitStartedRunningCompletedInOrder() async throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    _ = try context.facade.register(
+        alias: "MDEVENTS",
+        assetID: "asset-download-events",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/events/root.m3u8"))
+    )
+
+    let playlistBody = Data(
+        """
+        #EXTM3U
+        #EXT-X-VERSION:3
+        #EXT-X-TARGETDURATION:8
+        #EXTINF:8.0,
+        seg-1.ts
+        #EXT-X-ENDLIST
+        """.utf8
+    )
+
+    let downloader = CLIHLSDownloader(
+        baseDirectory: context.baseDirectory,
+        facade: context.facade,
+        fetcher: { request in
+            let url = try #require(request.url)
+            if url.absoluteString.hasSuffix("root.m3u8") {
+                let response = try #require(
+                    HTTPURLResponse(
+                        url: url,
+                        statusCode: 200,
+                        httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "application/vnd.apple.mpegurl"]
+                    )
+                )
+                return (playlistBody, response)
+            }
+
+            let response = try #require(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "video/mp2t"]
+                )
+            )
+            return (Data(repeating: 0x11, count: 188), response)
+        }
+    )
+
+    var events: [ProgressEvent] = []
+    for try await event in downloader.downloadProgressEvents(alias: "MDEVENTS") {
+        events.append(event)
+    }
+
+    #expect(!events.isEmpty)
+    #expect(events.first?.state == .started)
+    #expect(events.contains { $0.state == .running })
+    #expect(events.last?.state == .completed)
+    #expect(events.last?.operation == .download)
+}
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+@Test func cliDownloader_progressEvents_emitFailedBeforeThrowing() async throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    _ = try context.facade.register(
+        alias: "MDEVENTFAIL",
+        assetID: "asset-download-event-fail",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/events-fail/root.m3u8"))
+    )
+
+    let downloader = CLIHLSDownloader(
+        baseDirectory: context.baseDirectory,
+        facade: context.facade,
+        fetcher: { request in
+            let url = try #require(request.url)
+            let response = try #require(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 500,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: nil
+                )
+            )
+            return (Data(), response)
+        }
+    )
+
+    var events: [ProgressEvent] = []
+    do {
+        for try await event in downloader.downloadProgressEvents(alias: "MDEVENTFAIL") {
+            events.append(event)
+        }
+        #expect(Bool(false))
+    } catch {
+        #expect(events.first?.state == .started)
+        #expect(events.last?.state == .failed)
+        #expect(events.last?.operation == .download)
+    }
+}
+
 @Test func cliInteractive_quickstartFlow_coversCoreCommandsAndNavigation() throws {
     let directory = try makeCLITempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
