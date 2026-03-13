@@ -8,7 +8,7 @@ struct CLIApp {
     private let makeDownloader: (CLIAppContext) -> CLIHLSDownloader
     private let proxyStatusProvider: () -> ProxyServerStatus
     private let stopProxyServer: () -> Void
-    private let startProxyServer: (_ host: String, _ port: Int) -> URL
+    private let startProxyServer: (_ host: String, _ port: Int) throws -> URL
 
     init(
         context: CLIAppContext,
@@ -21,7 +21,7 @@ struct CLIApp {
         },
         proxyStatusProvider: (() -> ProxyServerStatus)? = nil,
         stopProxyServer: (() -> Void)? = nil,
-        startProxyServer: ((_ host: String, _ port: Int) -> URL)? = nil
+        startProxyServer: ((_ host: String, _ port: Int) throws -> URL)? = nil
     ) {
         self.context = context
         self.io = io
@@ -30,7 +30,7 @@ struct CLIApp {
         self.proxyStatusProvider = proxyStatusProvider ?? { context.facade.proxyStatus() }
         self.stopProxyServer = stopProxyServer ?? { context.facade.stopServer() }
         self.startProxyServer = startProxyServer ?? { host, port in
-            context.facade.startServer(host: host, port: port)
+            try context.facade.startServer(host: host, port: port)
         }
     }
 
@@ -318,7 +318,38 @@ struct CLIApp {
 
         let restartHost = before.host ?? context.serverBaseURL.host ?? CLIArguments.defaultHost
         let restartPort = before.port ?? context.serverBaseURL.port ?? CLIArguments.defaultPort
-        let restarted = startProxyServer(restartHost, restartPort)
+        let restarted: URL
+        do {
+            restarted = try startProxyServer(restartHost, restartPort)
+        } catch let error as ProxyServerRuntimeError {
+            switch error {
+            case .listenerBindFailed, .listenerStartupTimedOut:
+                do {
+                    restarted = try startProxyServer(restartHost, 0)
+                } catch {
+                    io.writeLine("Failed to restart proxy server.")
+                    io.writeLine("Attempted host: \(restartHost)")
+                    io.writeLine("Attempted port: \(restartPort)")
+                    io.writeLine("Startup error: \(error.localizedDescription)")
+                    io.writeLine("Action: verify runtime configuration and try again.")
+                    return 1
+                }
+            default:
+                io.writeLine("Failed to restart proxy server.")
+                io.writeLine("Attempted host: \(restartHost)")
+                io.writeLine("Attempted port: \(restartPort)")
+                io.writeLine("Startup error: \(error.localizedDescription)")
+                io.writeLine("Action: verify runtime configuration and try again.")
+                return 1
+            }
+        } catch {
+            io.writeLine("Failed to restart proxy server.")
+            io.writeLine("Attempted host: \(restartHost)")
+            io.writeLine("Attempted port: \(restartPort)")
+            io.writeLine("Startup error: \(error.localizedDescription)")
+            io.writeLine("Action: verify runtime configuration and try again.")
+            return 1
+        }
         let after = proxyStatusProvider()
 
         guard after.isRunning else {

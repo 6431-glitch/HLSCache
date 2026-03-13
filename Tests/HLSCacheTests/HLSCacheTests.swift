@@ -58,11 +58,12 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
         #expect(error == .serverNotRunning)
     }
 
-    let baseURL = facade.startServer(port: 18080)
-    #expect(baseURL.absoluteString == "http://127.0.0.1:18080")
+    let baseURL = try facade.startServer(port: 0)
+    #expect(baseURL.host == "127.0.0.1")
+    #expect((baseURL.port ?? 0) > 0)
 
     let proxy = try facade.proxyURL(for: "MD0534")
-    #expect(proxy.absoluteString == "http://127.0.0.1:18080/MD0534")
+    #expect(proxy == baseURL.appendingPathComponent("MD0534"))
 
     let updated = try facade.updateRemoteURL(
         alias: "MD0534",
@@ -79,34 +80,40 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
 
     let initial = facade.proxyStatus()
     #expect(initial.isRunning == false)
+    #expect(initial.state == .stopped)
     #expect(initial.host == nil)
     #expect(initial.port == nil)
     #expect(initial.baseURL == nil)
 
-    _ = facade.startServer(host: "0.0.0.0", port: 18888)
+    _ = try facade.startServer(host: "127.0.0.1", port: 0)
     let started = facade.proxyStatus()
     #expect(started.isRunning == true)
-    #expect(started.host == "0.0.0.0")
-    #expect(started.port == 18888)
-    #expect(started.baseURL?.absoluteString == "http://0.0.0.0:18888")
+    #expect(started.state == .running)
+    #expect(started.host == "127.0.0.1")
+    #expect((started.port ?? 0) > 0)
+    #expect(started.baseURL?.host == "127.0.0.1")
+    #expect(started.baseURL?.port == started.port)
 
-    _ = facade.startServer(host: "127.0.0.1", port: 19999)
+    _ = try facade.startServer(host: "127.0.0.1", port: 19999)
     let restartedWithoutStop = facade.proxyStatus()
     #expect(restartedWithoutStop == started)
 
     facade.stopServer()
     let stopped = facade.proxyStatus()
     #expect(stopped.isRunning == false)
+    #expect(stopped.state == .stopped)
     #expect(stopped.host == nil)
     #expect(stopped.port == nil)
     #expect(stopped.baseURL == nil)
 
-    _ = facade.startServer(port: 0)
+    _ = try facade.startServer(port: 0)
     let defaultPort = facade.proxyStatus()
     #expect(defaultPort.isRunning == true)
+    #expect(defaultPort.state == .running)
     #expect(defaultPort.host == "127.0.0.1")
-    #expect(defaultPort.port == 8080)
-    #expect(defaultPort.baseURL?.absoluteString == "http://127.0.0.1:8080")
+    #expect((defaultPort.port ?? 0) > 0)
+    #expect(defaultPort.baseURL?.host == "127.0.0.1")
+    #expect(defaultPort.baseURL?.port == defaultPort.port)
 }
 
 @Test func facade_updateRemoteURL_preservesAliasProxyAndExistingCacheData() throws {
@@ -121,7 +128,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
         remoteURL: initialRemoteURL
     )
 
-    _ = facade.startServer(port: 18484)
+    _ = try facade.startServer(port: 0)
     let proxyBefore = try facade.proxyURL(for: "MDROT")
 
     let coreCache = CoreCache(baseDirectory: directory)
@@ -166,7 +173,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
         assetID: "asset-0534",
         remoteURL: try #require(URL(string: "https://cdn.example.com/master.m3u8"))
     )
-    _ = facade.startServer(port: 18181)
+    _ = try facade.startServer(port: 0)
 
     let remoteURL = try #require(URL(string: "https://cdn.example.com/video/seg.ts?token=a/b==&part=1"))
     let proxyURL = try facade.proxyURL(for: "MD0534", kind: .segment, remoteURL: remoteURL)
@@ -183,9 +190,10 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     defer { try? FileManager.default.removeItem(at: directory) }
 
     let facade = HLSCacheFacade(baseDirectory: directory)
-    _ = facade.startServer(port: 18282)
-
-    let requestURL = try #require(URL(string: "http://127.0.0.1:18282/MISSING/seg/https%3A%2F%2Fcdn.example.com%2Fv.ts"))
+    let baseURL = try facade.startServer(port: 0)
+    let requestURL = try #require(
+        URL(string: "\(baseURL.absoluteString)/MISSING/seg/https%3A%2F%2Fcdn.example.com%2Fv.ts")
+    )
 
     do {
         _ = try facade.decodeProxyRequestURL(requestURL)
@@ -202,7 +210,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     let logger = RecordingStructuredLogger()
     let facade = HLSCacheFacade(baseDirectory: directory, logger: logger)
 
-    _ = facade.startServer(port: 18383)
+    _ = try facade.startServer(port: 0)
     _ = try facade.register(
         alias: "MDLOG",
         assetID: "asset-log",
@@ -280,7 +288,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     defer { try? FileManager.default.removeItem(at: directory) }
 
     let facade = HLSCacheFacade(baseDirectory: directory)
-    _ = facade.startServer(port: 19090)
+    _ = try facade.startServer(port: 0)
 
     let applied = facade.setPlugins([
         TestPlugin(id: "noop", version: "1.0.0"),
@@ -313,4 +321,57 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
 
     let applied = facade.setPlugins([plugin])
     #expect(applied == [PluginStamp(id: "noop", version: "1.0.0")])
+}
+
+@Test func facade_proxyRuntime_healthEndpoint_reachableWhileRunning_thenUnavailableAfterStop() async throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-runtime-health")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    let baseURL = try facade.startServer(host: "127.0.0.1", port: 0)
+    let healthURL = baseURL.appendingPathComponent("health")
+    let session = URLSession(configuration: .ephemeral)
+
+    let (runningData, runningResponse) = try await session.data(from: healthURL)
+    let runningHTTPResponse = try #require(runningResponse as? HTTPURLResponse)
+    #expect(runningHTTPResponse.statusCode == 200)
+    #expect(String(data: runningData, encoding: .utf8) == "ok\n")
+
+    facade.stopServer()
+
+    do {
+        _ = try await session.data(from: healthURL)
+        #expect(Bool(false))
+    } catch let error as URLError {
+        let expectedCodes: Set<URLError.Code> = [.cannotConnectToHost, .networkConnectionLost]
+        #expect(expectedCodes.contains(error.code))
+    }
+}
+
+@Test func facade_startServer_portCollision_returnsTypedStartupError() throws {
+    let baseDirectory = try makeHLSCacheTempDirectory(prefix: "hlscache-runtime-collision")
+    defer { try? FileManager.default.removeItem(at: baseDirectory) }
+
+    let firstFacade = HLSCacheFacade(baseDirectory: baseDirectory.appendingPathComponent("a"))
+    let secondFacade = HLSCacheFacade(baseDirectory: baseDirectory.appendingPathComponent("b"))
+
+    let firstURL = try firstFacade.startServer(host: "127.0.0.1", port: 0)
+    defer { firstFacade.stopServer() }
+
+    let occupiedPort = try #require(firstURL.port)
+    do {
+        _ = try secondFacade.startServer(host: "127.0.0.1", port: occupiedPort)
+        #expect(Bool(false))
+    } catch let error as ProxyServerRuntimeError {
+        switch error {
+        case let .listenerBindFailed(host, port, reason):
+            #expect(host == "127.0.0.1")
+            #expect(port == occupiedPort)
+            #expect(!reason.isEmpty)
+        case .listenerStartupTimedOut:
+            #expect(Bool(true))
+        default:
+            #expect(Bool(false))
+        }
+    }
 }
