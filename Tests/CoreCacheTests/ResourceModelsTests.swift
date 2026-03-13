@@ -27,6 +27,38 @@ import Testing
     #expect(key1.allSatisfy { $0.isHexDigit && !$0.isUppercase })
 }
 
+@Test func resourceID_makeResourceKey_normalizesDefaultPortPathAndEncodingPolicy() throws {
+    let variantA = try #require(URL(string: "HTTPS://Example.com:443/a/./b/../c/%7eseg.ts?b=2&a=%7E#frag"))
+    let variantB = try #require(URL(string: "https://example.com/a/c/~seg.ts?a=~&b=2"))
+
+    let keyA = ResourceID.makeResourceKey(from: variantA)
+    let keyB = ResourceID.makeResourceKey(from: variantB)
+
+    #expect(keyA == keyB)
+}
+
+@Test func resourceID_makeResourceKey_queryDuplicateOrderPolicy_preservesRepeatedParamOrder() throws {
+    let sameSemanticsA = try #require(URL(string: "https://cdn.example.com/seg.ts?z=9&a=1&a=2"))
+    let sameSemanticsB = try #require(URL(string: "https://cdn.example.com/seg.ts?a=1&a=2&z=9"))
+    let differentSemantics = try #require(URL(string: "https://cdn.example.com/seg.ts?a=2&a=1&z=9"))
+
+    let keyA = ResourceID.makeResourceKey(from: sameSemanticsA)
+    let keyB = ResourceID.makeResourceKey(from: sameSemanticsB)
+    let keyDifferent = ResourceID.makeResourceKey(from: differentSemantics)
+
+    #expect(keyA == keyB)
+    #expect(keyA != keyDifferent)
+}
+
+@Test func resourceID_canonicalURLString_isIdempotent() throws {
+    let raw = try #require(URL(string: "https://EXAMPLE.com:443/root/../media/%7Eclip.ts?b=2&a=1&a=2#section"))
+    let canonical = ResourceID.canonicalURLString(from: raw)
+    let canonicalURL = try #require(URL(string: canonical))
+    let canonicalAgain = ResourceID.canonicalURLString(from: canonicalURL)
+
+    #expect(canonical == canonicalAgain)
+}
+
 @Test func resourceRecord_codableRoundTrip_preservesFieldsAndCompletedRanges() throws {
     let firstRange = try #require(ByteRange(start: 0, endExclusive: 10))
     let secondRange = try #require(ByteRange(start: 20, endExclusive: 30))

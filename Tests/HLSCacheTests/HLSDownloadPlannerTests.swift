@@ -129,3 +129,37 @@ import Testing
     #expect(plan.segmentURLs.count == 1)
     #expect(plan.keyURLs.count == 1)
 }
+
+@Test func hlsDownloadPlanner_deduplicatesCanonicalURLVariants() throws {
+    let rootURL = try #require(URL(string: "https://cdn.example.com/master.m3u8"))
+    let mediaURL = try #require(URL(string: "https://cdn.example.com/v1/media.m3u8"))
+
+    let playlists: [URL: String] = [
+        rootURL: """
+        #EXTM3U
+        #EXT-X-STREAM-INF:BANDWIDTH=1000000
+        v1/media.m3u8
+        """,
+        mediaURL: """
+        #EXTM3U
+        #EXTINF:4.0,
+        https://cdn.example.com:443/content/./seg.ts?b=2&a=1
+        #EXTINF:4.0,
+        https://CDN.example.com/content/seg.ts?a=1&b=2#ignored
+        """
+    ]
+
+    let plan = try HLSDownloadPlanner.plan(
+        rootPlaylistURL: rootURL,
+        alias: "MDCANON",
+        loadPlaylist: { url in
+            try #require(playlists[url])
+        },
+        proxyURLBuilder: { alias, kind, remoteURL in
+            let encoded = ResourceID.makeResourceKey(from: remoteURL)
+            return try #require(URL(string: "http://127.0.0.1:9090/\(alias)/\(kind.rawValue)/\(encoded)"))
+        }
+    )
+
+    #expect(plan.segmentURLs.count == 1)
+}

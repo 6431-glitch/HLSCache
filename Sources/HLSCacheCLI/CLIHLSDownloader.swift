@@ -426,7 +426,7 @@ struct CLIHLSDownloader {
     }
 
     private func canonicalURLKey(for url: URL) -> String {
-        url.absoluteString
+        ResourceID.makeResourceKey(from: url)
     }
 
     private func makeResourceID(url: URL, kind: ResourceKind, cacheKey: CacheKey) -> ResourceID {
