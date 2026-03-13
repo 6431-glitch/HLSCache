@@ -1,6 +1,30 @@
 import Foundation
 import HLSCache
 
+private final class CLIAsyncResultBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var stored: Result<T, Error>?
+
+    func complete(_ result: Result<T, Error>) {
+        lock.lock()
+        stored = result
+        lock.unlock()
+        semaphore.signal()
+    }
+
+    func wait() throws -> T {
+        semaphore.wait()
+        lock.lock()
+        let result = stored
+        lock.unlock()
+        guard let result else {
+            throw CLIDownloadError.responseMissing(URL(fileURLWithPath: "/"))
+        }
+        return try result.get()
+    }
+}
+
 struct CLIApp {
     private let context: CLIAppContext
     private let io: any CLIIO
@@ -653,56 +677,95 @@ struct CLIApp {
     }
 
     private func runDownloadCommand(_ command: DownloadCommand) -> Int32 {
-        let startedAt = Date()
-        var discoveredPlan: CLIDownloadPlan?
-        var lastProgress: CLIDownloadProgress?
-        var lastRenderAt = Date.distantPast
+        final class DownloadCommandState: @unchecked Sendable {
+            private let io: any CLIIO
+            private let startedAt: Date
+            private let lock = NSLock()
+            private var discoveredPlan: CLIDownloadPlan?
+            private var lastProgress: CLIDownloadProgress?
+            private var lastRenderAt = Date.distantPast
 
-        func renderProgress(_ progress: CLIDownloadProgress, force: Bool = false) {
-            let now = Date()
-            guard force || now.timeIntervalSince(lastRenderAt) >= 0.5 else {
-                return
-            }
-            lastRenderAt = now
-
-            let percent = progress.totalUnits > 0
-                ? Int((Double(progress.processedUnits) / Double(progress.totalUnits) * 100).rounded())
-                : 0
-            let elapsed = now.timeIntervalSince(startedAt)
-            let elapsedText = formatDuration(elapsed)
-
-            var etaText = "n/a"
-            let remaining = max(progress.totalUnits - progress.processedUnits, 0)
-            if progress.processedUnits > 0, remaining > 0 {
-                let rate = Double(progress.processedUnits) / max(elapsed, 0.001)
-                let etaSeconds = Double(remaining) / max(rate, 0.001)
-                etaText = formatDuration(etaSeconds)
-            } else if remaining == 0 {
-                etaText = "0s"
+            init(io: any CLIIO, startedAt: Date) {
+                self.io = io
+                self.startedAt = startedAt
             }
 
-            io.writeLine(
-                "Download progress: \(progress.processedUnits)/\(progress.totalUnits) (\(percent)%) | elapsed \(elapsedText) | eta \(etaText) | bytes \(progress.bytesWritten) | \(progress.currentKind.rawValue) \(progress.currentURL.lastPathComponent)"
-            )
+            func recordPlan(_ plan: CLIDownloadPlan) {
+                lock.lock()
+                discoveredPlan = plan
+                lock.unlock()
+                io.writeLine(
+                    "Download plan: playlists \(plan.playlistCount) (media \(plan.mediaPlaylistCount)) | segments \(plan.segmentCount) | keys \(plan.keyCount) | total resources \(plan.totalUnits)"
+                )
+            }
+
+            func recordProgress(_ progress: CLIDownloadProgress, force: Bool = false) {
+                let now = Date()
+                lock.lock()
+                defer { lock.unlock() }
+                lastProgress = progress
+                guard force || now.timeIntervalSince(lastRenderAt) >= 0.5 else {
+                    return
+                }
+                lastRenderAt = now
+
+                let percent = progress.totalUnits > 0
+                    ? Int((Double(progress.processedUnits) / Double(progress.totalUnits) * 100).rounded())
+                    : 0
+                let elapsed = now.timeIntervalSince(startedAt)
+                let elapsedText = Self.formatDuration(elapsed)
+
+                var etaText = "n/a"
+                let remaining = max(progress.totalUnits - progress.processedUnits, 0)
+                if progress.processedUnits > 0, remaining > 0 {
+                    let rate = Double(progress.processedUnits) / max(elapsed, 0.001)
+                    let etaSeconds = Double(remaining) / max(rate, 0.001)
+                    etaText = Self.formatDuration(etaSeconds)
+                } else if remaining == 0 {
+                    etaText = "0s"
+                }
+
+                io.writeLine(
+                    "Download progress: \(progress.processedUnits)/\(progress.totalUnits) (\(percent)%) | elapsed \(elapsedText) | eta \(etaText) | bytes \(progress.bytesWritten) | \(progress.currentKind.rawValue) \(progress.currentURL.lastPathComponent)"
+                )
+            }
+
+            func snapshot() -> (plan: CLIDownloadPlan?, progress: CLIDownloadProgress?) {
+                lock.lock()
+                defer { lock.unlock() }
+                return (discoveredPlan, lastProgress)
+            }
+
+            private static func formatDuration(_ seconds: TimeInterval) -> String {
+                let rounded = max(Int(seconds.rounded()), 0)
+                let hours = rounded / 3600
+                let minutes = (rounded % 3600) / 60
+                let secs = rounded % 60
+
+                if hours > 0 {
+                    return "\(hours)h \(minutes)m \(secs)s"
+                }
+                if minutes > 0 {
+                    return "\(minutes)m \(secs)s"
+                }
+                return "\(secs)s"
+            }
         }
+
+        let startedAt = Date()
+        let state = DownloadCommandState(io: io, startedAt: startedAt)
 
         do {
             let downloader = makeDownloader(context)
-            let result = try downloader.download(
-                alias: command.alias,
-                planHandler: { plan in
-                    discoveredPlan = plan
-                    io.writeLine(
-                        "Download plan: playlists \(plan.playlistCount) (media \(plan.mediaPlaylistCount)) | segments \(plan.segmentCount) | keys \(plan.keyCount) | total resources \(plan.totalUnits)"
-                    )
-                },
-                progressHandler: { progress in
-                    lastProgress = progress
-                    renderProgress(progress)
-                }
-            )
-            if let lastProgress {
-                renderProgress(lastProgress, force: true)
+            let result = try runAsyncOperation {
+                try await downloader.download(
+                    alias: command.alias,
+                    planHandler: { plan in state.recordPlan(plan) },
+                    progressHandler: { progress in state.recordProgress(progress) }
+                )
+            }
+            if let lastProgress = state.snapshot().progress {
+                state.recordProgress(lastProgress, force: true)
             }
             let elapsedText = formatDuration(Date().timeIntervalSince(startedAt))
             io.writeLine("Download completed successfully.")
@@ -715,14 +778,15 @@ struct CLIApp {
             io.writeLine("Bytes written: \(result.bytesWritten)")
             return 0
         } catch {
+            let snapshot = state.snapshot()
             let elapsedText = formatDuration(Date().timeIntervalSince(startedAt))
-            if let lastProgress {
+            if let lastProgress = snapshot.progress {
                 io.writeLine(
                     "Download failed after \(elapsedText) at \(lastProgress.processedUnits)/\(lastProgress.totalUnits) while fetching \(lastProgress.currentKind.rawValue) \(lastProgress.currentURL.absoluteString)."
                 )
             } else {
                 io.writeLine("Download failed after \(elapsedText).")
-                if let discoveredPlan {
+                if let discoveredPlan = snapshot.plan {
                     io.writeLine(
                         "Planned resources before failure: \(discoveredPlan.totalUnits) (segments \(discoveredPlan.segmentCount), keys \(discoveredPlan.keyCount), playlists \(discoveredPlan.playlistCount))."
                     )
@@ -731,6 +795,26 @@ struct CLIApp {
             io.writeLine(error.localizedDescription)
             return 1
         }
+    }
+
+    private func runAsyncOperation<T>(_ operation: @escaping @Sendable () async throws -> T) throws -> T {
+        let box = CLIAsyncResultBox<T>()
+        if #available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *) {
+            Task {
+                do {
+                    box.complete(.success(try await operation()))
+                } catch {
+                    box.complete(.failure(error))
+                }
+            }
+        } else {
+            throw CLIDownloadError.requestFailed(
+                url: URL(fileURLWithPath: "/"),
+                statusCode: nil,
+                reason: "Async runtime unavailable"
+            )
+        }
+        return try box.wait()
     }
 
     private func formatDuration(_ seconds: TimeInterval) -> String {

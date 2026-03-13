@@ -54,10 +54,10 @@ struct CLIDownloadPlan: Equatable {
     let totalUnits: Int
 }
 
-struct CLIHLSDownloader {
-    typealias Fetcher = (_ request: URLRequest) throws -> (Data, URLResponse)
-    typealias PlanHandler = (_ plan: CLIDownloadPlan) -> Void
-    typealias ProgressHandler = (_ progress: CLIDownloadProgress) -> Void
+struct CLIHLSDownloader: @unchecked Sendable {
+    typealias Fetcher = (_ request: URLRequest) async throws -> (Data, URLResponse)
+    typealias PlanHandler = @Sendable (_ plan: CLIDownloadPlan) -> Void
+    typealias ProgressHandler = @Sendable (_ progress: CLIDownloadProgress) -> Void
 
     private struct FetchedResource {
         let data: Data
@@ -100,12 +100,12 @@ struct CLIHLSDownloader {
         alias: String,
         planHandler: PlanHandler? = nil,
         progressHandler: ProgressHandler? = nil
-    ) throws -> CLIDownloadResult {
+    ) async throws -> CLIDownloadResult {
         guard let asset = facade.listAliases().first(where: { $0.alias == alias }) else {
             throw CLIDownloadError.aliasNotFound(alias)
         }
 
-        let plan = try buildDiscoveryPlan(rootURL: asset.currentRemoteURL, headers: asset.headers)
+        let plan = try await buildDiscoveryPlan(rootURL: asset.currentRemoteURL, headers: asset.headers)
 
         let playlistCount = plan.playlistURLsInOrder.count
         let mediaPlaylistCount = plan.mediaPlaylistCount
@@ -126,6 +126,7 @@ struct CLIHLSDownloader {
         var bytesWritten: Int64 = 0
 
         for playlistURL in plan.playlistURLsInOrder {
+            try checkCancellationIfSupported()
             let playlistKey = canonicalURLKey(for: playlistURL)
             guard let fetchedPlaylist = plan.fetchedPlaylists[playlistKey] else {
                 throw CLIDownloadError.responseMissing(playlistURL)
@@ -153,7 +154,8 @@ struct CLIHLSDownloader {
         }
 
         for keyURL in plan.keyURLs {
-            let fetchedKey = try fetchResource(url: keyURL, headers: asset.headers)
+            try checkCancellationIfSupported()
+            let fetchedKey = try await fetchResource(url: keyURL, headers: asset.headers)
             _ = try storeResource(
                 url: keyURL,
                 kind: .key,
@@ -175,7 +177,8 @@ struct CLIHLSDownloader {
         }
 
         for segmentURL in plan.segmentURLs {
-            let fetchedSegment = try fetchResource(url: segmentURL, headers: asset.headers)
+            try checkCancellationIfSupported()
+            let fetchedSegment = try await fetchResource(url: segmentURL, headers: asset.headers)
             _ = try storeResource(
                 url: segmentURL,
                 kind: .segment,
@@ -206,7 +209,7 @@ struct CLIHLSDownloader {
         )
     }
 
-    private func buildDiscoveryPlan(rootURL: URL, headers: [String: String]?) throws -> DiscoveryPlan {
+    private func buildDiscoveryPlan(rootURL: URL, headers: [String: String]?) async throws -> DiscoveryPlan {
         var pendingPlaylists: [URL] = [rootURL]
         var visitedPlaylists: Set<String> = []
         var playlistURLsInOrder: [URL] = []
@@ -219,13 +222,14 @@ struct CLIHLSDownloader {
         var segmentURLKeys: Set<String> = []
 
         while !pendingPlaylists.isEmpty {
+            try checkCancellationIfSupported()
             let playlistURL = pendingPlaylists.removeFirst()
             let playlistKey = canonicalURLKey(for: playlistURL)
             guard visitedPlaylists.insert(playlistKey).inserted else {
                 continue
             }
 
-            let fetchedPlaylist = try fetchResource(url: playlistURL, headers: headers)
+            let fetchedPlaylist = try await fetchResource(url: playlistURL, headers: headers)
             guard let playlistText = String(data: fetchedPlaylist.data, encoding: .utf8) else {
                 throw CLIDownloadError.invalidPlaylistEncoding(playlistURL)
             }
@@ -281,14 +285,14 @@ struct CLIHLSDownloader {
         )
     }
 
-    private func fetchResource(url: URL, headers: [String: String]?) throws -> FetchedResource {
+    private func fetchResource(url: URL, headers: [String: String]?) async throws -> FetchedResource {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         for (name, value) in (headers ?? [:]) {
             request.setValue(value, forHTTPHeaderField: name)
         }
 
-        let (data, response) = try fetcher(request)
+        let (data, response) = try await fetcher(request)
         guard let httpResponse = response as? HTTPURLResponse else {
             guard response.url != nil else {
                 throw CLIDownloadError.responseMissing(url)
@@ -446,27 +450,36 @@ struct CLIHLSDownloader {
         raw.lowercased().contains(".m3u8")
     }
 
-    static func defaultFetcher(request: URLRequest) throws -> (Data, URLResponse) {
-        let semaphore = DispatchSemaphore(value: 0)
-        var outputData: Data?
-        var outputResponse: URLResponse?
-        var outputError: Error?
+    private func checkCancellationIfSupported() throws {
+        if #available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *) {
+            try Task.checkCancellation()
+        }
+    }
 
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
-            outputData = data
-            outputResponse = response
-            outputError = error
-            semaphore.signal()
+    static func defaultFetcher(request: URLRequest) async throws -> (Data, URLResponse) {
+        if #available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *) {
+            return try await withCheckedThrowingContinuation { continuation in
+                let task = URLSession.shared.dataTask(with: request) { data, response, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                        return
+                    }
+                    guard let data, let response else {
+                        continuation.resume(
+                            throwing: CLIDownloadError.responseMissing(request.url ?? URL(fileURLWithPath: "/"))
+                        )
+                        return
+                    }
+                    continuation.resume(returning: (data, response))
+                }
+                task.resume()
+            }
         }
-        task.resume()
-        semaphore.wait()
 
-        if let outputError {
-            throw outputError
-        }
-        guard let outputData, let outputResponse else {
-            throw CLIDownloadError.responseMissing(request.url ?? URL(fileURLWithPath: "/"))
-        }
-        return (outputData, outputResponse)
+        throw CLIDownloadError.requestFailed(
+            url: request.url ?? URL(fileURLWithPath: "/"),
+            statusCode: nil,
+            reason: "Async runtime unavailable"
+        )
     }
 }
