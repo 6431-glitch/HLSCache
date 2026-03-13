@@ -57,7 +57,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
     public init(baseDirectory: URL, logger: any StructuredLogger = NoopStructuredLogger()) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
-        self.aliasRegistry = AliasRegistry(baseDirectory: baseDirectory)
+        self.aliasRegistry = AliasRegistry(baseDirectory: baseDirectory, logger: logger)
         self.logger = logger
     }
 

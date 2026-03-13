@@ -11,6 +11,24 @@ private func makeTempDirectory(prefix: String = "alias-registry-tests") throws -
     return directory
 }
 
+private final class RecordingStructuredLogger: StructuredLogger, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedEvents: [StructuredLogEvent] = []
+
+    func log(_ event: StructuredLogEvent) {
+        lock.lock()
+        storedEvents.append(event)
+        lock.unlock()
+    }
+
+    func events() -> [StructuredLogEvent] {
+        lock.lock()
+        let snapshot = storedEvents
+        lock.unlock()
+        return snapshot
+    }
+}
+
 @Test func aliasRegistry_registerAndResolve_returnsExpectedRecord() throws {
     let directory = try makeTempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -211,6 +229,56 @@ private func makeTempDirectory(prefix: String = "alias-registry-tests") throws -
 
     let reloaded = AliasRegistry(baseDirectory: directory)
     #expect(reloaded.allRecords().isEmpty)
+}
+
+@Test func aliasRegistry_decodeFailure_quarantinesCorruptFileAndEmitsTelemetry() throws {
+    let directory = try makeTempDirectory(prefix: "alias-registry-decode-failure")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let registryFileURL = directory.appendingPathComponent("alias_registry.json")
+    let corruptData = Data("{invalid-json".utf8)
+    try corruptData.write(to: registryFileURL)
+
+    let logger = RecordingStructuredLogger()
+    let registry = AliasRegistry(baseDirectory: directory, logger: logger)
+
+    #expect(registry.allRecords().isEmpty)
+
+    let corruptFileURL = directory.appendingPathComponent("alias_registry.json.corrupt")
+    #expect(FileManager.default.fileExists(atPath: registryFileURL.path))
+    #expect(FileManager.default.fileExists(atPath: corruptFileURL.path))
+    #expect(try Data(contentsOf: corruptFileURL) == corruptData)
+
+    let restoredData = try Data(contentsOf: registryFileURL)
+    let restoredRecords = try JSONDecoder.withISO8601.decode([Alias: AssetRecord].self, from: restoredData)
+    #expect(restoredRecords.isEmpty)
+
+    let event = try #require(
+        logger.events().first {
+            $0.operation == "loadAliasRegistry"
+                && $0.metadata["result"] == "recovered_decode_failure"
+        }
+    )
+    #expect(event.level == .warning)
+    #expect(event.metadata["registryPath"] == registryFileURL.path)
+    #expect(event.metadata["recoveryPath"] == corruptFileURL.path)
+    #expect(event.metadata["recoveryAction"] == "quarantine_and_reset")
+    #expect(!(event.metadata["error"] ?? "").isEmpty)
+}
+
+@Test func aliasRegistry_decodeFailure_recoveryStillAllowsFutureWrites() throws {
+    let directory = try makeTempDirectory(prefix: "alias-registry-decode-failure-writes")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let registryFileURL = directory.appendingPathComponent("alias_registry.json")
+    try Data("not-json".utf8).write(to: registryFileURL)
+
+    let registry = AliasRegistry(baseDirectory: directory)
+    let remoteURL = try #require(URL(string: "https://cdn.example.com/recovered.m3u8"))
+    _ = try registry.register(alias: "MDRECOVER", assetID: "asset-recovered", remoteURL: remoteURL, headers: nil)
+
+    let restored = try #require(registry.resolve(alias: "MDRECOVER"))
+    #expect(restored.cacheKey == CacheKey.fromAssetID("asset-recovered"))
 }
 
 private extension JSONDecoder {
