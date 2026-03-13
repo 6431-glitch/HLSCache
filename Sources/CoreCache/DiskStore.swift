@@ -10,6 +10,7 @@ public enum DiskStoreError: Error, Equatable, Sendable {
     case negativeOffset(Int64)
 }
 
+// File IO and mutable access are synchronized through a dedicated dispatch queue.
 public final class DiskStore: @unchecked Sendable {
     private let fileManager: FileManager
     private let baseDirectory: URL

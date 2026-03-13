@@ -67,6 +67,7 @@ public struct AssetRecord: Codable, Hashable, Sendable {
     }
 }
 
+// Uses an internal concurrent queue to serialize shared dictionary mutations.
 public final class AliasRegistry: @unchecked Sendable {
     private let fileManager: FileManager
     private let baseDirectory: URL

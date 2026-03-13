@@ -36,6 +36,7 @@ public struct ProxyCacheServeResult: Equatable, Sendable {
     }
 }
 
+// Coordinates shared streaming state and network/cache interaction via queue-guarded paths.
 public final class ProxyCacheCoordinator: @unchecked Sendable {
     private let coreCache: CoreCache
     private let transformPipeline: TransformPipeline

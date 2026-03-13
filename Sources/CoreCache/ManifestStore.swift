@@ -10,6 +10,7 @@ public struct StoredManifestRecord: Sendable {
     }
 }
 
+// Manifest reads/writes are queue-synchronized to keep file state coherent.
 public final class ManifestStore: @unchecked Sendable {
     private let fileManager: FileManager
     private let baseDirectory: URL

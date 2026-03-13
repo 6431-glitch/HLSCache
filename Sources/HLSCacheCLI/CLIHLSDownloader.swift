@@ -54,6 +54,7 @@ struct CLIDownloadPlan: Equatable {
     let totalUnits: Int
 }
 
+// Stores non-Sendable facade/cache handles but only accesses them through synchronized APIs.
 struct CLIHLSDownloader: @unchecked Sendable {
     typealias Fetcher = (_ request: URLRequest) async throws -> (Data, URLResponse)
     typealias PlanHandler = @Sendable (_ plan: CLIDownloadPlan) -> Void

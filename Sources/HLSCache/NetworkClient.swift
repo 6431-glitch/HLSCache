@@ -17,7 +17,7 @@ public protocol NetworkClient: Sendable {
 }
 
 @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
-public struct URLSessionNetworkClient: NetworkClient, @unchecked Sendable {
+public struct URLSessionNetworkClient: NetworkClient, Sendable {
     private let session: URLSession
     private let transport: @Sendable (URLSession, URLRequest) async throws -> (Data, URLResponse)
 

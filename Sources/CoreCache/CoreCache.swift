@@ -76,6 +76,7 @@ public struct CoreCacheMetrics: Equatable, Sendable {
     }
 }
 
+// Coordinates mutable cache state via dispatch queues and explicit locks.
 public final class CoreCache: @unchecked Sendable {
     private struct PlanMetricsAccumulator {
         var totalRequests: Int64 = 0

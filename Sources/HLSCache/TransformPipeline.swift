@@ -35,7 +35,7 @@ public struct TransformContext: Sendable, Equatable {
     }
 }
 
-public final class TransformPipeline: @unchecked Sendable {
+public final class TransformPipeline: Sendable {
     private let transformers: [any ByteTransformer]
 
     public init(transformers: [any ByteTransformer]) {
@@ -62,7 +62,7 @@ public final class TransformPipeline: @unchecked Sendable {
     }
 }
 
-public final class TransformPipelineProcessor: @unchecked Sendable {
+public final class TransformPipelineProcessor: Sendable {
     private let streamTransformers: [any ByteStreamTransformer]
     public let pluginStamps: [PluginStamp]
 

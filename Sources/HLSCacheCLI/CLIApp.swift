@@ -1,6 +1,7 @@
 import Foundation
 import HLSCache
 
+// Synchronizes cross-thread async result handoff with lock + semaphore.
 private final class CLIAsyncResultBox<T>: @unchecked Sendable {
     private let lock = NSLock()
     private let semaphore = DispatchSemaphore(value: 0)
@@ -677,6 +678,7 @@ struct CLIApp {
     }
 
     private func runDownloadCommand(_ command: DownloadCommand) -> Int32 {
+        // Guards progress accounting state shared across @Sendable callbacks.
         final class DownloadCommandState: @unchecked Sendable {
             private let io: any CLIIO
             private let startedAt: Date
