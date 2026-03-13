@@ -50,6 +50,7 @@ public final class ManifestStore: @unchecked Sendable {
 
     public func save(resourceID: ResourceID, record: ResourceRecord) throws {
         try queue.sync(flags: .barrier) {
+            try record.validateInvariants()
             let fileURL = manifestFileURL(for: resourceID)
             let temporaryURL = fileURL.appendingPathExtension("tmp")
 

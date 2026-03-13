@@ -78,6 +78,53 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(!record.completedRanges.contains(try br(8, 10)))
 }
 
+@Test func coreCache_write_rejectsCompletedRangeBeyondExpectedLength() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-expected-length-write")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let cache = CoreCache(baseDirectory: directory)
+    let resource = try makeCoreCacheResourceID(suffix: "expected-length-write.ts")
+
+    do {
+        _ = try cache.write(
+            Data(repeating: 0xAB, count: 8),
+            resource: resource,
+            at: 0,
+            expectedLength: 4
+        )
+        #expect(Bool(false))
+    } catch let error as ResourceRecordInvariantError {
+        #expect(error == .completedRangeExceedsExpectedLength(expectedLength: 4, actualEndExclusive: 8))
+    } catch {
+        #expect(Bool(false))
+    }
+
+    #expect(try cache.resourceRecord(for: resource) == nil)
+}
+
+@Test func coreCache_finalizeWrite_rejectsExpectedLengthBelowCompletedRanges() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-expected-length-finalize")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let cache = CoreCache(baseDirectory: directory)
+    let resource = try makeCoreCacheResourceID(suffix: "expected-length-finalize.ts")
+
+    _ = try cache.write(Data(repeating: 0xCD, count: 8), resource: resource, at: 0)
+
+    do {
+        _ = try cache.finalizeWrite(resource: resource, expectedLength: 4)
+        #expect(Bool(false))
+    } catch let error as ResourceRecordInvariantError {
+        #expect(error == .completedRangeExceedsExpectedLength(expectedLength: 4, actualEndExclusive: 8))
+    } catch {
+        #expect(Bool(false))
+    }
+
+    let record = try #require(try cache.resourceRecord(for: resource))
+    #expect(record.expectedLength == nil)
+    #expect(record.completedRanges.contains(try br(0, 8)))
+}
+
 @Test func coreCache_read_returnsRequestedBytesFromDisk() throws {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-read")
     defer { try? FileManager.default.removeItem(at: directory) }

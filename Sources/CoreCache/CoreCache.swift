@@ -240,6 +240,7 @@ public final class CoreCache: @unchecked Sendable {
                 record.pluginsApplied = pluginsApplied
             }
 
+            try record.validateInvariants()
             record.touch()
             try manifestStore.save(resourceID: resource, record: record)
             try enforceDiskQuotaIfNeeded(correlationID: correlationID)
@@ -303,6 +304,7 @@ public final class CoreCache: @unchecked Sendable {
                 record.pluginsApplied = pluginsApplied
             }
 
+            try record.validateInvariants()
             record.touch()
             try manifestStore.save(resourceID: resource, record: record)
             try enforceDiskQuotaIfNeeded(correlationID: correlationID)

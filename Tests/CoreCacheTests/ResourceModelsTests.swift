@@ -61,3 +61,34 @@ import Testing
     #expect(decoded.pluginsApplied == original.pluginsApplied)
     #expect(decoded.lastUpdated == original.lastUpdated)
 }
+
+@Test func resourceRecord_validateInvariants_expectedLengthBoundaryPasses() throws {
+    var ranges = IntervalSet()
+    ranges.insert(try #require(ByteRange(start: 0, endExclusive: 32)))
+
+    let record = ResourceRecord(
+        kind: .segment,
+        expectedLength: 32,
+        completedRanges: ranges
+    )
+
+    try record.validateInvariants()
+}
+
+@Test func resourceRecord_validateInvariants_completedRangeExceedsExpectedLengthFails() throws {
+    var ranges = IntervalSet()
+    ranges.insert(try #require(ByteRange(start: 0, endExclusive: 33)))
+
+    let record = ResourceRecord(
+        kind: .segment,
+        expectedLength: 32,
+        completedRanges: ranges
+    )
+
+    do {
+        try record.validateInvariants()
+        #expect(Bool(false))
+    } catch let error as ResourceRecordInvariantError {
+        #expect(error == .completedRangeExceedsExpectedLength(expectedLength: 32, actualEndExclusive: 33))
+    }
+}

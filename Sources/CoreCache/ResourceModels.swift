@@ -1,5 +1,10 @@
 import Foundation
 
+public enum ResourceRecordInvariantError: Error, Equatable, Sendable {
+    case invalidExpectedLength(Int64)
+    case completedRangeExceedsExpectedLength(expectedLength: Int64, actualEndExclusive: Int64)
+}
+
 public enum ResourceKind: String, Codable, Hashable, Sendable {
     case playlistM3U8
     case segment
@@ -83,5 +88,23 @@ public struct ResourceRecord: Codable, Hashable, Sendable {
 
     public mutating func touch(_ date: Date = Date()) {
         lastUpdated = date
+    }
+
+    public func validateInvariants() throws {
+        guard let expectedLength else {
+            return
+        }
+
+        guard expectedLength >= 0 else {
+            throw ResourceRecordInvariantError.invalidExpectedLength(expectedLength)
+        }
+
+        let actualEndExclusive = completedRanges.normalized.last?.endExclusive ?? 0
+        guard actualEndExclusive <= expectedLength else {
+            throw ResourceRecordInvariantError.completedRangeExceedsExpectedLength(
+                expectedLength: expectedLength,
+                actualEndExclusive: actualEndExclusive
+            )
+        }
     }
 }
