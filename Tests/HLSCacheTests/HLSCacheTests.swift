@@ -405,6 +405,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     let keyRemoteURL = try #require(URL(string: "https://origin.example.com/keys/enc.key"))
     let rawPayload = Data((0..<32).map { UInt8($0) })
     let keyPayload = Data([9, 8, 7, 6, 5, 4, 3, 2])
+    let originRequestCounter = OriginRequestCounter()
 
     let originHeaders = ["X-Origin-Token": "token-123"]
     let sessionConfiguration = URLSessionConfiguration.ephemeral
@@ -414,6 +415,8 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     ProxyRuntimeOriginURLProtocol.setHandler { request in
         #expect(request.value(forHTTPHeaderField: "X-Origin-Token") == originHeaders["X-Origin-Token"])
         let url = try #require(request.url)
+        let method = (request.httpMethod ?? "GET").uppercased()
+        originRequestCounter.record(method: method, url: url)
 
         let payload: Data
         let contentType: String
@@ -436,7 +439,6 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
             return (response, Data())
         }
 
-        let method = (request.httpMethod ?? "GET").uppercased()
         if method == "HEAD" {
             let response = try #require(
                 HTTPURLResponse(
@@ -494,6 +496,27 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(rawHTTPResponse.value(forHTTPHeaderField: "Accept-Ranges") == "bytes")
     #expect(rawHTTPResponse.value(forHTTPHeaderField: "Content-Length") == String(rawPayload.count))
     #expect(rawData == rawPayload)
+    let rawOriginRequestsAfterFirstGET = originRequestCounter.totalRequests(for: rawRemoteURL)
+    #expect(rawOriginRequestsAfterFirstGET >= 1)
+
+    let (secondRawData, secondRawResponse) = try await proxySession.data(from: rawProxyURL)
+    let secondRawHTTPResponse = try #require(secondRawResponse as? HTTPURLResponse)
+    #expect(secondRawHTTPResponse.statusCode == 200)
+    #expect(secondRawHTTPResponse.value(forHTTPHeaderField: "Accept-Ranges") == "bytes")
+    #expect(secondRawHTTPResponse.value(forHTTPHeaderField: "Content-Length") == String(rawPayload.count))
+    #expect(secondRawData == rawPayload)
+
+    var rawHeadRequest = URLRequest(url: rawProxyURL)
+    rawHeadRequest.httpMethod = "HEAD"
+    let (rawHeadData, rawHeadResponse) = try await proxySession.data(for: rawHeadRequest)
+    let rawHeadHTTPResponse = try #require(rawHeadResponse as? HTTPURLResponse)
+    #expect(rawHeadHTTPResponse.statusCode == 200)
+    #expect(rawHeadHTTPResponse.value(forHTTPHeaderField: "Accept-Ranges") == "bytes")
+    #expect(rawHeadHTTPResponse.value(forHTTPHeaderField: "Content-Length") == String(rawPayload.count))
+    #expect(rawHeadData.isEmpty)
+
+    let rawOriginRequestsAfterCacheHitAndHEAD = originRequestCounter.totalRequests(for: rawRemoteURL)
+    #expect(rawOriginRequestsAfterCacheHitAndHEAD == rawOriginRequestsAfterFirstGET)
 
     let keyProxyURL = try facade.proxyURL(for: "MDRUNTIME", kind: .key, remoteURL: keyRemoteURL)
     var keyRequest = URLRequest(url: keyProxyURL)
@@ -556,4 +579,22 @@ private final class ProxyRuntimeOriginURLProtocol: URLProtocol, @unchecked Senda
     }
 
     override func stopLoading() {}
+}
+
+private final class OriginRequestCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [(method: String, url: URL)] = []
+
+    func record(method: String, url: URL) {
+        lock.lock()
+        entries.append((method: method, url: url))
+        lock.unlock()
+    }
+
+    func totalRequests(for url: URL) -> Int {
+        lock.lock()
+        let count = entries.filter { $0.url == url }.count
+        lock.unlock()
+        return count
+    }
 }
