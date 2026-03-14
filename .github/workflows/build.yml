@@ -9,7 +9,6 @@ on:
 
 jobs:
   build:
-
     runs-on: MBP-2
 
     steps:
@@ -18,3 +17,21 @@ jobs:
       run: swift build -v
     - name: Run tests
       run: swift test -v
+
+  strict-concurrency:
+    runs-on: MBP-2
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Strict concurrency build gate
+      run: swift build -v -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+    - name: Strict concurrency tests
+      run: swift test -v -Xswiftc -strict-concurrency=complete
+
+  tsan:
+    runs-on: MBP-2
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Thread sanitizer test gate
+      run: swift test -v --sanitize=thread
