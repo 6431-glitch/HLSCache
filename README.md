@@ -34,6 +34,7 @@ The architecture cleanly separates playback proxying, storage, and background do
 - [Async/Actor Consumer Migration Guide](Documents/ASYNC_ACTOR_MIGRATION_GUIDE.md)
 - [Actor Ownership Map](Documents/ACTOR_OWNERSHIP_MAP.md)
 - [Release Notes 1.0.0](Documents/RELEASE_NOTES_1.0.0.md)
+- [HLS Async Rollout Note](Documents/HLS_ASYNC_ROLLOUT_NOTE.md)
 - [CI Concurrency Quality Gates](Documents/CI_QUALITY_GATES.md)
 
 All tickets in epic `HLS-98` should reference these documents when introducing async APIs, actor isolation, or sendability changes.

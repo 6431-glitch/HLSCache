@@ -15,6 +15,7 @@ Primary migration reference:
 
 - [Async/Actor Consumer Migration Guide](ASYNC_ACTOR_MIGRATION_GUIDE.md)
 - [Actor Ownership Map](ACTOR_OWNERSHIP_MAP.md)
+- [HLS Async Rollout Note](HLS_ASYNC_ROLLOUT_NOTE.md)
 
 ## Deprecation policy
 
