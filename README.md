@@ -32,6 +32,7 @@ The architecture cleanly separates playback proxying, storage, and background do
 - [Swift Concurrency and Public API Policy ADR](Documents/ADR/ADR-0001-swift-concurrency-and-api-policy.md)
 - [Async API Policy (implementation checklist)](Documents/API_POLICY.md)
 - [Async/Actor Consumer Migration Guide](Documents/ASYNC_ACTOR_MIGRATION_GUIDE.md)
+- [Actor Ownership Map](Documents/ACTOR_OWNERSHIP_MAP.md)
 - [Release Notes 1.0.0](Documents/RELEASE_NOTES_1.0.0.md)
 - [CI Concurrency Quality Gates](Documents/CI_QUALITY_GATES.md)
 

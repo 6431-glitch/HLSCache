@@ -86,7 +86,9 @@ final class ProxyServerRuntime: @unchecked Sendable {
             guard let runtime = networkRuntime as? NetworkProxyServerRuntime else {
                 throw ProxyServerRuntimeError.networkStackUnavailable
             }
-            return try runtime.start(host: trimmedHost, port: port, requestHandler: requestHandler)
+            return try runBlockingRuntime {
+                try await runtime.start(host: trimmedHost, port: port, requestHandler: requestHandler)
+            }
         }
 #endif
 
@@ -96,7 +98,11 @@ final class ProxyServerRuntime: @unchecked Sendable {
     func stop() {
 #if canImport(Network)
         if #available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *) {
-            (networkRuntime as? NetworkProxyServerRuntime)?.stop()
+            if let runtime = networkRuntime as? NetworkProxyServerRuntime {
+                _ = try? runBlockingRuntime {
+                    await runtime.stop()
+                }
+            }
         }
 #endif
     }
@@ -104,9 +110,48 @@ final class ProxyServerRuntime: @unchecked Sendable {
 
 #if canImport(Network)
 @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
-// Owns mutable socket/listener lifecycle state guarded by a private queue.
-private final class NetworkProxyServerRuntime: @unchecked Sendable {
-    private let queue = DispatchQueue(label: "HLSCache.ProxyRuntime")
+// Bridges async actor calls to sync APIs that must remain source-compatible.
+private final class RuntimeBlockingResultBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var result: Result<T, Error>?
+
+    func complete(_ result: Result<T, Error>) {
+        lock.lock()
+        self.result = result
+        lock.unlock()
+        semaphore.signal()
+    }
+
+    func wait() throws -> T {
+        semaphore.wait()
+        lock.lock()
+        let captured = result
+        lock.unlock()
+        guard let captured else {
+            fatalError("RuntimeBlockingResultBox completed without a result")
+        }
+        return try captured.get()
+    }
+}
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+private func runBlockingRuntime<T>(_ operation: @escaping @Sendable () async throws -> T) throws -> T {
+    let box = RuntimeBlockingResultBox<T>()
+    Task {
+        do {
+            box.complete(.success(try await operation()))
+        } catch {
+            box.complete(.failure(error))
+        }
+    }
+    return try box.wait()
+}
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+// Owns mutable listener/connection runtime state with actor isolation.
+private actor NetworkProxyServerRuntime {
+    private let ioQueue = DispatchQueue(label: "HLSCache.ProxyRuntime")
     private let startupTimeoutSeconds: TimeInterval = 2
     private var listener: NWListener?
     private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
@@ -118,7 +163,7 @@ private final class NetworkProxyServerRuntime: @unchecked Sendable {
         port: Int,
         requestHandler: (@Sendable (ProxyServerHTTPRequest) async -> ProxyServerHTTPResponse)?
     ) throws -> URL {
-        if let existing = queue.sync(execute: { runningBaseURL }) {
+        if let existing = runningBaseURL {
             return existing
         }
 
@@ -158,12 +203,12 @@ private final class NetworkProxyServerRuntime: @unchecked Sendable {
             }
         }
         listener.newConnectionHandler = { [weak self] connection in
-            self?.queue.async { [weak self] in
-                self?.handle(connection)
+            Task { [weak self] in
+                await self?.handle(connection)
             }
         }
 
-        listener.start(queue: queue)
+        listener.start(queue: ioQueue)
 
         let didStart = readySignal.wait(timeout: .now() + startupTimeoutSeconds) == .success
         if !didStart {
@@ -189,23 +234,19 @@ private final class NetworkProxyServerRuntime: @unchecked Sendable {
             )
         }
 
-        queue.sync {
-            self.listener = listener
-            self.runningBaseURL = startedURL
-            self.requestHandler = requestHandler
-        }
+        self.listener = listener
+        self.runningBaseURL = startedURL
+        self.requestHandler = requestHandler
         return startedURL
     }
 
     func stop() {
-        queue.sync {
-            activeConnections.values.forEach { $0.cancel() }
-            activeConnections.removeAll()
-            listener?.cancel()
-            listener = nil
-            runningBaseURL = nil
-            requestHandler = nil
-        }
+        activeConnections.values.forEach { $0.cancel() }
+        activeConnections.removeAll()
+        listener?.cancel()
+        listener = nil
+        runningBaseURL = nil
+        requestHandler = nil
     }
 
     private func makeNWPort(from rawPort: Int) throws -> NWEndpoint.Port {
@@ -225,15 +266,15 @@ private final class NetworkProxyServerRuntime: @unchecked Sendable {
             }
             switch state {
             case .failed, .cancelled:
-                self.queue.async {
-                    self.activeConnections.removeValue(forKey: identifier)
+                Task {
+                    await self.removeConnection(identifier)
                 }
             default:
                 break
             }
         }
 
-        connection.start(queue: queue)
+        connection.start(queue: ioQueue)
         receiveAndRespond(connection, identifier: identifier, accumulated: Data())
     }
 
@@ -247,41 +288,53 @@ private final class NetworkProxyServerRuntime: @unchecked Sendable {
                 connection.cancel()
                 return
             }
-
-            var buffer = accumulated
-            if let data, !data.isEmpty {
-                buffer.append(data)
-            }
-
-            guard !buffer.isEmpty else {
-                connection.cancel()
-                self.queue.async {
-                    self.activeConnections.removeValue(forKey: identifier)
-                }
-                return
-            }
-
-            guard self.requestHeadersComplete(in: buffer) else {
-                self.receiveAndRespond(connection, identifier: identifier, accumulated: buffer)
-                return
-            }
-
-            Task { [weak self] in
-                guard let self else {
-                    connection.cancel()
-                    return
-                }
-                let responseData = await self.httpResponse(for: buffer)
-                self.queue.async {
-                    connection.send(content: responseData, completion: .contentProcessed { _ in
-                        connection.cancel()
-                        self.queue.async {
-                            self.activeConnections.removeValue(forKey: identifier)
-                        }
-                    })
-                }
+            Task {
+                await self.processReceive(
+                    data: data,
+                    connection: connection,
+                    identifier: identifier,
+                    accumulated: accumulated
+                )
             }
         }
+    }
+
+    private func processReceive(
+        data: Data?,
+        connection: NWConnection,
+        identifier: ObjectIdentifier,
+        accumulated: Data
+    ) async {
+        var buffer = accumulated
+        if let data, !data.isEmpty {
+            buffer.append(data)
+        }
+
+        guard !buffer.isEmpty else {
+            connection.cancel()
+            activeConnections.removeValue(forKey: identifier)
+            return
+        }
+
+        guard requestHeadersComplete(in: buffer) else {
+            receiveAndRespond(connection, identifier: identifier, accumulated: buffer)
+            return
+        }
+
+        let responseData = await httpResponse(for: buffer)
+        let runtime = self
+        ioQueue.async {
+            connection.send(content: responseData, completion: .contentProcessed { _ in
+                connection.cancel()
+                Task {
+                    await runtime.removeConnection(identifier)
+                }
+            })
+        }
+    }
+
+    private func removeConnection(_ identifier: ObjectIdentifier) {
+        activeConnections.removeValue(forKey: identifier)
     }
 
     private func requestHeadersComplete(in data: Data) -> Bool {
