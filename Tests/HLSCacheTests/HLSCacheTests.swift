@@ -437,6 +437,39 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     }
 }
 
+@Test func facade_proxyRuntime_healthEndpoint_handlesConcurrentRequestBurst() async throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-runtime-health-burst")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    let baseURL = try facade.startServer(host: "127.0.0.1", port: 0)
+    defer { facade.stopServer() }
+
+    let healthURL = baseURL.appendingPathComponent("health")
+    let session = URLSession(configuration: .ephemeral)
+    let requestCount = 32
+
+    let statusCodes = try await withThrowingTaskGroup(of: Int.self, returning: [Int].self) { group in
+        for _ in 0..<requestCount {
+            group.addTask {
+                let (data, response) = try await session.data(from: healthURL)
+                let http = try #require(response as? HTTPURLResponse)
+                #expect(String(data: data, encoding: .utf8) == "ok\n")
+                return http.statusCode
+            }
+        }
+
+        var codes: [Int] = []
+        for try await code in group {
+            codes.append(code)
+        }
+        return codes
+    }
+
+    #expect(statusCodes.count == requestCount)
+    #expect(statusCodes.allSatisfy { $0 == 200 })
+}
+
 @Test func facade_startServer_portCollision_returnsTypedStartupError() throws {
     let baseDirectory = try makeHLSCacheTempDirectory(prefix: "hlscache-runtime-collision")
     defer { try? FileManager.default.removeItem(at: baseDirectory) }
