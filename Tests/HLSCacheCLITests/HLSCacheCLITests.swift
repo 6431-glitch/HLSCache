@@ -992,6 +992,7 @@ private func loadRepositoryREADME() throws -> String {
 
     #expect(exitCode == 0)
     #expect(io.outputLines.contains { $0.contains("Export progress:") })
+    #expect(io.outputLines.contains { $0.contains("phase encoding") })
     #expect(io.outputLines.contains { $0.contains("Export completed successfully.") })
     #expect(io.outputLines.contains { $0.contains("Export completed in ") })
     #expect(io.outputLines.contains { $0.contains("Alias: MDEXPCLI") })

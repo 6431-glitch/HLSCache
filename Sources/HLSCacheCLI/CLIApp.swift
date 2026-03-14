@@ -577,17 +577,28 @@ struct CLIApp {
         let startedAt = Date()
         var lastProgress: CLIExportProgress?
         var lastRenderAt = Date.distantPast
+        var lastRenderedProgress: CLIExportProgress?
 
         func renderProgress(_ progress: CLIExportProgress, force: Bool = false) {
             let now = Date()
-            guard force || now.timeIntervalSince(lastRenderAt) >= 0.5 else {
+            let phaseChanged = lastRenderedProgress?.phase != progress.phase
+            let shouldRender = force || phaseChanged || now.timeIntervalSince(lastRenderAt) >= 0.5
+            guard shouldRender else {
+                return
+            }
+            if force, let lastRenderedProgress, lastRenderedProgress == progress {
                 return
             }
             lastRenderAt = now
+            lastRenderedProgress = progress
 
-            let percent = progress.totalUnits > 0
-                ? Int((Double(progress.processedUnits) / Double(progress.totalUnits) * 100).rounded())
-                : 0
+            let percent: Int = {
+                guard progress.totalUnits > 0 else { return 0 }
+                if progress.processedUnits >= progress.totalUnits {
+                    return 100
+                }
+                return Int((Double(progress.processedUnits) / Double(progress.totalUnits) * 100).rounded(.down))
+            }()
             let elapsed = now.timeIntervalSince(startedAt)
             let elapsedText = formatDuration(elapsed)
 
@@ -596,7 +607,7 @@ struct CLIApp {
             if progress.processedUnits > 0, remaining > 0 {
                 let rate = Double(progress.processedUnits) / max(elapsed, 0.001)
                 let etaSeconds = Double(remaining) / max(rate, 0.001)
-                etaText = formatDuration(etaSeconds)
+                etaText = etaSeconds < 1 ? "<1s" : formatDuration(etaSeconds)
             } else if remaining == 0 {
                 etaText = "0s"
             }
@@ -665,9 +676,13 @@ struct CLIApp {
             }
             lastRenderAt = now
 
-            let percent = progress.totalUnits > 0
-                ? Int((Double(progress.processedUnits) / Double(progress.totalUnits) * 100).rounded())
-                : 0
+            let percent: Int = {
+                guard progress.totalUnits > 0 else { return 0 }
+                if progress.processedUnits >= progress.totalUnits {
+                    return 100
+                }
+                return Int((Double(progress.processedUnits) / Double(progress.totalUnits) * 100).rounded(.down))
+            }()
             let elapsed = now.timeIntervalSince(startedAt)
             let elapsedText = formatDuration(elapsed)
 
@@ -676,7 +691,7 @@ struct CLIApp {
             if progress.processedUnits > 0, remaining > 0 {
                 let rate = Double(progress.processedUnits) / max(elapsed, 0.001)
                 let etaSeconds = Double(remaining) / max(rate, 0.001)
-                etaText = formatDuration(etaSeconds)
+                etaText = etaSeconds < 1 ? "<1s" : formatDuration(etaSeconds)
             } else if remaining == 0 {
                 etaText = "0s"
             }
