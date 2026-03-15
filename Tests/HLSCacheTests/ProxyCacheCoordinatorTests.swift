@@ -281,6 +281,36 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     #expect(secondRecord.pluginsApplied == [stamp])
 }
 
+@Test func proxyCacheCoordinator_encryptAtRest_invalidKey_throwsRecoverableValidationError() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-encrypt-invalid-key")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 128
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 251) })
+    let resourceID = try makeCoordinatorResourceID()
+    let cache = try CoreCache(baseDirectory: directory)
+    let pipeline = TransformPipeline(transformers: [EncryptAtRestPlugin(key: Data())])
+    let coordinator = ProxyCacheCoordinator(coreCache: cache, transformPipeline: pipeline)
+
+    do {
+        _ = try coordinator.serve(
+            resourceID: resourceID,
+            rangeHeader: "bytes=0-63",
+            totalLength: totalLength,
+            fetchNetworkRange: { range in
+                Data(originData[Int(range.start)..<Int(range.endExclusive)])
+            },
+            emit: { _ in }
+        )
+        #expect(Bool(false))
+    } catch let error as EncryptAtRestPluginError {
+        #expect(error == .invalidKey(reason: "EncryptAtRestPlugin requires a non-empty key"))
+    }
+}
+
 @Test func proxyCacheCoordinator_authenticatedEncryptAtRest_tamperedCache_invalidatesAndFailsOfflineDeterministically() throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("hlscache-proxy-coordinator-encrypt-auth")
