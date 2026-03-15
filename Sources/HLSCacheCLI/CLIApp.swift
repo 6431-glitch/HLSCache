@@ -7,8 +7,55 @@ private enum CLIProxyCommandExitCode {
     static let restartFailure: Int32 = 3
 }
 
+private struct CLIListJSONAlias: Encodable {
+    let alias: String
+    let assetID: String
+    let remoteURL: String
+    let updated: String
+    let cacheBytes: Int64
+}
+
+private struct CLIListJSONPayload: Encodable {
+    let schemaVersion: String
+    let command: String
+    let aliases: [CLIListJSONAlias]
+}
+
+private struct CLIProxyStatusJSONPayload: Encodable {
+    let schemaVersion: String
+    let command: String
+    let state: String
+    let host: String
+    let port: String
+    let baseURL: String
+}
+
+private struct CLIProxyRestartJSONPayload: Encodable {
+    let schemaVersion: String
+    let command: String
+    let result: String
+    let attemptedHost: String
+    let attemptedPort: Int
+    let startupError: String?
+    let status: CLIProxyStatusJSONPayload
+}
+
+private struct CLIProxyRestartAttempt {
+    let before: ProxyServerStatus
+    let after: ProxyServerStatus
+    let restartHost: String
+    let restartPort: Int
+    let resolvedBaseURL: URL?
+    let startupErrorDescription: String?
+
+    var succeeded: Bool {
+        startupErrorDescription == nil && after.isRunning
+    }
+}
+
 struct CLIApp {
     private let context: CLIAppContext
+    private let outputFormat: CLIOutputFormat
     private let io: any CLIIO
     private let makeExporter: (CLIAppContext) -> CLIExporter
     private let makeDownloader: (CLIAppContext) -> CLIHLSDownloader
@@ -19,6 +66,7 @@ struct CLIApp {
 
     init(
         context: CLIAppContext,
+        outputFormat: CLIOutputFormat? = nil,
         io: any CLIIO = StandardIO(),
         makeExporter: @escaping (CLIAppContext) -> CLIExporter = { context in
             CLIExporter(baseDirectory: context.baseDirectory, facade: context.facade)
@@ -32,6 +80,7 @@ struct CLIApp {
         startProxyServer: ((_ host: String, _ port: Int) throws -> URL)? = nil
     ) {
         self.context = context
+        self.outputFormat = outputFormat ?? context.outputFormat
         self.io = io
         self.makeExporter = makeExporter
         self.makeDownloader = makeDownloader
@@ -231,6 +280,11 @@ struct CLIApp {
 
     private func runListAliasesCommand() -> Int32 {
         do {
+            if outputFormat == .json {
+                let payload = try makeListAliasesJSONPayload()
+                try writeJSON(payload)
+                return 0
+            }
             for line in try renderAliasListLines(strictCacheInfo: true) {
                 io.writeLine(line)
             }
@@ -270,6 +324,23 @@ struct CLIApp {
         }
 
         return lines
+    }
+
+    private func makeListAliasesJSONPayload() throws -> CLIListJSONPayload {
+        let aliases = try context.facade.listAliases().map { record in
+            CLIListJSONAlias(
+                alias: record.alias,
+                assetID: record.assetID,
+                remoteURL: record.currentRemoteURL.absoluteString,
+                updated: formattedListDate(record.lastUpdated),
+                cacheBytes: try cacheInfoProvider(record.alias).totalBytesOnDisk
+            )
+        }
+        return CLIListJSONPayload(
+            schemaVersion: "1",
+            command: "list",
+            aliases: aliases
+        )
     }
 
     private func parseableMetadataFailureReason(_ error: Error) -> String {
@@ -373,20 +444,46 @@ struct CLIApp {
 
     private func runProxyStatusCommand() -> Int32 {
         let status = proxyStatusProvider()
+        if outputFormat == .json {
+            do {
+                try writeJSON(proxyStatusJSONPayload(command: "proxy.status", status: status))
+            } catch {
+                io.writeErrorLine("Failed to encode proxy status JSON: \(error.localizedDescription)")
+                return 1
+            }
+            return proxyStatusExitCode(status)
+        }
+
         io.writeLine("Proxy status:")
         writeProxyStatusContext(status)
         writeProxyStatusContract(status)
-        guard status.isRunning,
-              status.host != nil,
-              status.port != nil,
-              status.baseURL != nil else {
+        if proxyStatusExitCode(status) != CLIProxyCommandExitCode.success {
             io.writeLine("Proxy server is not running.")
-            return CLIProxyCommandExitCode.runtimeUnavailable
         }
-        return CLIProxyCommandExitCode.success
+        return proxyStatusExitCode(status)
     }
 
     private func runProxyRestartCommand() -> Int32 {
+        if outputFormat == .json {
+            let attempt = restartProxyServerAttempt()
+            let payload = CLIProxyRestartJSONPayload(
+                schemaVersion: "1",
+                command: "proxy.restart",
+                result: attempt.succeeded ? "success" : "restart_failure",
+                attemptedHost: attempt.restartHost,
+                attemptedPort: attempt.restartPort,
+                startupError: attempt.startupErrorDescription,
+                status: proxyStatusJSONPayload(command: "proxy.restart.status", status: attempt.after)
+            )
+            do {
+                try writeJSON(payload)
+            } catch {
+                io.writeErrorLine("Failed to encode proxy restart JSON: \(error.localizedDescription)")
+                return 1
+            }
+            return attempt.succeeded ? CLIProxyCommandExitCode.success : CLIProxyCommandExitCode.restartFailure
+        }
+
         let result = runProxyRestartAction()
         let status = proxyStatusProvider()
         io.writeLine("Proxy status (post-restart):")
@@ -397,62 +494,29 @@ struct CLIApp {
 
     @discardableResult
     private func runProxyRestartAction() -> Int32 {
-        let before = proxyStatusProvider()
+        let attempt = restartProxyServerAttempt()
+        let before = attempt.before
         io.writeLine("Restarting proxy server...")
         io.writeLine("Before restart:")
         writeProxyStatusContext(before)
 
-        stopProxyServer()
-
-        let restartHost = before.host ?? context.serverBaseURL.host ?? CLIArguments.defaultHost
-        let restartPort = before.port ?? context.serverBaseURL.port ?? CLIArguments.defaultPort
-        let restarted: URL
-        do {
-            restarted = try startProxyServer(restartHost, restartPort)
-        } catch let error as ProxyServerRuntimeError {
-            switch error {
-            case .listenerBindFailed, .listenerStartupTimedOut:
-                do {
-                    restarted = try startProxyServer(restartHost, 0)
-                } catch {
-                    io.writeLine("Failed to restart proxy server.")
-                    io.writeLine("Attempted host: \(restartHost)")
-                    io.writeLine("Attempted port: \(restartPort)")
-                    io.writeLine("Startup error: \(error.localizedDescription)")
-                    io.writeLine("Action: verify runtime configuration and try again.")
-                    return 1
-                }
-            default:
-                io.writeLine("Failed to restart proxy server.")
-                io.writeLine("Attempted host: \(restartHost)")
-                io.writeLine("Attempted port: \(restartPort)")
-                io.writeLine("Startup error: \(error.localizedDescription)")
-                io.writeLine("Action: verify runtime configuration and try again.")
-                return 1
+        guard attempt.succeeded else {
+            io.writeLine("Failed to restart proxy server.")
+            io.writeLine("Attempted host: \(attempt.restartHost)")
+            io.writeLine("Attempted port: \(attempt.restartPort)")
+            if let error = attempt.startupErrorDescription {
+                io.writeLine("Startup error: \(error)")
+            } else {
+                io.writeLine("Current base URL: \(attempt.after.baseURL?.absoluteString ?? "(unavailable)")")
             }
-        } catch {
-            io.writeLine("Failed to restart proxy server.")
-            io.writeLine("Attempted host: \(restartHost)")
-            io.writeLine("Attempted port: \(restartPort)")
-            io.writeLine("Startup error: \(error.localizedDescription)")
-            io.writeLine("Action: verify runtime configuration and try again.")
-            return 1
-        }
-        let after = proxyStatusProvider()
-
-        guard after.isRunning else {
-            io.writeLine("Failed to restart proxy server.")
-            io.writeLine("Attempted host: \(restartHost)")
-            io.writeLine("Attempted port: \(restartPort)")
-            io.writeLine("Current base URL: \(after.baseURL?.absoluteString ?? "(unavailable)")")
             io.writeLine("Action: verify runtime configuration and try again.")
             return 1
         }
 
         io.writeLine("Proxy server restarted.")
         io.writeLine("After restart:")
-        writeProxyStatusContext(after)
-        io.writeLine("Resolved base URL: \(restarted.absoluteString)")
+        writeProxyStatusContext(attempt.after)
+        io.writeLine("Resolved base URL: \(attempt.resolvedBaseURL?.absoluteString ?? "(unavailable)")")
         return 0
     }
 
@@ -468,6 +532,79 @@ struct CLIApp {
         io.writeLine("proxy.host=\(status.host ?? "unavailable")")
         io.writeLine("proxy.port=\(status.port.map(String.init) ?? "unavailable")")
         io.writeLine("proxy.base_url=\(status.baseURL?.absoluteString ?? "unavailable")")
+    }
+
+    private func proxyStatusExitCode(_ status: ProxyServerStatus) -> Int32 {
+        guard status.isRunning,
+              status.host != nil,
+              status.port != nil,
+              status.baseURL != nil else {
+            return CLIProxyCommandExitCode.runtimeUnavailable
+        }
+        return CLIProxyCommandExitCode.success
+    }
+
+    private func proxyStatusJSONPayload(command: String, status: ProxyServerStatus) -> CLIProxyStatusJSONPayload {
+        CLIProxyStatusJSONPayload(
+            schemaVersion: "1",
+            command: command,
+            state: status.isRunning ? "running" : "stopped",
+            host: status.host ?? "unavailable",
+            port: status.port.map(String.init) ?? "unavailable",
+            baseURL: status.baseURL?.absoluteString ?? "unavailable"
+        )
+    }
+
+    private func restartProxyServerAttempt() -> CLIProxyRestartAttempt {
+        let before = proxyStatusProvider()
+        stopProxyServer()
+
+        let restartHost = before.host ?? context.serverBaseURL.host ?? CLIArguments.defaultHost
+        let restartPort = before.port ?? context.serverBaseURL.port ?? CLIArguments.defaultPort
+
+        var resolvedBaseURL: URL?
+        var startupErrorDescription: String?
+
+        do {
+            resolvedBaseURL = try startProxyServer(restartHost, restartPort)
+        } catch let error as ProxyServerRuntimeError {
+            switch error {
+            case .listenerBindFailed, .listenerStartupTimedOut:
+                do {
+                    resolvedBaseURL = try startProxyServer(restartHost, 0)
+                } catch {
+                    startupErrorDescription = error.localizedDescription
+                }
+            default:
+                startupErrorDescription = error.localizedDescription
+            }
+        } catch {
+            startupErrorDescription = error.localizedDescription
+        }
+
+        let after = proxyStatusProvider()
+        if startupErrorDescription == nil, !after.isRunning {
+            startupErrorDescription = "proxy runtime unavailable after restart"
+        }
+
+        return CLIProxyRestartAttempt(
+            before: before,
+            after: after,
+            restartHost: restartHost,
+            restartPort: restartPort,
+            resolvedBaseURL: resolvedBaseURL,
+            startupErrorDescription: startupErrorDescription
+        )
+    }
+
+    private func writeJSON<T: Encodable>(_ payload: T) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(payload)
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw CLIArgumentParseError.invalidArgument("unable to encode UTF-8 JSON output")
+        }
+        io.writeLine(text)
     }
 
     private func runInteractiveRegisterAssetFlow() {

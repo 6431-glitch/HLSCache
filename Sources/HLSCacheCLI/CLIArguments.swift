@@ -6,6 +6,7 @@ enum CLIArgumentParseError: Error, Equatable {
     case invalidPort(String)
     case invalidURL(String)
     case invalidHeader(String)
+    case invalidOutputFormat(String)
     case invalidSettingValue(String)
     case invalidArgument(String)
     case unknownOption(String)
@@ -25,6 +26,8 @@ extension CLIArgumentParseError: LocalizedError {
             return "Invalid URL '\(value)'. Please provide an absolute URL like https://example.com/video.m3u8."
         case let .invalidHeader(value):
             return "Invalid header '\(value)'. Use the format 'Header-Name: Header-Value'."
+        case let .invalidOutputFormat(value):
+            return "Invalid output format '\(value)'. Use 'text' or 'json'."
         case let .invalidSettingValue(name):
             return "Invalid value for setting '\(name)'."
         case let .invalidArgument(value):
@@ -113,6 +116,7 @@ struct CLIArguments: Equatable {
     let baseDirectory: URL?
     let host: String
     let port: Int
+    let outputFormat: CLIOutputFormat
     let showHelp: Bool
     let command: CLICommand
 
@@ -120,12 +124,14 @@ struct CLIArguments: Equatable {
         baseDirectory: URL? = nil,
         host: String = CLIArguments.defaultHost,
         port: Int = CLIArguments.defaultPort,
+        outputFormat: CLIOutputFormat = .text,
         showHelp: Bool = false,
         command: CLICommand = .interactive
     ) {
         self.baseDirectory = baseDirectory
         self.host = host
         self.port = port
+        self.outputFormat = outputFormat
         self.showHelp = showHelp
         self.command = command
     }
@@ -134,6 +140,7 @@ struct CLIArguments: Equatable {
         var baseDirectory: URL?
         var host = defaultHost
         var port = defaultPort
+        var outputFormat: CLIOutputFormat = .text
         var showHelp = false
         var command: CLICommand = .interactive
 
@@ -169,6 +176,18 @@ struct CLIArguments: Equatable {
                     throw CLIArgumentParseError.invalidPort(value)
                 }
                 port = parsed
+                index += 1
+            case "--output-format":
+                index += 1
+                guard index < args.count else {
+                    throw CLIArgumentParseError.missingValue(option)
+                }
+
+                let value = args[index].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                guard let parsed = CLIOutputFormat(rawValue: value) else {
+                    throw CLIArgumentParseError.invalidOutputFormat(args[index])
+                }
+                outputFormat = parsed
                 index += 1
             case "add", "register":
                 let commandArgs = Array(args[(index + 1)...])
@@ -210,6 +229,7 @@ struct CLIArguments: Equatable {
             baseDirectory: baseDirectory,
             host: host,
             port: port,
+            outputFormat: outputFormat,
             showHelp: showHelp,
             command: command
         )
@@ -235,6 +255,7 @@ struct CLIArguments: Equatable {
           --base-directory <path>   Base directory for cache and settings storage.
           --host <host>             Proxy host (default: \(defaultHost)).
           --port <port>             Proxy port (default: \(defaultPort)).
+          --output-format <format>  Output format: text (default) or json.
           --help, -h                Show this help message.
 
         Commands:
@@ -605,4 +626,9 @@ struct CLIArguments: Equatable {
             throw CLIArgumentParseError.unknownCommand(subcommand)
         }
     }
+}
+
+enum CLIOutputFormat: String, Equatable {
+    case text
+    case json
 }

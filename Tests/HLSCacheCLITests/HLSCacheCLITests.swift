@@ -137,10 +137,17 @@ private func loadRepositoryREADME() throws -> String {
     return try String(contentsOf: readmeURL, encoding: .utf8)
 }
 
+private func parseJSONObject(_ line: String) throws -> [String: Any] {
+    let data = Data(line.utf8)
+    let object = try JSONSerialization.jsonObject(with: data)
+    return try #require(object as? [String: Any])
+}
+
 @Test func docs_readmeAndUsageStayAlignedWithImplementedCLI() throws {
     let readme = try loadRepositoryREADME()
     #expect(readme.contains("swift run HLSCacheCLI download --alias MD0534"))
     #expect(readme.contains("swift run HLSCacheCLI proxy status"))
+    #expect(readme.contains("--output-format json proxy status"))
     #expect(readme.contains("--av1"))
     #expect(readme.contains("AES-128 encrypted playlists are exportable when the referenced key material is already cached."))
     #expect(!readme.contains("AES-128 encrypted playlists are currently not supported by CLI export."))
@@ -149,6 +156,7 @@ private func loadRepositoryREADME() throws -> String {
     #expect(usage.contains("download --alias <alias>"))
     #expect(usage.contains("proxy status"))
     #expect(usage.contains("proxy restart"))
+    #expect(usage.contains("--output-format <format>"))
     #expect(usage.contains("export --alias <alias> --output <file.mp4> [--av1]"))
     #expect(!usage.contains("coming soon"))
     #expect(!usage.contains("placeholder"))
@@ -160,6 +168,7 @@ private func loadRepositoryREADME() throws -> String {
     #expect(parsed.baseDirectory == nil)
     #expect(parsed.host == CLIArguments.defaultHost)
     #expect(parsed.port == CLIArguments.defaultPort)
+    #expect(parsed.outputFormat == .text)
     #expect(parsed.showHelp == false)
     #expect(parsed.command == .interactive)
 }
@@ -176,7 +185,23 @@ private func loadRepositoryREADME() throws -> String {
     #expect(parsed.baseDirectory == URL(fileURLWithPath: path).standardizedFileURL)
     #expect(parsed.host == "0.0.0.0")
     #expect(parsed.port == 9090)
+    #expect(parsed.outputFormat == .text)
     #expect(parsed.showHelp == true)
+}
+
+@Test func cliArguments_parseOutputFormatJSON() throws {
+    let parsed = try CLIArguments.parse(["--output-format", "json", "list"])
+    #expect(parsed.outputFormat == .json)
+    #expect(parsed.command == .listAliases)
+}
+
+@Test func cliArguments_parseOutputFormat_invalid_throws() throws {
+    do {
+        _ = try CLIArguments.parse(["--output-format", "xml", "list"])
+        #expect(Bool(false))
+    } catch let error as CLIArgumentParseError {
+        #expect(error == .invalidOutputFormat("xml"))
+    }
 }
 
 @Test func cliArguments_parseRegisterCommand_withHeaders() throws {
@@ -460,6 +485,74 @@ private func loadRepositoryREADME() throws -> String {
     #expect(io.outputLines.contains { $0.hasPrefix("proxy.base_url=http://127.0.0.1:") })
 }
 
+@Test func cliListCommand_jsonOutput_emitsVersionedSchema() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedCacheBytes(baseDirectory: directory, alias: "MDJSONLIST", assetID: "asset-json-list")
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory, outputFormat: .json))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let exitCode = app.run(command: .listAliases)
+    #expect(exitCode == 0)
+
+    let line = try #require(io.outputLines.last)
+    let payload = try parseJSONObject(line)
+    #expect(payload["schemaVersion"] as? String == "1")
+    #expect(payload["command"] as? String == "list")
+
+    let aliases = try #require(payload["aliases"] as? [[String: Any]])
+    #expect(aliases.count == 1)
+    #expect(aliases.first?["alias"] as? String == "MDJSONLIST")
+    #expect(aliases.first?["assetID"] as? String == "asset-json-list")
+    #expect((aliases.first?["cacheBytes"] as? Int ?? 0) > 0)
+}
+
+@Test func cliProxyCommand_status_jsonOutput_emitsVersionedSchemaAndFields() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory, outputFormat: .json))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let exitCode = app.run(command: .proxy(ProxyCommand(action: .status)))
+    #expect(exitCode == 0)
+
+    let line = try #require(io.outputLines.last)
+    let payload = try parseJSONObject(line)
+    #expect(payload["schemaVersion"] as? String == "1")
+    #expect(payload["command"] as? String == "proxy.status")
+    #expect(payload["state"] as? String == "running")
+    #expect(payload["host"] as? String == "127.0.0.1")
+    #expect((payload["port"] as? String)?.isEmpty == false)
+    #expect((payload["baseURL"] as? String)?.hasPrefix("http://127.0.0.1:") == true)
+}
+
+@Test func cliProxyCommand_status_jsonOutput_whenUnavailable_returnsRuntimeUnavailable() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory, outputFormat: .json))
+    context.facade.stopServer()
+
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let exitCode = app.run(command: .proxy(ProxyCommand(action: .status)))
+    #expect(exitCode == 2)
+
+    let line = try #require(io.outputLines.last)
+    let payload = try parseJSONObject(line)
+    #expect(payload["schemaVersion"] as? String == "1")
+    #expect(payload["command"] as? String == "proxy.status")
+    #expect(payload["state"] as? String == "stopped")
+    #expect(payload["host"] as? String == "unavailable")
+    #expect(payload["port"] as? String == "unavailable")
+    #expect(payload["baseURL"] as? String == "unavailable")
+}
+
 @Test func cliProxyCommand_status_whenUnavailable_returnsRuntimeUnavailableCode() throws {
     let directory = try makeCLITempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -512,6 +605,50 @@ private func loadRepositoryREADME() throws -> String {
     #expect(io.outputLines.contains { $0 == "proxy.host=unavailable" })
     #expect(io.outputLines.contains { $0 == "proxy.port=unavailable" })
     #expect(io.outputLines.contains { $0 == "proxy.base_url=unavailable" })
+}
+
+@Test func cliProxyCommand_restartFailure_jsonOutput_hasDeterministicSchema() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory, outputFormat: .json))
+    let runningURL = try #require(URL(string: "http://127.0.0.1:8080"))
+    var status = ProxyServerStatus(
+        isRunning: true,
+        host: "127.0.0.1",
+        port: 8080,
+        baseURL: runningURL
+    )
+
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(
+        context: context,
+        io: io,
+        proxyStatusProvider: { status },
+        stopProxyServer: {
+            status = ProxyServerStatus(isRunning: false, host: nil, port: nil, baseURL: nil)
+        },
+        startProxyServer: { host, port in
+            status = ProxyServerStatus(isRunning: false, host: nil, port: nil, baseURL: nil)
+            return URL(string: "http://\(host):\(port)")!
+        }
+    )
+
+    let exitCode = app.run(command: .proxy(ProxyCommand(action: .restart)))
+    #expect(exitCode == 3)
+
+    let line = try #require(io.outputLines.last)
+    let payload = try parseJSONObject(line)
+    #expect(payload["schemaVersion"] as? String == "1")
+    #expect(payload["command"] as? String == "proxy.restart")
+    #expect(payload["result"] as? String == "restart_failure")
+    #expect(payload["attemptedHost"] as? String == "127.0.0.1")
+    #expect(payload["attemptedPort"] as? Int == 8080)
+    let statusPayload = try #require(payload["status"] as? [String: Any])
+    #expect(statusPayload["state"] as? String == "stopped")
+    #expect(statusPayload["host"] as? String == "unavailable")
+    #expect(statusPayload["port"] as? String == "unavailable")
+    #expect(statusPayload["baseURL"] as? String == "unavailable")
 }
 
 @Test func cliProxyMenu_statusAction_reportsRuntimeMetadataWhenRunning() throws {
