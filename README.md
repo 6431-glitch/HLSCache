@@ -42,6 +42,12 @@ This separation highlights divergence cases (for example, planned cache bytes fa
 - Default: `leastRecentlyUpdated` (backward compatible). Read traffic does not affect eviction recency.
 - Optional: `leastRecentlyAccessed`. Cache-hit reads update recency in `plan(...)`, so read-hot assets are less likely to be evicted.
 
+### Correlation Propagation
+
+- `HLSCacheFacade` continues to generate correlation IDs automatically when callers do not provide context.
+- Proxy request handling propagates one correlation ID through facade request logs and downstream `ProxyCacheCoordinator`/`CoreCache` operations for end-to-end traceability.
+- `ProxyCacheCoordinator` and key `CoreCache` operations accept optional `correlationID` parameters; omitting them preserves backward-compatible auto-generated IDs.
+
 ---
 
 ## Architecture Decisions

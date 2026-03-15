@@ -123,8 +123,12 @@ public final class CoreCache: @unchecked Sendable {
         }
     }
 
-    public func plan(resource: ResourceID, requested: ByteRange) throws -> [ReadPlanPart] {
-        let correlationID = UUID().uuidString
+    public func plan(
+        resource: ResourceID,
+        requested: ByteRange,
+        correlationID: String? = nil
+    ) throws -> [ReadPlanPart] {
+        let resolvedCorrelationID = resolvedCorrelationID(correlationID)
         // Planning mutates aggregate counters, so it runs as a barrier mutation.
         return try queue.sync(flags: .barrier) {
             guard requested.length > 0 else {
@@ -153,7 +157,7 @@ public final class CoreCache: @unchecked Sendable {
                     subsystem: "CoreCache",
                     operation: "plan",
                     level: .debug,
-                    correlationID: correlationID,
+                    correlationID: resolvedCorrelationID,
                     metadata: [
                         "cacheKey": resource.cacheKey.rawValue,
                         "kind": resource.kind.rawValue,
@@ -259,9 +263,10 @@ public final class CoreCache: @unchecked Sendable {
         at offset: Int64,
         contentType: String? = nil,
         expectedLength: Int64? = nil,
-        pluginsApplied: [PluginStamp]? = nil
+        pluginsApplied: [PluginStamp]? = nil,
+        correlationID: String? = nil
     ) throws -> ByteRange {
-        let correlationID = UUID().uuidString
+        let resolvedCorrelationID = resolvedCorrelationID(correlationID)
         return try queue.sync(flags: .barrier) {
             let writtenRange = try diskStore.write(data, for: resource, at: offset)
 
@@ -283,13 +288,13 @@ public final class CoreCache: @unchecked Sendable {
             try record.validateInvariants()
             record.touch()
             try manifestStore.save(resourceID: resource, record: record)
-            try enforceDiskQuotaIfNeeded(correlationID: correlationID)
+            try enforceDiskQuotaIfNeeded(correlationID: resolvedCorrelationID)
             logger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "write",
                     level: .info,
-                    correlationID: correlationID,
+                    correlationID: resolvedCorrelationID,
                     metadata: [
                         "cacheKey": resource.cacheKey.rawValue,
                         "kind": resource.kind.rawValue,
@@ -302,8 +307,12 @@ public final class CoreCache: @unchecked Sendable {
         }
     }
 
-    public func read(resource: ResourceID, range: ByteRange) throws -> Data {
-        let correlationID = UUID().uuidString
+    public func read(
+        resource: ResourceID,
+        range: ByteRange,
+        correlationID: String? = nil
+    ) throws -> Data {
+        let resolvedCorrelationID = resolvedCorrelationID(correlationID)
         return try queue.sync {
             let data = try diskStore.read(resourceID: resource, range: range)
             logger.log(
@@ -311,7 +320,7 @@ public final class CoreCache: @unchecked Sendable {
                     subsystem: "CoreCache",
                     operation: "read",
                     level: .debug,
-                    correlationID: correlationID,
+                    correlationID: resolvedCorrelationID,
                     metadata: [
                         "cacheKey": resource.cacheKey.rawValue,
                         "kind": resource.kind.rawValue,
@@ -329,9 +338,10 @@ public final class CoreCache: @unchecked Sendable {
     public func finalizeWrite(
         resource: ResourceID,
         expectedLength: Int64? = nil,
-        pluginsApplied: [PluginStamp]? = nil
+        pluginsApplied: [PluginStamp]? = nil,
+        correlationID: String? = nil
     ) throws -> ResourceRecord {
-        let correlationID = UUID().uuidString
+        let resolvedCorrelationID = resolvedCorrelationID(correlationID)
         return try queue.sync(flags: .barrier) {
             var record = try manifestStore.load(resourceID: resource) ?? ResourceRecord(kind: resource.kind)
 
@@ -347,13 +357,13 @@ public final class CoreCache: @unchecked Sendable {
             try record.validateInvariants()
             record.touch()
             try manifestStore.save(resourceID: resource, record: record)
-            try enforceDiskQuotaIfNeeded(correlationID: correlationID)
+            try enforceDiskQuotaIfNeeded(correlationID: resolvedCorrelationID)
             logger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "finalizeWrite",
                     level: .info,
-                    correlationID: correlationID,
+                    correlationID: resolvedCorrelationID,
                     metadata: [
                         "cacheKey": resource.cacheKey.rawValue,
                         "kind": resource.kind.rawValue
@@ -375,16 +385,17 @@ public final class CoreCache: @unchecked Sendable {
         decision: String,
         reason: String,
         cachedStamps: [PluginStamp],
-        activeStamps: [PluginStamp]
+        activeStamps: [PluginStamp],
+        correlationID: String? = nil
     ) {
-        let correlationID = UUID().uuidString
+        let resolvedCorrelationID = resolvedCorrelationID(correlationID)
         queue.sync {
             logger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "pluginMigrationDecision",
                     level: .info,
-                    correlationID: correlationID,
+                    correlationID: resolvedCorrelationID,
                     metadata: [
                         "cacheKey": resource.cacheKey.rawValue,
                         "kind": resource.kind.rawValue,
@@ -399,8 +410,12 @@ public final class CoreCache: @unchecked Sendable {
     }
 
     @discardableResult
-    public func setResourceIntegrity(resource: ResourceID, integrity: ResourceIntegrity?) throws -> ResourceRecord {
-        let correlationID = UUID().uuidString
+    public func setResourceIntegrity(
+        resource: ResourceID,
+        integrity: ResourceIntegrity?,
+        correlationID: String? = nil
+    ) throws -> ResourceRecord {
+        let resolvedCorrelationID = resolvedCorrelationID(correlationID)
         return try queue.sync(flags: .barrier) {
             var record = try manifestStore.load(resourceID: resource) ?? ResourceRecord(kind: resource.kind)
             record.integrity = integrity
@@ -411,7 +426,7 @@ public final class CoreCache: @unchecked Sendable {
                     subsystem: "CoreCache",
                     operation: "setResourceIntegrity",
                     level: .info,
-                    correlationID: correlationID,
+                    correlationID: resolvedCorrelationID,
                     metadata: [
                         "cacheKey": resource.cacheKey.rawValue,
                         "kind": resource.kind.rawValue,
@@ -423,8 +438,12 @@ public final class CoreCache: @unchecked Sendable {
         }
     }
 
-    public func invalidate(resource: ResourceID, reason: String? = nil) throws {
-        let correlationID = UUID().uuidString
+    public func invalidate(
+        resource: ResourceID,
+        reason: String? = nil,
+        correlationID: String? = nil
+    ) throws {
+        let resolvedCorrelationID = resolvedCorrelationID(correlationID)
         try queue.sync(flags: .barrier) {
             let bytes = try diskStore.fileLength(for: resource)
             try diskStore.remove(resourceID: resource)
@@ -434,7 +453,7 @@ public final class CoreCache: @unchecked Sendable {
                     subsystem: "CoreCache",
                     operation: "invalidateResource",
                     level: .warning,
-                    correlationID: correlationID,
+                    correlationID: resolvedCorrelationID,
                     metadata: [
                         "cacheKey": resource.cacheKey.rawValue,
                         "kind": resource.kind.rawValue,
@@ -454,6 +473,13 @@ public final class CoreCache: @unchecked Sendable {
 
         // Never emit invalid planning output; fallback is coherent and safe.
         return [.network(requested)]
+    }
+
+    private func resolvedCorrelationID(_ correlationID: String?) -> String {
+        if let correlationID, !correlationID.isEmpty {
+            return correlationID
+        }
+        return UUID().uuidString
     }
 
     private func recordPlanMetrics(parts: [ReadPlanPart], requested: ByteRange) {

@@ -445,6 +445,99 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(cacheInfoEvent.level == .debug)
 }
 
+@Test func facade_proxyRuntime_propagatesCorrelationIDAcrossProxyAndCoreLogs() async throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-correlation-propagation")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let rootRemoteURL = try #require(URL(string: "https://origin.example.com/hls/root.m3u8"))
+    let segmentRemoteURL = try #require(URL(string: "https://origin.example.com/hls/seg-trace.ts"))
+    let payload = Data((0..<24).map { UInt8($0 + 1) })
+
+    let sessionConfiguration = URLSessionConfiguration.ephemeral
+    sessionConfiguration.protocolClasses = [CorrelationTraceOriginURLProtocol.self]
+    let originSession = URLSession(configuration: sessionConfiguration)
+
+    CorrelationTraceOriginURLProtocol.setHandler { request in
+        let url = try #require(request.url)
+        #expect(url == segmentRemoteURL)
+        let method = (request.httpMethod ?? "GET").uppercased()
+
+        if method == "HEAD" {
+            let response = try #require(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: [
+                        "Content-Length": String(payload.count),
+                        "Content-Type": "video/mp2t"
+                    ]
+                )
+            )
+            return (response, Data())
+        }
+
+        let totalLength = Int64(payload.count)
+        let rangeHeader = request.value(forHTTPHeaderField: "Range")
+        let parsedRange = rangeHeader.flatMap { ByteRange.parseHTTPRange($0, totalLength: totalLength) }
+            ?? ByteRange(start: 0, endExclusive: totalLength)
+        let range = try #require(parsedRange)
+        let start = Int(range.start)
+        let endExclusive = Int(range.endExclusive)
+        let slice = Data(payload[start..<endExclusive])
+
+        var headers: [String: String] = [
+            "Content-Length": String(slice.count),
+            "Content-Type": "video/mp2t"
+        ]
+        let statusCode: Int
+        if rangeHeader == nil {
+            statusCode = 200
+        } else {
+            statusCode = 206
+            headers["Content-Range"] = "bytes \(range.start)-\(range.endExclusive - 1)/\(payload.count)"
+        }
+
+        let response = try #require(
+            HTTPURLResponse(
+                url: url,
+                statusCode: statusCode,
+                httpVersion: "HTTP/1.1",
+                headerFields: headers
+            )
+        )
+        return (response, slice)
+    }
+    defer { CorrelationTraceOriginURLProtocol.resetHandler() }
+
+    let logger = RecordingStructuredLogger()
+    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger, networkSession: originSession)
+    _ = try facade.register(alias: "MDTRACE", assetID: "asset-trace", remoteURL: rootRemoteURL)
+    _ = try facade.startServer(host: "127.0.0.1", port: 0)
+    defer { facade.stopServer() }
+
+    let proxyURL = try facade.proxyURL(for: "MDTRACE", kind: .segment, remoteURL: segmentRemoteURL)
+    let proxySession = URLSession(configuration: .ephemeral)
+    let (data, response) = try await proxySession.data(from: proxyURL)
+    let httpResponse = try #require(response as? HTTPURLResponse)
+    #expect(httpResponse.statusCode == 200)
+    #expect(data == payload)
+
+    let events = logger.events()
+    let proxyEvent = try #require(
+        events.first {
+            $0.operation == "proxyRequest"
+                && $0.metadata["alias"] == "MDTRACE"
+                && $0.metadata["status"] == "200"
+        }
+    )
+
+    let correlatedOperations = Set(events.filter { $0.correlationID == proxyEvent.correlationID }.map(\.operation))
+    #expect(correlatedOperations.contains("plan"))
+    #expect(correlatedOperations.contains("write"))
+    #expect(correlatedOperations.contains("finalizeWrite"))
+}
+
 @Test func facade_initialization_passesLoggerToAliasRegistryRecoveryTelemetry() throws {
     let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-alias-registry-recovery")
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -1207,6 +1300,57 @@ private final class OfflineModeOriginURLProtocol: URLProtocol, @unchecked Sendab
 }
 
 private final class RotationContinuityOriginURLProtocol: URLProtocol, @unchecked Sendable {
+    typealias Handler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var handler: Handler?
+
+    static func setHandler(_ handler: @escaping Handler) {
+        lock.lock()
+        self.handler = handler
+        lock.unlock()
+    }
+
+    static func resetHandler() {
+        lock.lock()
+        handler = nil
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.lock.lock()
+        let handler = Self.handler
+        Self.lock.unlock()
+
+        guard let handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unknown))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if !data.isEmpty {
+                client?.urlProtocol(self, didLoad: data)
+            }
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private final class CorrelationTraceOriginURLProtocol: URLProtocol, @unchecked Sendable {
     typealias Handler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
 
     private static let lock = NSLock()

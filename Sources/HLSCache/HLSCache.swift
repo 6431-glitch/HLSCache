@@ -746,7 +746,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
                 totalLength: totalLength,
                 contentType: contentType,
                 allowNetworkFallback: !offlineModeEnabled,
-                networkClient: networkClient
+                networkClient: networkClient,
+                correlationID: correlationID
             ) { _, chunk in
                 payload.append(chunk)
             }

@@ -89,6 +89,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         contentType: String? = nil,
         allowNetworkFallback: Bool = true,
         networkClient: any NetworkClient,
+        correlationID: String? = nil,
         emit: (Data) async throws -> Void
     ) async throws -> ProxyCacheServeResult {
         try await serveStreaming(
@@ -100,7 +101,8 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
             contentType: contentType,
             allowNetworkFallback: allowNetworkFallback,
             networkClient: networkClient,
-            chunkSizeBytes: .max
+            chunkSizeBytes: .max,
+            correlationID: correlationID
         ) { _, payload in
             try await emit(payload)
         }
@@ -118,16 +120,28 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         allowNetworkFallback: Bool = true,
         networkClient: any NetworkClient,
         chunkSizeBytes: Int64 = 256 * 1024,
+        correlationID: String? = nil,
         emitChunk: (ProxyStreamChunk, Data) async throws -> Void
     ) async throws -> ProxyCacheServeResult {
+        let resolvedCorrelationID = correlationID ?? UUID().uuidString
         let response = try ProxyRangeResponse.make(rangeHeader: rangeHeader, totalLength: totalLength)
         if response.statusCode == 416 {
             return ProxyCacheServeResult(response: response, chunks: [], totalBytesStreamed: 0)
         }
 
-        try invalidateResourceIfPluginStampsIncompatible(resourceID: resourceID)
-        try invalidateResourceIfIntegrityMismatch(resourceID: resourceID)
-        let plan = try coreCache.plan(resource: resourceID, requested: response.requestedRange)
+        try invalidateResourceIfPluginStampsIncompatible(
+            resourceID: resourceID,
+            correlationID: resolvedCorrelationID
+        )
+        try invalidateResourceIfIntegrityMismatch(
+            resourceID: resourceID,
+            correlationID: resolvedCorrelationID
+        )
+        let plan = try coreCache.plan(
+            resource: resourceID,
+            requested: response.requestedRange,
+            correlationID: resolvedCorrelationID
+        )
         let normalizedChunkSize = max(Int64(1), chunkSizeBytes)
 
         var chunks: [ProxyStreamChunk] = []
@@ -152,6 +166,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                     networkClient: networkClient,
                     chunkSizeBytes: normalizedChunkSize,
                     isResponseFinalPart: isResponseFinalPart,
+                    correlationID: resolvedCorrelationID,
                     emitChunk: emitChunk
                 )
                 chunks.append(contentsOf: networkResult.chunks)
@@ -170,6 +185,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                     networkClient: networkClient,
                     chunkSizeBytes: normalizedChunkSize,
                     isResponseFinalPart: isResponseFinalPart,
+                    correlationID: resolvedCorrelationID,
                     emitChunk: emitChunk
                 )
                 chunks.append(contentsOf: fileResult.chunks)
@@ -179,8 +195,16 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         }
 
         if wroteNetworkData {
-            let record = try coreCache.finalizeWrite(resource: resourceID, expectedLength: totalLength)
-            try refreshResourceIntegrity(resourceID: resourceID, record: record)
+            let record = try coreCache.finalizeWrite(
+                resource: resourceID,
+                expectedLength: totalLength,
+                correlationID: resolvedCorrelationID
+            )
+            try refreshResourceIntegrity(
+                resourceID: resourceID,
+                record: record,
+                correlationID: resolvedCorrelationID
+            )
         }
 
         return ProxyCacheServeResult(response: response, chunks: chunks, totalBytesStreamed: totalStreamed)
@@ -193,16 +217,28 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         totalLength: Int64,
         contentType: String? = nil,
         allowNetworkFallback: Bool = true,
+        correlationID: String? = nil,
         fetchNetworkRange: (ByteRange) throws -> Data,
         emit: (Data) throws -> Void
     ) throws -> ProxyCacheServeResult {
+        let resolvedCorrelationID = correlationID ?? UUID().uuidString
         let response = try ProxyRangeResponse.make(rangeHeader: rangeHeader, totalLength: totalLength)
         if response.statusCode == 416 {
             return ProxyCacheServeResult(response: response, chunks: [], totalBytesStreamed: 0)
         }
-        try invalidateResourceIfPluginStampsIncompatible(resourceID: resourceID)
-        try invalidateResourceIfIntegrityMismatch(resourceID: resourceID)
-        let plan = try coreCache.plan(resource: resourceID, requested: response.requestedRange)
+        try invalidateResourceIfPluginStampsIncompatible(
+            resourceID: resourceID,
+            correlationID: resolvedCorrelationID
+        )
+        try invalidateResourceIfIntegrityMismatch(
+            resourceID: resourceID,
+            correlationID: resolvedCorrelationID
+        )
+        let plan = try coreCache.plan(
+            resource: resourceID,
+            requested: response.requestedRange,
+            correlationID: resolvedCorrelationID
+        )
 
         var chunks: [ProxyStreamChunk] = []
         var totalStreamed: Int64 = 0
@@ -227,7 +263,8 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                     at: range.start,
                     contentType: contentType,
                     expectedLength: totalLength,
-                    pluginsApplied: writeProcessor.pluginStamps
+                    pluginsApplied: writeProcessor.pluginStamps,
+                    correlationID: resolvedCorrelationID
                 )
                 try emit(networkData)
                 coreCache.recordServedBytes(network: Int64(networkData.count))
@@ -236,7 +273,11 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                 wroteNetworkData = true
 
             case let .file(range):
-                let cachedData = try coreCache.read(resource: resourceID, range: range)
+                let cachedData = try coreCache.read(
+                    resource: resourceID,
+                    range: range,
+                    correlationID: resolvedCorrelationID
+                )
                 let readProcessor = transformPipeline.makeProcessor(
                     context: TransformContext(resourceID: resourceID, byteOffset: range.start),
                     direction: .readFromCache
@@ -282,7 +323,8 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                     at: missingRange.start,
                     contentType: contentType,
                     expectedLength: totalLength,
-                    pluginsApplied: missingWriteProcessor.pluginStamps
+                    pluginsApplied: missingWriteProcessor.pluginStamps,
+                    correlationID: resolvedCorrelationID
                 )
                 try emit(networkData)
                 coreCache.recordServedBytes(network: Int64(networkData.count))
@@ -293,8 +335,16 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         }
 
         if wroteNetworkData {
-            let record = try coreCache.finalizeWrite(resource: resourceID, expectedLength: totalLength)
-            try refreshResourceIntegrity(resourceID: resourceID, record: record)
+            let record = try coreCache.finalizeWrite(
+                resource: resourceID,
+                expectedLength: totalLength,
+                correlationID: resolvedCorrelationID
+            )
+            try refreshResourceIntegrity(
+                resourceID: resourceID,
+                record: record,
+                correlationID: resolvedCorrelationID
+            )
         }
 
         return ProxyCacheServeResult(response: response, chunks: chunks, totalBytesStreamed: totalStreamed)
@@ -314,7 +364,10 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         return data
     }
 
-    private func invalidateResourceIfPluginStampsIncompatible(resourceID: ResourceID) throws {
+    private func invalidateResourceIfPluginStampsIncompatible(
+        resourceID: ResourceID,
+        correlationID: String
+    ) throws {
         guard let record = try coreCache.resourceRecord(for: resourceID) else {
             return
         }
@@ -325,12 +378,17 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
             decision: evaluation.decision.rawValue,
             reason: evaluation.reason,
             cachedStamps: record.pluginsApplied,
-            activeStamps: activeStamps
+            activeStamps: activeStamps,
+            correlationID: correlationID
         )
         guard evaluation.decision == .forcedRecache else {
             return
         }
-        try coreCache.invalidate(resource: resourceID, reason: "pluginMigration:\(evaluation.reason)")
+        try coreCache.invalidate(
+            resource: resourceID,
+            reason: "pluginMigration:\(evaluation.reason)",
+            correlationID: correlationID
+        )
     }
 
     private func evaluatePluginMigration(
@@ -401,7 +459,10 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         return SemanticVersion(major: major, minor: minor, patch: patch)
     }
 
-    private func invalidateResourceIfIntegrityMismatch(resourceID: ResourceID) throws {
+    private func invalidateResourceIfIntegrityMismatch(
+        resourceID: ResourceID,
+        correlationID: String
+    ) throws {
         guard let record = try coreCache.resourceRecord(for: resourceID),
               let storedIntegrity = record.integrity else {
             return
@@ -414,34 +475,58 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
             return
         }
 
-        let cachedPayload = try coreCache.read(resource: resourceID, range: fullRange)
+        let cachedPayload = try coreCache.read(
+            resource: resourceID,
+            range: fullRange,
+            correlationID: correlationID
+        )
         let context = TransformContext(resourceID: resourceID, byteOffset: 0)
         guard let computedIntegrity = try transformPipeline.integrityMetadata(for: cachedPayload, context: context) else {
             return
         }
 
         guard storedIntegrity == computedIntegrity else {
-            try coreCache.invalidate(resource: resourceID, reason: "integrityMismatch")
+            try coreCache.invalidate(
+                resource: resourceID,
+                reason: "integrityMismatch",
+                correlationID: correlationID
+            )
             return
         }
     }
 
-    private func refreshResourceIntegrity(resourceID: ResourceID, record: ResourceRecord) throws {
+    private func refreshResourceIntegrity(
+        resourceID: ResourceID,
+        record: ResourceRecord,
+        correlationID: String
+    ) throws {
         guard let expectedLength = record.expectedLength,
               expectedLength > 0,
               let fullRange = ByteRange(start: 0, endExclusive: expectedLength),
               record.completedRanges.contains(fullRange) else {
             if record.integrity != nil {
-                _ = try coreCache.setResourceIntegrity(resource: resourceID, integrity: nil)
+                _ = try coreCache.setResourceIntegrity(
+                    resource: resourceID,
+                    integrity: nil,
+                    correlationID: correlationID
+                )
             }
             return
         }
 
-        let cachedPayload = try coreCache.read(resource: resourceID, range: fullRange)
+        let cachedPayload = try coreCache.read(
+            resource: resourceID,
+            range: fullRange,
+            correlationID: correlationID
+        )
         let context = TransformContext(resourceID: resourceID, byteOffset: 0)
         let integrity = try transformPipeline.integrityMetadata(for: cachedPayload, context: context)
         if integrity != record.integrity {
-            _ = try coreCache.setResourceIntegrity(resource: resourceID, integrity: integrity)
+            _ = try coreCache.setResourceIntegrity(
+                resource: resourceID,
+                integrity: integrity,
+                correlationID: correlationID
+            )
         }
     }
 
@@ -471,6 +556,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         networkClient: any NetworkClient,
         chunkSizeBytes: Int64,
         isResponseFinalPart: Bool,
+        correlationID: String,
         emitChunk: (ProxyStreamChunk, Data) async throws -> Void
     ) async throws -> (chunks: [ProxyStreamChunk], totalBytesStreamed: Int64) {
         let writeProcessor = transformPipeline.makeProcessor(
@@ -501,7 +587,8 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                 at: chunkRange.start,
                 contentType: contentType,
                 expectedLength: totalLength,
-                pluginsApplied: writeProcessor.pluginStamps
+                pluginsApplied: writeProcessor.pluginStamps,
+                correlationID: correlationID
             )
 
             let emittedChunk = ProxyStreamChunk(source: .network, range: chunkRange, byteCount: networkData.count)
@@ -527,6 +614,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         networkClient: any NetworkClient,
         chunkSizeBytes: Int64,
         isResponseFinalPart: Bool,
+        correlationID: String,
         emitChunk: (ProxyStreamChunk, Data) async throws -> Void
     ) async throws -> (chunks: [ProxyStreamChunk], totalBytesStreamed: Int64, wroteNetworkData: Bool) {
         let readProcessor = transformPipeline.makeProcessor(
@@ -542,7 +630,11 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
             try Task.checkCancellation()
             let nextEnd = nextChunkEnd(start: cursor, endExclusive: range.endExclusive, chunkSizeBytes: chunkSizeBytes)
             let chunkRange = try requireRange(start: cursor, endExclusive: nextEnd)
-            let cachedData = try coreCache.read(resource: resourceID, range: chunkRange)
+            let cachedData = try coreCache.read(
+                resource: resourceID,
+                range: chunkRange,
+                correlationID: correlationID
+            )
 
             if cachedData.count >= Int(chunkRange.length) {
                 let expectedCount = Int(chunkRange.length)
@@ -593,6 +685,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
             networkClient: networkClient,
             chunkSizeBytes: chunkSizeBytes,
             isResponseFinalPart: isResponseFinalPart,
+            correlationID: correlationID,
             emitChunk: emitChunk
         )
         chunks.append(contentsOf: networkResult.chunks)
