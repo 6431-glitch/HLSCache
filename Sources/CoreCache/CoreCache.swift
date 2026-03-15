@@ -106,9 +106,9 @@ public final class CoreCache: @unchecked Sendable {
     ) throws {
         self.directoryLock = try DirectoryLock(baseDirectory: baseDirectory)
         self.diskStore = DiskStore(baseDirectory: baseDirectory)
-        self.manifestStore = ManifestStore(baseDirectory: baseDirectory)
-        self.diskQuotaBytes = diskQuotaBytes.map { max($0, 0) }
         self.logger = logger
+        self.manifestStore = ManifestStore(baseDirectory: baseDirectory, logger: logger)
+        self.diskQuotaBytes = diskQuotaBytes.map { max($0, 0) }
 
         queue.sync(flags: .barrier) {
             reconcileStorageOnStartup()
