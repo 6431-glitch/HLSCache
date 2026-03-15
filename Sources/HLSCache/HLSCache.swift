@@ -606,12 +606,20 @@ public final class HLSCacheFacade: @unchecked Sendable {
             return .text(statusCode: 400, reasonPhrase: "Bad Request", body: "invalid route\n")
         }
 
-        let resourceID = ResourceID(
+        let primaryResourceID = ResourceID(
             cacheKey: asset.cacheKey,
             kind: route.kind.coreCacheKind,
             resourceKey: ResourceID.makeResourceKey(from: route.remoteURL)
         )
+        let legacyFallbackResourceIDs = ResourceID.makeLegacyResourceKeyCandidates(from: route.remoteURL).map {
+            ResourceID(
+                cacheKey: asset.cacheKey,
+                kind: route.kind.coreCacheKind,
+                resourceKey: $0
+            )
+        }
 
+        let resourceID: ResourceID
         let coordinator: ProxyCacheCoordinator
         let totalLength: Int64
         let contentType: String?
@@ -623,20 +631,51 @@ public final class HLSCacheFacade: @unchecked Sendable {
                 coreCache: cache,
                 transformPipeline: makeTransformPipeline()
             )
-            let cachedRecord = try cache.record(resource: resourceID)
-            continuityDecision = cachedRecord == nil
-                ? "miss_new_resource_url"
-                : "reuse_existing_resource_url"
+            let primaryCachedRecord = try cache.record(resource: primaryResourceID)
+            var selectedResourceID = primaryResourceID
+            var selectedCachedRecord = primaryCachedRecord
+            var selectedContinuityDecision = "miss_new_resource_url"
+
+            if primaryCachedRecord != nil {
+                selectedContinuityDecision = "reuse_existing_resource_url"
+            } else {
+                for legacyResourceID in legacyFallbackResourceIDs {
+                    guard let fallbackRecord = try cache.record(resource: legacyResourceID) else {
+                        continue
+                    }
+                    selectedResourceID = legacyResourceID
+                    selectedCachedRecord = fallbackRecord
+                    selectedContinuityDecision = "reuse_legacy_resource_key_fallback"
+                    logger.log(
+                        StructuredLogEvent(
+                            subsystem: "HLSCache",
+                            operation: "legacyResourceKeyFallback",
+                            level: .info,
+                            correlationID: correlationID,
+                            metadata: [
+                                "alias": route.alias,
+                                "kind": route.kind.rawValue,
+                                "currentResourceKey": primaryResourceID.resourceKey,
+                                "fallbackResourceKey": legacyResourceID.resourceKey
+                            ]
+                        )
+                    )
+                    break
+                }
+            }
+
+            resourceID = selectedResourceID
+            continuityDecision = selectedContinuityDecision
 
             if offlineModeEnabled {
-                guard let expectedLength = cachedRecord?.expectedLength, expectedLength >= 0 else {
+                guard let expectedLength = selectedCachedRecord?.expectedLength, expectedLength >= 0 else {
                     throw ProxyCacheCoordinatorError.offlineCacheMiss(range: ByteRange(start: 0, endExclusive: 0)!)
                 }
                 totalLength = expectedLength
-                contentType = cachedRecord?.contentType
+                contentType = selectedCachedRecord?.contentType
             } else {
                 let metadata = try await resolveRemoteMetadataIfNeeded(
-                    cachedRecord: cachedRecord,
+                    cachedRecord: selectedCachedRecord,
                     remoteURL: route.remoteURL,
                     requestHeaders: requestHeaders,
                     networkClient: URLSessionNetworkClient(session: networkSession)
