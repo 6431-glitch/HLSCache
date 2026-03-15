@@ -32,6 +32,21 @@ private actor AsyncRequestRecorder {
     }
 }
 
+private struct StampPassThroughPlugin: ByteTransformer {
+    let id: String
+    let version: String
+
+    func makeStreamTransformer(context: TransformContext) -> any ByteStreamTransformer {
+        StampPassThroughTransformer()
+    }
+}
+
+private struct StampPassThroughTransformer: ByteStreamTransformer {
+    func transform(_ chunk: Data, isFinal: Bool) throws -> Data {
+        chunk
+    }
+}
+
 private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     guard let rangeHeader = request.value(forHTTPHeaderField: "Range") else {
         throw AsyncProxyCoordinatorTestError.missingRangeHeader
@@ -219,6 +234,154 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     #expect(secondPayload == Data(originData[0..<256]))
     let secondRecord = try #require(try cache.resourceRecord(for: resourceID))
     #expect(secondRecord.pluginsApplied == [stamp])
+}
+
+@Test func proxyCacheCoordinator_pluginStampCompatibility_match_keepsCacheHitBehavior() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-stamp-match")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 128
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 211) })
+    let resourceID = try makeCoordinatorResourceID()
+    let plugin = StampPassThroughPlugin(id: "stamp-pass-through", version: "1.0.0")
+
+    let cache = try CoreCache(baseDirectory: directory)
+    let pipeline = TransformPipeline(transformers: [plugin])
+    let coordinator = ProxyCacheCoordinator(coreCache: cache, transformPipeline: pipeline)
+
+    _ = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-63",
+        totalLength: totalLength,
+        fetchNetworkRange: { range in
+            Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        },
+        emit: { _ in }
+    )
+
+    var networkFetches = 0
+    var payload = Data()
+    let secondResult = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-63",
+        totalLength: totalLength,
+        allowNetworkFallback: false,
+        fetchNetworkRange: { _ in
+            networkFetches += 1
+            return Data()
+        },
+        emit: { payload.append($0) }
+    )
+
+    #expect(networkFetches == 0)
+    #expect(secondResult.chunks == [
+        ProxyStreamChunk(source: .cache, range: try #require(ByteRange(start: 0, endExclusive: 64)), byteCount: 64)
+    ])
+    #expect(payload == Data(originData[0..<64]))
+}
+
+@Test func proxyCacheCoordinator_pluginStampMismatch_cacheHit_invalidatesAndRefetches() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-stamp-mismatch-hit")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 128
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 199) })
+    let resourceID = try makeCoordinatorResourceID()
+    let cache = try CoreCache(baseDirectory: directory)
+
+    let pipelineV1 = TransformPipeline(transformers: [StampPassThroughPlugin(id: "stamp-pass-through", version: "1.0.0")])
+    let coordinatorV1 = ProxyCacheCoordinator(coreCache: cache, transformPipeline: pipelineV1)
+    _ = try coordinatorV1.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-63",
+        totalLength: totalLength,
+        fetchNetworkRange: { range in
+            Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        },
+        emit: { _ in }
+    )
+
+    let pipelineV2 = TransformPipeline(transformers: [StampPassThroughPlugin(id: "stamp-pass-through", version: "2.0.0")])
+    let coordinatorV2 = ProxyCacheCoordinator(coreCache: cache, transformPipeline: pipelineV2)
+
+    var networkFetches = 0
+    var payload = Data()
+    let result = try coordinatorV2.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-63",
+        totalLength: totalLength,
+        fetchNetworkRange: { range in
+            networkFetches += 1
+            return Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        },
+        emit: { payload.append($0) }
+    )
+
+    #expect(networkFetches == 1)
+    #expect(result.chunks == [
+        ProxyStreamChunk(source: .network, range: try #require(ByteRange(start: 0, endExclusive: 64)), byteCount: 64)
+    ])
+    #expect(payload == Data(originData[0..<64]))
+
+    let record = try #require(try cache.resourceRecord(for: resourceID))
+    #expect(record.pluginsApplied == [PluginStamp(id: "stamp-pass-through", version: "2.0.0")])
+}
+
+@Test func proxyCacheCoordinator_pluginStampMismatch_partialHit_invalidatesAndRefetchesRequestedRange() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-stamp-mismatch-partial")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 256
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 193) })
+    let resourceID = try makeCoordinatorResourceID()
+    let cache = try CoreCache(baseDirectory: directory)
+
+    let coordinatorV1 = ProxyCacheCoordinator(
+        coreCache: cache,
+        transformPipeline: TransformPipeline(transformers: [StampPassThroughPlugin(id: "stamp-pass-through", version: "1.0.0")])
+    )
+    _ = try coordinatorV1.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-63",
+        totalLength: totalLength,
+        fetchNetworkRange: { range in
+            Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        },
+        emit: { _ in }
+    )
+
+    let coordinatorV2 = ProxyCacheCoordinator(
+        coreCache: cache,
+        transformPipeline: TransformPipeline(transformers: [StampPassThroughPlugin(id: "stamp-pass-through", version: "2.0.0")])
+    )
+
+    var networkFetches = 0
+    var payload = Data()
+    let result = try coordinatorV2.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-127",
+        totalLength: totalLength,
+        fetchNetworkRange: { range in
+            networkFetches += 1
+            return Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        },
+        emit: { payload.append($0) }
+    )
+
+    #expect(networkFetches == 1)
+    #expect(result.chunks == [
+        ProxyStreamChunk(source: .network, range: try #require(ByteRange(start: 0, endExclusive: 128)), byteCount: 128)
+    ])
+    #expect(payload == Data(originData[0..<128]))
 }
 
 @Test func proxyCacheCoordinator_offlineMode_cacheHit_servesFromDiskWithoutNetworkFallback() throws {
