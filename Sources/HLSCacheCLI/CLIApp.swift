@@ -582,13 +582,24 @@ struct CLIApp {
         }
 
         let stillPresent = context.facade.listAliases().contains { $0.alias == alias }
-        io.writeLine("Post-clear verification:")
-        io.writeLine("Alias state: \(stillPresent ? "present" : "removed")")
+        let aliasState = stillPresent ? "present" : "removed"
+        let cacheBytes: Int64? = stillPresent ? try context.facade.cacheInfo(alias: alias).totalBytesOnDisk : nil
+        let cacheBytesStatus: String = {
+            if cacheBytes != nil {
+                return "ok"
+            }
+            return removeAliasMetadata ? "unavailable_metadata_removed" : "unavailable_alias_missing"
+        }()
 
-        if stillPresent {
-            let info = try context.facade.cacheInfo(alias: alias)
-            io.writeLine("Cache bytes: \(info.totalBytesOnDisk)")
-        }
+        io.writeLine("Post-clear verification:")
+        io.writeLine("Alias state: \(aliasState)")
+        io.writeLine("Cache bytes: \(cacheBytes.map(String.init) ?? "unavailable")")
+        writeClearVerificationField("scope", "alias")
+        writeClearVerificationField("alias", alias)
+        writeClearVerificationField("metadata_removed", String(removeAliasMetadata))
+        writeClearVerificationField("alias_state", aliasState)
+        writeClearVerificationField("cache_bytes", cacheBytes.map(String.init) ?? "unavailable")
+        writeClearVerificationField("cache_bytes_status", cacheBytesStatus)
 
         return 0
     }
@@ -604,20 +615,35 @@ struct CLIApp {
         }
 
         let aliasesAfter = context.facade.listAliases()
-        io.writeLine("Post-clear verification:")
-        io.writeLine("Alias count: \(aliasesAfter.count)")
-
-        if !removeAliasMetadata {
-            var totalBytes: Int64 = 0
+        let totalBytes: Int64? = {
+            guard !removeAliasMetadata else {
+                return nil
+            }
+            var bytes: Int64 = 0
             for record in aliasesBefore {
                 if aliasesAfter.contains(where: { $0.alias == record.alias }) {
-                    totalBytes += try context.facade.cacheInfo(alias: record.alias).totalBytesOnDisk
+                    bytes += (try? context.facade.cacheInfo(alias: record.alias).totalBytesOnDisk) ?? 0
                 }
             }
-            io.writeLine("Total cache bytes across aliases: \(totalBytes)")
-        }
+            return bytes
+        }()
+        let totalBytesStatus = removeAliasMetadata ? "unavailable_metadata_removed" : "ok"
+
+        io.writeLine("Post-clear verification:")
+        io.writeLine("Alias count: \(aliasesAfter.count)")
+        io.writeLine("Total cache bytes across aliases: \(totalBytes.map(String.init) ?? "unavailable")")
+        writeClearVerificationField("scope", "all")
+        writeClearVerificationField("metadata_removed", String(removeAliasMetadata))
+        writeClearVerificationField("alias_count_before", String(aliasesBefore.count))
+        writeClearVerificationField("alias_count_after", String(aliasesAfter.count))
+        writeClearVerificationField("total_cache_bytes_after", totalBytes.map(String.init) ?? "unavailable")
+        writeClearVerificationField("total_cache_bytes_status", totalBytesStatus)
 
         return 0
+    }
+
+    private func writeClearVerificationField(_ key: String, _ value: String) {
+        io.writeLine("verify.\(key)=\(value)")
     }
 
     private func runExportMP4Command(_ command: ExportMP4Command) -> Int32 {
