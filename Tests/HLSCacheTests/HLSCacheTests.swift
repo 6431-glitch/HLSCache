@@ -163,6 +163,218 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(infoAfter.totalBytesOnDisk >= Int64(payload.count))
 }
 
+@Test func facade_updateRemoteURL_emitsRotationPolicyMetadataForContinuityDebugging() throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-rotation-policy-logging")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let logger = RecordingStructuredLogger()
+    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger)
+    _ = try facade.register(
+        alias: "MDROTL",
+        assetID: "asset-rotation-logging",
+        remoteURL: try #require(URL(string: "https://origin-a.example.com/master.m3u8"))
+    )
+
+    _ = try facade.updateRemoteURL(
+        alias: "MDROTL",
+        remoteURL: try #require(URL(string: "https://origin-b.example.com/master.m3u8"))
+    )
+
+    let event = try #require(
+        logger.events().first { $0.operation == "updateRemoteURL" && $0.metadata["alias"] == "MDROTL" }
+    )
+    #expect(event.metadata["rotationPolicy"] == "cacheKey_stable_resourceKey_strict_url_match")
+    #expect(event.metadata["oldHost"] == "origin-a.example.com")
+    #expect(event.metadata["newHost"] == "origin-b.example.com")
+    #expect(event.metadata["hostChanged"] == "true")
+}
+
+@Test func facade_updateRemoteURL_crossOriginRotation_missesNewURLsButPreservesPerURLCacheContinuity() async throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-rotation-policy-e2e")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let oldPlaylistURL = try #require(URL(string: "https://origin-a.example.com/hls/media.m3u8"))
+    let newPlaylistURL = try #require(URL(string: "https://origin-b.example.com/hls/media.m3u8"))
+    let oldSegmentURL = try #require(URL(string: "https://origin-a.example.com/hls/seg-1.ts"))
+    let newSegmentURL = try #require(URL(string: "https://origin-b.example.com/hls/seg-1.ts"))
+    let oldKeyURL = try #require(URL(string: "https://origin-a.example.com/hls/keys/enc.key"))
+    let newKeyURL = try #require(URL(string: "https://origin-b.example.com/hls/keys/enc.key"))
+
+    let oldPlaylistPayload = Data("#EXTM3U\n#EXT-X-ENDLIST\n".utf8)
+    let newPlaylistPayload = Data("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-ENDLIST\n".utf8)
+    let oldSegmentPayload = Data((0..<12).map { UInt8($0) })
+    let newSegmentPayload = Data((100..<112).map { UInt8($0) })
+    let oldKeyPayload = Data([1, 2, 3, 4, 5, 6])
+    let newKeyPayload = Data([9, 8, 7, 6, 5, 4])
+    let originRequestCounter = OriginRequestCounter()
+
+    let originHeaders = ["X-Origin-Token": "token-rotation-1"]
+    let sessionConfiguration = URLSessionConfiguration.ephemeral
+    sessionConfiguration.protocolClasses = [RotationContinuityOriginURLProtocol.self]
+    let originSession = URLSession(configuration: sessionConfiguration)
+
+    RotationContinuityOriginURLProtocol.setHandler { request in
+        #expect(request.value(forHTTPHeaderField: "X-Origin-Token") == originHeaders["X-Origin-Token"])
+        let url = try #require(request.url)
+        let method = (request.httpMethod ?? "GET").uppercased()
+        originRequestCounter.record(method: method, url: url)
+
+        let payload: Data
+        let contentType: String
+        switch url {
+        case oldPlaylistURL:
+            payload = oldPlaylistPayload
+            contentType = "application/vnd.apple.mpegurl"
+        case newPlaylistURL:
+            payload = newPlaylistPayload
+            contentType = "application/vnd.apple.mpegurl"
+        case oldSegmentURL:
+            payload = oldSegmentPayload
+            contentType = "video/mp2t"
+        case newSegmentURL:
+            payload = newSegmentPayload
+            contentType = "video/mp2t"
+        case oldKeyURL:
+            payload = oldKeyPayload
+            contentType = "application/octet-stream"
+        case newKeyURL:
+            payload = newKeyPayload
+            contentType = "application/octet-stream"
+        default:
+            let response = try #require(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 404,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Length": "0"]
+                )
+            )
+            return (response, Data())
+        }
+
+        if method == "HEAD" {
+            let response = try #require(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: [
+                        "Content-Length": String(payload.count),
+                        "Content-Type": contentType
+                    ]
+                )
+            )
+            return (response, Data())
+        }
+
+        let totalLength = Int64(payload.count)
+        let rangeValue = request.value(forHTTPHeaderField: "Range")
+        let parsedRange = rangeValue.flatMap { ByteRange.parseHTTPRange($0, totalLength: totalLength) }
+            ?? ByteRange(start: 0, endExclusive: totalLength)
+        let range = try #require(parsedRange)
+        let start = Int(range.start)
+        let endExclusive = Int(range.endExclusive)
+        let slice = Data(payload[start..<endExclusive])
+        let response = try #require(
+            HTTPURLResponse(
+                url: url,
+                statusCode: 206,
+                httpVersion: "HTTP/1.1",
+                headerFields: [
+                    "Content-Length": String(slice.count),
+                    "Content-Range": "bytes \(range.start)-\(range.endExclusive - 1)/\(payload.count)",
+                    "Content-Type": contentType
+                ]
+            )
+        )
+        return (response, slice)
+    }
+    defer { RotationContinuityOriginURLProtocol.resetHandler() }
+
+    let facade = HLSCacheFacade(baseDirectory: directory, networkSession: originSession)
+    _ = try facade.register(
+        alias: "MDROT2",
+        assetID: "asset-rotation-policy",
+        remoteURL: oldPlaylistURL,
+        headers: originHeaders
+    )
+    _ = try facade.startServer(host: "127.0.0.1", port: 0)
+    defer { facade.stopServer() }
+
+    let proxySession = URLSession(configuration: .ephemeral)
+    let oldPlaylistProxyURL = try facade.proxyURL(for: "MDROT2", kind: .raw, remoteURL: oldPlaylistURL)
+    let oldSegmentProxyURL = try facade.proxyURL(for: "MDROT2", kind: .segment, remoteURL: oldSegmentURL)
+    let oldKeyProxyURL = try facade.proxyURL(for: "MDROT2", kind: .key, remoteURL: oldKeyURL)
+
+    let (oldPlaylistData, oldPlaylistResponse) = try await proxySession.data(from: oldPlaylistProxyURL)
+    let oldPlaylistHTTP = try #require(oldPlaylistResponse as? HTTPURLResponse)
+    #expect(oldPlaylistHTTP.statusCode == 200)
+    #expect(oldPlaylistData == oldPlaylistPayload)
+
+    let (oldSegmentData, oldSegmentResponse) = try await proxySession.data(from: oldSegmentProxyURL)
+    let oldSegmentHTTP = try #require(oldSegmentResponse as? HTTPURLResponse)
+    #expect(oldSegmentHTTP.statusCode == 200)
+    #expect(oldSegmentData == oldSegmentPayload)
+
+    let (oldKeyData, oldKeyResponse) = try await proxySession.data(from: oldKeyProxyURL)
+    let oldKeyHTTP = try #require(oldKeyResponse as? HTTPURLResponse)
+    #expect(oldKeyHTTP.statusCode == 200)
+    #expect(oldKeyData == oldKeyPayload)
+
+    let oldPlaylistOriginCountAfterFirstFetch = originRequestCounter.totalRequests(for: oldPlaylistURL)
+    let oldSegmentOriginCountAfterFirstFetch = originRequestCounter.totalRequests(for: oldSegmentURL)
+    let oldKeyOriginCountAfterFirstFetch = originRequestCounter.totalRequests(for: oldKeyURL)
+    #expect(oldPlaylistOriginCountAfterFirstFetch >= 1)
+    #expect(oldSegmentOriginCountAfterFirstFetch >= 1)
+    #expect(oldKeyOriginCountAfterFirstFetch >= 1)
+
+    _ = try facade.updateRemoteURL(alias: "MDROT2", remoteURL: newPlaylistURL)
+
+    let newPlaylistProxyURL = try facade.proxyURL(for: "MDROT2", kind: .raw, remoteURL: newPlaylistURL)
+    let newSegmentProxyURL = try facade.proxyURL(for: "MDROT2", kind: .segment, remoteURL: newSegmentURL)
+    let newKeyProxyURL = try facade.proxyURL(for: "MDROT2", kind: .key, remoteURL: newKeyURL)
+
+    let (newPlaylistData, newPlaylistResponse) = try await proxySession.data(from: newPlaylistProxyURL)
+    let newPlaylistHTTP = try #require(newPlaylistResponse as? HTTPURLResponse)
+    #expect(newPlaylistHTTP.statusCode == 200)
+    #expect(newPlaylistData == newPlaylistPayload)
+
+    let (newSegmentData, newSegmentResponse) = try await proxySession.data(from: newSegmentProxyURL)
+    let newSegmentHTTP = try #require(newSegmentResponse as? HTTPURLResponse)
+    #expect(newSegmentHTTP.statusCode == 200)
+    #expect(newSegmentData == newSegmentPayload)
+
+    let (newKeyData, newKeyResponse) = try await proxySession.data(from: newKeyProxyURL)
+    let newKeyHTTP = try #require(newKeyResponse as? HTTPURLResponse)
+    #expect(newKeyHTTP.statusCode == 200)
+    #expect(newKeyData == newKeyPayload)
+
+    let newPlaylistOriginCountAfterFirstFetch = originRequestCounter.totalRequests(for: newPlaylistURL)
+    let newSegmentOriginCountAfterFirstFetch = originRequestCounter.totalRequests(for: newSegmentURL)
+    let newKeyOriginCountAfterFirstFetch = originRequestCounter.totalRequests(for: newKeyURL)
+    #expect(newPlaylistOriginCountAfterFirstFetch >= 1)
+    #expect(newSegmentOriginCountAfterFirstFetch >= 1)
+    #expect(newKeyOriginCountAfterFirstFetch >= 1)
+
+    let (secondNewPlaylistData, _) = try await proxySession.data(from: newPlaylistProxyURL)
+    let (secondNewSegmentData, _) = try await proxySession.data(from: newSegmentProxyURL)
+    let (secondNewKeyData, _) = try await proxySession.data(from: newKeyProxyURL)
+    #expect(secondNewPlaylistData == newPlaylistPayload)
+    #expect(secondNewSegmentData == newSegmentPayload)
+    #expect(secondNewKeyData == newKeyPayload)
+    #expect(originRequestCounter.totalRequests(for: newPlaylistURL) == newPlaylistOriginCountAfterFirstFetch)
+    #expect(originRequestCounter.totalRequests(for: newSegmentURL) == newSegmentOriginCountAfterFirstFetch)
+    #expect(originRequestCounter.totalRequests(for: newKeyURL) == newKeyOriginCountAfterFirstFetch)
+
+    let (oldSegmentAfterRotation, _) = try await proxySession.data(from: oldSegmentProxyURL)
+    let (oldKeyAfterRotation, _) = try await proxySession.data(from: oldKeyProxyURL)
+    #expect(oldSegmentAfterRotation == oldSegmentPayload)
+    #expect(oldKeyAfterRotation == oldKeyPayload)
+    #expect(originRequestCounter.totalRequests(for: oldPlaylistURL) == oldPlaylistOriginCountAfterFirstFetch)
+    #expect(originRequestCounter.totalRequests(for: oldSegmentURL) == oldSegmentOriginCountAfterFirstFetch)
+    #expect(originRequestCounter.totalRequests(for: oldKeyURL) == oldKeyOriginCountAfterFirstFetch)
+}
+
 @Test func facade_proxyRouting_buildAndDecode_roundTripsEncodedRemoteURL() throws {
     let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-proxy-routing")
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -763,6 +975,57 @@ private final class ProxyRuntimeOriginURLProtocol: URLProtocol, @unchecked Senda
 }
 
 private final class RewrittenRouteOriginURLProtocol: URLProtocol, @unchecked Sendable {
+    typealias Handler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var handler: Handler?
+
+    static func setHandler(_ handler: @escaping Handler) {
+        lock.lock()
+        self.handler = handler
+        lock.unlock()
+    }
+
+    static func resetHandler() {
+        lock.lock()
+        handler = nil
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.lock.lock()
+        let handler = Self.handler
+        Self.lock.unlock()
+
+        guard let handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unknown))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if !data.isEmpty {
+                client?.urlProtocol(self, didLoad: data)
+            }
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private final class RotationContinuityOriginURLProtocol: URLProtocol, @unchecked Sendable {
     typealias Handler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
 
     private static let lock = NSLock()

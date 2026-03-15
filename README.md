@@ -103,6 +103,13 @@ The system intentionally separates identity from transport URLs.
 
 Remote URLs are not used as identity because HLS URLs frequently change due to signed tokens, CDN rotation, or backend policy. By decoupling identity from location, cached content remains valid across URL updates.
 
+### Remote URL Rotation Continuity Policy
+
+- Asset continuity is preserved across rotation: `Alias` and `AssetID` keep the same `CacheKey`.
+- Resource continuity is strict URL-based for playlist/segment/key/raw bytes: cached bytes are reused only when the canonical resource URL matches.
+- Cross-origin/domain URL rotation is treated as a resource miss (new URL => new resource key => fresh fetch), while previously cached bytes remain available for their original URLs until explicit cache clear/eviction.
+- `updateRemoteURL` and proxy request logs expose continuity metadata (`rotationPolicy`, host-change signal, and per-request continuity decision) for debugging.
+
 ---
 
 ## Playback Flow
@@ -208,6 +215,7 @@ If a manifest is corrupted (for example after interruption), it is treated as a 
 - Alias mappings are persisted at `BaseDirectory/alias_registry.json`.
 - Writes are atomic (`alias_registry.json.tmp` + replace), preventing partial JSON files.
 - `updateRemoteURL(alias:remoteURL:)` only rotates the remote URL metadata and preserves stable `AssetID`/`CacheKey` identity.
+- Rotation policy is explicit: cache identity stays stable at asset level, while resource-byte reuse remains strict canonical-URL match for playlist/segment/key/raw requests.
 - Registry access is synchronized for safe concurrent reads and mutations.
 
 ### Shared Directory Ownership Contract
