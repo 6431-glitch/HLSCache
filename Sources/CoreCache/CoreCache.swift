@@ -514,7 +514,8 @@ public final class CoreCache: @unchecked Sendable {
         let correlationID = UUID().uuidString
 
         do {
-            let manifestIDs = Set(manifestStore.allManifestResourceIDs())
+            let manifestScan = manifestStore.scanManifestResourceIDs()
+            let manifestIDs = Set(manifestScan.resourceIDs)
             let dataIDs = Set(diskStore.allStoredResourceIDs())
 
             let orphanManifestIDs = manifestIDs.subtracting(dataIDs).sorted(by: Self.resourceIDSort)
@@ -569,7 +570,9 @@ public final class CoreCache: @unchecked Sendable {
                         "action": "summary",
                         "orphanManifestCount": String(orphanManifestIDs.count),
                         "orphanDataCount": String(orphanDataIDs.count),
-                        "purgedOrphanDataBytes": String(purgedOrphanDataBytes)
+                        "purgedOrphanDataBytes": String(purgedOrphanDataBytes),
+                        "recoveredCorruptedManifestCount": String(manifestScan.recoveredCorruptedManifestCount),
+                        "purgedCorruptedManifestDataBytes": String(manifestScan.purgedCorruptedManifestDataBytes)
                     ]
                 )
             )
