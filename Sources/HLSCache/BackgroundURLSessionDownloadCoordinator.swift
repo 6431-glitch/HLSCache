@@ -10,9 +10,11 @@ public final class BackgroundURLSessionDownloadCoordinator: @unchecked Sendable 
 
     public init(
         baseDirectory: URL,
-        recoveryCoordinator: BackgroundDownloadRecoveryCoordinator? = nil
+        recoveryCoordinator: BackgroundDownloadRecoveryCoordinator? = nil,
+        logger: any StructuredLogger = NoopStructuredLogger()
     ) {
-        self.recoveryCoordinator = recoveryCoordinator ?? BackgroundDownloadRecoveryCoordinator(baseDirectory: baseDirectory)
+        self.recoveryCoordinator = recoveryCoordinator
+            ?? BackgroundDownloadRecoveryCoordinator(baseDirectory: baseDirectory, logger: logger)
     }
 
     @discardableResult
