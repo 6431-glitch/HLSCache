@@ -7,6 +7,7 @@ struct CLIAppContext {
     let settingsStore: CLISettingsStore
     let facade: HLSCacheFacade
     let serverBaseURL: URL
+    let outputFormat: CLIOutputFormat
 
     init(arguments: CLIArguments, fileManager: FileManager = .default) throws {
         let resolvedBaseDirectory = arguments.baseDirectory ?? defaultBaseDirectory(fileManager: fileManager)
@@ -36,6 +37,7 @@ struct CLIAppContext {
         self.settingsStore = settingsStore
         self.facade = facade
         self.serverBaseURL = serverBaseURL
+        self.outputFormat = arguments.outputFormat
     }
 }
 

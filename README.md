@@ -367,6 +367,7 @@ Optional runtime flags:
 - `--base-directory <path>`
 - `--host <host>`
 - `--port <port>`
+- `--output-format <text|json>`
 - `--help`
 
 Add/register alias mapping from command line:
@@ -394,6 +395,7 @@ Non-interactive proxy operations:
 ```bash
 swift run HLSCacheCLI proxy status
 swift run HLSCacheCLI proxy restart
+swift run HLSCacheCLI --output-format json proxy status
 ```
 
 Proxy command output contract:
@@ -404,6 +406,19 @@ Proxy command output contract:
   - `0`: success
   - `2`: runtime unavailable (`proxy status`)
   - `3`: restart failure (`proxy restart`)
+
+JSON output mode (`--output-format json`):
+- Versioned schema field is always present: `schemaVersion` (current `"1"`).
+- `list` JSON payload:
+  - `command` = `"list"`
+  - `aliases` array items include `alias`, `assetID`, `remoteURL`, `updated`, `cacheBytes`.
+- `proxy status` JSON payload:
+  - `command` = `"proxy.status"`
+  - required fields: `state`, `host`, `port`, `baseURL`.
+- `proxy restart` JSON payload:
+  - `command` = `"proxy.restart"`
+  - `result` (`success` or `restart_failure`), `attemptedHost`, `attemptedPort`, `startupError`, and nested `status`.
+- When runtime details are unavailable, JSON fields are explicitly set to `"unavailable"` for deterministic key presence.
 
 Clear cache data from command line (`--yes` is required for non-interactive destructive execution):
 
