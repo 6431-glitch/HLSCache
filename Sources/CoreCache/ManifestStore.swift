@@ -10,6 +10,12 @@ public struct StoredManifestRecord: Sendable {
     }
 }
 
+struct ManifestResourceIDScanResult: Sendable {
+    let resourceIDs: [ResourceID]
+    let recoveredCorruptedManifestCount: Int
+    let purgedCorruptedManifestDataBytes: Int64
+}
+
 public final class ManifestStore: @unchecked Sendable {
     private let fileManager: FileManager
     private let baseDirectory: URL
@@ -169,10 +175,18 @@ public final class ManifestStore: @unchecked Sendable {
     }
 
     func allManifestResourceIDs() -> [ResourceID] {
+        scanManifestResourceIDs().resourceIDs
+    }
+
+    func scanManifestResourceIDs() -> ManifestResourceIDScanResult {
         queue.sync(flags: .barrier) {
             let cacheDirectory = baseDirectory.appendingPathComponent("cache", isDirectory: true)
             guard fileManager.fileExists(atPath: cacheDirectory.path) else {
-                return []
+                return ManifestResourceIDScanResult(
+                    resourceIDs: [],
+                    recoveredCorruptedManifestCount: 0,
+                    purgedCorruptedManifestDataBytes: 0
+                )
             }
 
             guard let enumerator = fileManager.enumerator(
@@ -180,12 +194,18 @@ public final class ManifestStore: @unchecked Sendable {
                 includingPropertiesForKeys: [.isRegularFileKey],
                 options: [.skipsHiddenFiles]
             ) else {
-                return []
+                return ManifestResourceIDScanResult(
+                    resourceIDs: [],
+                    recoveredCorruptedManifestCount: 0,
+                    purgedCorruptedManifestDataBytes: 0
+                )
             }
 
             let cacheComponents = cacheDirectory.resolvingSymlinksInPath().pathComponents
             var resourceIDs: [ResourceID] = []
             resourceIDs.reserveCapacity(32)
+            var recoveredCorruptedManifestCount = 0
+            var purgedCorruptedManifestDataBytes: Int64 = 0
 
             for case let fileURL as URL in enumerator {
                 guard let resourceID = resourceID(
@@ -204,27 +224,35 @@ public final class ManifestStore: @unchecked Sendable {
                 do {
                     _ = try decoder.decode(ResourceRecord.self, from: data)
                 } catch {
-                    quarantineCorruptedManifest(
+                    if let purgedDataBytes = quarantineCorruptedManifest(
                         fileURL: fileURL,
                         resourceID: resourceID,
                         decodeError: error,
                         source: "allManifestResourceIDs"
-                    )
+                    ) {
+                        recoveredCorruptedManifestCount += 1
+                        purgedCorruptedManifestDataBytes += purgedDataBytes
+                    }
                     continue
                 }
                 resourceIDs.append(resourceID)
             }
 
-            return resourceIDs
+            return ManifestResourceIDScanResult(
+                resourceIDs: resourceIDs,
+                recoveredCorruptedManifestCount: recoveredCorruptedManifestCount,
+                purgedCorruptedManifestDataBytes: purgedCorruptedManifestDataBytes
+            )
         }
     }
 
+    @discardableResult
     private func quarantineCorruptedManifest(
         fileURL: URL,
         resourceID: ResourceID,
         decodeError: Error,
         source: String
-    ) {
+    ) -> Int64? {
         let quarantineURL = fileURL.appendingPathExtension("corrupt")
         let dataFileURL = dataFileURL(for: resourceID)
         let correlationID = UUID().uuidString
@@ -269,6 +297,7 @@ public final class ManifestStore: @unchecked Sendable {
                     ]
                 )
             )
+            return purgedDataBytes
         } catch {
             logger.log(
                 StructuredLogEvent(
@@ -290,6 +319,7 @@ public final class ManifestStore: @unchecked Sendable {
                     ]
                 )
             )
+            return nil
         }
     }
 

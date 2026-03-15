@@ -421,6 +421,12 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(recoveryEvent.metadata["recoveryAction"] == "quarantine_manifest_and_purge_data")
     #expect(recoveryEvent.metadata["purgedDataBytes"] == String(initialPayload.count))
 
+    let summaryEvent = try #require(logger.events().first {
+        $0.operation == "reconcileStartup" && $0.metadata["action"] == "summary"
+    })
+    #expect(summaryEvent.metadata["recoveredCorruptedManifestCount"] == "1")
+    #expect(summaryEvent.metadata["purgedCorruptedManifestDataBytes"] == String(initialPayload.count))
+
     #expect(
         try restarted.plan(resource: resource, requested: try br(0, Int64(initialPayload.count)))
             == [.network(try br(0, Int64(initialPayload.count)))]
@@ -439,6 +445,41 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(restoredRecord.completedRanges.contains(try br(0, Int64(recoveredPayload.count))))
     let readBack = try restarted.read(resource: resource, range: try br(0, Int64(recoveredPayload.count)))
     #expect(readBack == recoveredPayload)
+}
+
+@Test func coreCache_recovery_corruptedManifestWithoutData_isQuarantinedAndReportedAtStartup() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-recovery-corrupt-manifest-only")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let resource = try makeCoreCacheResourceID(suffix: "recover-corrupt-manifest-only.ts")
+    let manifestStore = ManifestStore(baseDirectory: directory)
+    try manifestStore.save(resourceID: resource, record: ResourceRecord(kind: .segment, expectedLength: 14))
+
+    let manifestURL = manifestStore.manifestFileURL(for: resource)
+    let corruptPayload = Data("{\"corrupt-only\":".utf8)
+    try corruptPayload.write(to: manifestURL)
+
+    let logger = RecordingStructuredLogger()
+    let restarted = try CoreCache(baseDirectory: directory, logger: logger)
+    let quarantineURL = manifestURL.appendingPathExtension("corrupt")
+
+    #expect(FileManager.default.fileExists(atPath: quarantineURL.path))
+    #expect(try Data(contentsOf: quarantineURL) == corruptPayload)
+    #expect(!FileManager.default.fileExists(atPath: manifestURL.path))
+    #expect(try restarted.resourceRecord(for: resource) == nil)
+
+    let recoveryEvent = try #require(logger.events().first {
+        $0.operation == "manifestDecodeRecovery" && $0.metadata["result"] == "recovered_decode_failure"
+    })
+    #expect(recoveryEvent.metadata["source"] == "allManifestResourceIDs")
+    #expect(recoveryEvent.metadata["cacheKey"] == resource.cacheKey.rawValue)
+    #expect(recoveryEvent.metadata["purgedDataBytes"] == "0")
+
+    let summaryEvent = try #require(logger.events().first {
+        $0.operation == "reconcileStartup" && $0.metadata["action"] == "summary"
+    })
+    #expect(summaryEvent.metadata["recoveredCorruptedManifestCount"] == "1")
+    #expect(summaryEvent.metadata["purgedCorruptedManifestDataBytes"] == "0")
 }
 
 @Test func coreCache_runtimeLoad_corruptedManifest_quarantinesAndPurgesPairedData() throws {
