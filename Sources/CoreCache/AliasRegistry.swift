@@ -68,11 +68,15 @@ public struct AssetRecord: Codable, Hashable, Sendable {
 }
 
 public final class AliasRegistry: @unchecked Sendable {
+    private static let corruptSnapshotRetentionLimit = 3
+    private static let corruptSnapshotFilenamePrefix = "alias_registry.json.corrupt."
+    private static let corruptSnapshotSequenceLock = NSLock()
+    private nonisolated(unsafe) static var corruptSnapshotSequence: UInt64 = 0
+
     private let fileManager: FileManager
     private let baseDirectory: URL
     private let fileURL: URL
     private let temporaryFileURL: URL
-    private let corruptFileURL: URL
     private let logger: any StructuredLogger
     private let queue = DispatchQueue(label: "CoreCache.AliasRegistry", attributes: .concurrent)
 
@@ -83,7 +87,6 @@ public final class AliasRegistry: @unchecked Sendable {
         self.baseDirectory = baseDirectory
         self.fileURL = baseDirectory.appendingPathComponent("alias_registry.json")
         self.temporaryFileURL = baseDirectory.appendingPathComponent("alias_registry.json.tmp")
-        self.corruptFileURL = baseDirectory.appendingPathComponent("alias_registry.json.corrupt")
         self.logger = logger
         loadFromDisk()
     }
@@ -210,13 +213,11 @@ public final class AliasRegistry: @unchecked Sendable {
         records = [:]
 
         do {
-            if fileManager.fileExists(atPath: corruptFileURL.path) {
-                try fileManager.removeItem(at: corruptFileURL)
-            }
-
+            let snapshotURL = makeCorruptSnapshotURL()
             if fileManager.fileExists(atPath: fileURL.path) {
-                try fileManager.moveItem(at: fileURL, to: corruptFileURL)
+                try fileManager.moveItem(at: fileURL, to: snapshotURL)
             }
+            let prunedSnapshots = try enforceCorruptSnapshotRetention()
 
             try saveToDiskAtomic()
             logger.log(
@@ -227,8 +228,12 @@ public final class AliasRegistry: @unchecked Sendable {
                     metadata: [
                         "result": "recovered_decode_failure",
                         "registryPath": fileURL.path,
-                        "recoveryPath": corruptFileURL.path,
+                        "recoveryPath": snapshotURL.path,
                         "recoveryAction": "quarantine_and_reset",
+                        "retentionLimit": String(Self.corruptSnapshotRetentionLimit),
+                        "retentionAction": prunedSnapshots.isEmpty ? "none" : "pruned_old_snapshots",
+                        "prunedSnapshotCount": String(prunedSnapshots.count),
+                        "prunedSnapshotPaths": prunedSnapshots.map(\.path).joined(separator: ","),
                         "error": String(describing: decodeError)
                     ]
                 )
@@ -242,13 +247,61 @@ public final class AliasRegistry: @unchecked Sendable {
                     metadata: [
                         "result": "recovery_failed",
                         "registryPath": fileURL.path,
-                        "recoveryPath": corruptFileURL.path,
+                        "recoveryPath": "",
                         "error": String(describing: decodeError),
                         "recoveryError": String(describing: error)
                     ]
                 )
             )
         }
+    }
+
+    private func makeCorruptSnapshotURL() -> URL {
+        let timestampMilliseconds = Int64(Date().timeIntervalSince1970 * 1000)
+        let sequence = Self.nextCorruptSnapshotSequence()
+        let filename = String(
+            format: "\(Self.corruptSnapshotFilenamePrefix)%013lld-%020llu",
+            timestampMilliseconds,
+            sequence
+        )
+        return baseDirectory.appendingPathComponent(filename)
+    }
+
+    private func enforceCorruptSnapshotRetention() throws -> [URL] {
+        let snapshots = try existingCorruptSnapshotURLsSortedByAge()
+        let overflowCount = snapshots.count - Self.corruptSnapshotRetentionLimit
+        guard overflowCount > 0 else {
+            return []
+        }
+
+        var prunedSnapshots: [URL] = []
+        for snapshotURL in snapshots.prefix(overflowCount) {
+            if fileManager.fileExists(atPath: snapshotURL.path) {
+                try fileManager.removeItem(at: snapshotURL)
+                prunedSnapshots.append(snapshotURL)
+            }
+        }
+
+        return prunedSnapshots
+    }
+
+    private func existingCorruptSnapshotURLsSortedByAge() throws -> [URL] {
+        let entries = try fileManager.contentsOfDirectory(
+            at: baseDirectory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )
+
+        return entries
+            .filter { $0.lastPathComponent.hasPrefix(Self.corruptSnapshotFilenamePrefix) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    private static func nextCorruptSnapshotSequence() -> UInt64 {
+        corruptSnapshotSequenceLock.lock()
+        defer { corruptSnapshotSequenceLock.unlock() }
+        corruptSnapshotSequence += 1
+        return corruptSnapshotSequence
     }
 
     private func saveToDiskAtomic() throws {

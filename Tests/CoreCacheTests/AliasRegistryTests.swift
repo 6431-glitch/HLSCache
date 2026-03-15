@@ -11,6 +11,17 @@ private func makeTempDirectory(prefix: String = "alias-registry-tests") throws -
     return directory
 }
 
+private func aliasRegistryCorruptSnapshots(in directory: URL) throws -> [URL] {
+    let entries = try FileManager.default.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: [.isRegularFileKey],
+        options: [.skipsHiddenFiles]
+    )
+    return entries
+        .filter { $0.lastPathComponent.hasPrefix("alias_registry.json.corrupt.") }
+        .sorted { $0.lastPathComponent < $1.lastPathComponent }
+}
+
 private final class RecordingStructuredLogger: StructuredLogger, @unchecked Sendable {
     private let lock = NSLock()
     private var storedEvents: [StructuredLogEvent] = []
@@ -244,10 +255,11 @@ private final class RecordingStructuredLogger: StructuredLogger, @unchecked Send
 
     #expect(registry.allRecords().isEmpty)
 
-    let corruptFileURL = directory.appendingPathComponent("alias_registry.json.corrupt")
+    let snapshots = try aliasRegistryCorruptSnapshots(in: directory)
+    #expect(snapshots.count == 1)
+    let snapshotURL = try #require(snapshots.first)
     #expect(FileManager.default.fileExists(atPath: registryFileURL.path))
-    #expect(FileManager.default.fileExists(atPath: corruptFileURL.path))
-    #expect(try Data(contentsOf: corruptFileURL) == corruptData)
+    #expect(try Data(contentsOf: snapshotURL) == corruptData)
 
     let restoredData = try Data(contentsOf: registryFileURL)
     let restoredRecords = try JSONDecoder.withISO8601.decode([Alias: AssetRecord].self, from: restoredData)
@@ -261,9 +273,48 @@ private final class RecordingStructuredLogger: StructuredLogger, @unchecked Send
     )
     #expect(event.level == .warning)
     #expect(event.metadata["registryPath"] == registryFileURL.path)
-    #expect(event.metadata["recoveryPath"] == corruptFileURL.path)
+    let eventRecoveryPath = URL(fileURLWithPath: event.metadata["recoveryPath"] ?? "")
+        .resolvingSymlinksInPath()
+        .path
+    #expect(eventRecoveryPath == snapshotURL.resolvingSymlinksInPath().path)
     #expect(event.metadata["recoveryAction"] == "quarantine_and_reset")
+    #expect(event.metadata["retentionAction"] == "none")
+    #expect(event.metadata["prunedSnapshotCount"] == "0")
     #expect(!(event.metadata["error"] ?? "").isEmpty)
+}
+
+@Test func aliasRegistry_decodeFailure_retainsTimestampedSnapshots_withBoundedRetention() throws {
+    let directory = try makeTempDirectory(prefix: "alias-registry-decode-failure-retention")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let logger = RecordingStructuredLogger()
+    let registryFileURL = directory.appendingPathComponent("alias_registry.json")
+
+    for index in 0..<5 {
+        let corruptData = Data("{invalid-\(index)".utf8)
+        try corruptData.write(to: registryFileURL)
+        _ = AliasRegistry(baseDirectory: directory, logger: logger)
+    }
+
+    let snapshots = try aliasRegistryCorruptSnapshots(in: directory)
+    #expect(snapshots.count == 3)
+
+    let retainedPayloads = try snapshots.map { snapshotURL in
+        String(decoding: try Data(contentsOf: snapshotURL), as: UTF8.self)
+    }
+    #expect(!retainedPayloads.contains("{invalid-0"))
+    #expect(!retainedPayloads.contains("{invalid-1"))
+    #expect(retainedPayloads.contains("{invalid-4"))
+
+    let pruneEvent = try #require(
+        logger.events().first {
+            $0.operation == "loadAliasRegistry"
+                && $0.metadata["result"] == "recovered_decode_failure"
+                && $0.metadata["retentionAction"] == "pruned_old_snapshots"
+        }
+    )
+    #expect((Int(pruneEvent.metadata["prunedSnapshotCount"] ?? "0") ?? 0) > 0)
+    #expect(!(pruneEvent.metadata["prunedSnapshotPaths"] ?? "").isEmpty)
 }
 
 @Test func aliasRegistry_decodeFailure_recoveryStillAllowsFutureWrites() throws {
