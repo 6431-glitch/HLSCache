@@ -16,11 +16,25 @@ public enum HLSPlaylistRewriter {
         playlistURL: URL,
         proxyURLBuilder: ProxyURLBuilder
     ) throws -> String {
-        let lines = playlist.components(separatedBy: .newlines)
-        let rewritten = try lines.map { line in
-            try rewriteLine(line, alias: alias, playlistURL: playlistURL, proxyURLBuilder: proxyURLBuilder)
+        let separatorRegex = try NSRegularExpression(pattern: "\r\n|\n|\r")
+        let fullRange = NSRange(playlist.startIndex..<playlist.endIndex, in: playlist)
+        let matches = separatorRegex.matches(in: playlist, range: fullRange)
+
+        var output = ""
+        var lineStart = playlist.startIndex
+        for match in matches {
+            guard let separatorRange = Range(match.range, in: playlist) else {
+                continue
+            }
+            let line = String(playlist[lineStart..<separatorRange.lowerBound])
+            output += try rewriteLine(line, alias: alias, playlistURL: playlistURL, proxyURLBuilder: proxyURLBuilder)
+            output += String(playlist[separatorRange])
+            lineStart = separatorRange.upperBound
         }
-        return rewritten.joined(separator: "\n")
+
+        let tail = String(playlist[lineStart...])
+        output += try rewriteLine(tail, alias: alias, playlistURL: playlistURL, proxyURLBuilder: proxyURLBuilder)
+        return output
     }
 
     private static func rewriteLine(

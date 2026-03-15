@@ -17,6 +17,21 @@ private func extractDirectiveURI(from directiveLine: String) -> String? {
     return String(directiveLine[captureRange])
 }
 
+private func countOccurrences(in text: String, token: String) -> Int {
+    guard !token.isEmpty else {
+        return 0
+    }
+    return text.components(separatedBy: token).count - 1
+}
+
+private func logicalLineCount(_ text: String) -> Int {
+    text
+        .replacingOccurrences(of: "\r\n", with: "\n")
+        .replacingOccurrences(of: "\r", with: "\n")
+        .components(separatedBy: "\n")
+        .count
+}
+
 @Test func playlistRewrite_smokeTest_rewritesSegmentsAndExtXKeyToLocalhostProxyRoutes() throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("hlscache-rewrite-smoke")
@@ -156,4 +171,41 @@ private func extractDirectiveURI(from directiveLine: String) -> String? {
     #expect(invocations.count == 1)
     #expect(invocations.first?.kind == .segment)
     #expect(invocations.first?.remoteURL.absoluteString == "https://cdn.example.com/v/seg.ts")
+}
+
+@Test func playlistRewrite_preservesSourceNewlineStyle_andLineCountStability() throws {
+    let playlistURL = try #require(URL(string: "https://cdn.example.com/newlines/media.m3u8"))
+    let newlineStyles = ["\n", "\r\n"]
+
+    for newline in newlineStyles {
+        let lines = [
+            "#EXTM3U",
+            "#EXT-X-VERSION:3",
+            "#EXT-X-KEY:METHOD=AES-128,URI=\"keys/key.bin\"",
+            "#EXT-X-MAP:URI=\"init.mp4\"",
+            "#EXTINF:4.0,",
+            "seg-1.ts",
+            "#EXT-X-ENDLIST"
+        ]
+        let playlist = lines.joined(separator: newline) + newline
+        let rewritten = try HLSPlaylistRewriter.rewrite(
+            playlist,
+            alias: "MDNL",
+            playlistURL: playlistURL
+        ) { alias, kind, remoteURL in
+            let encoded = remoteURL.absoluteString.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "url"
+            return try #require(URL(string: "http://127.0.0.1:8080/\(alias)/\(kind.rawValue)/\(encoded)"))
+        }
+
+        #expect(countOccurrences(in: rewritten, token: newline) == countOccurrences(in: playlist, token: newline))
+        #expect(logicalLineCount(rewritten) == logicalLineCount(playlist))
+        #expect(rewritten.contains("/MDNL/key/"))
+        #expect(rewritten.contains("/MDNL/seg/"))
+
+        if newline == "\r\n" {
+            #expect(!rewritten.contains("\n\n"))
+        } else {
+            #expect(!rewritten.contains("\r"))
+        }
+    }
 }
