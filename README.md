@@ -244,7 +244,7 @@ Each resource has:
   Includes `pluginsApplied` stamps (`id` + `version`) for transform compatibility tracking.
 
 Manifests are written atomically (temp file + replace).
-If a manifest is corrupted (for example after interruption), it is treated as a cache miss and rebuilt on subsequent writes.
+If a manifest decode fails, recovery quarantines it to `*.json.corrupt`, purges the paired `*.bin` data file to avoid invisible/untracked bytes, emits structured diagnostics, and then treats the request as a cache miss for deterministic rebuild.
 
 ### Alias Registry Persistence
 

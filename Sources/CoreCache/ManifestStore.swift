@@ -13,11 +13,17 @@ public struct StoredManifestRecord: Sendable {
 public final class ManifestStore: @unchecked Sendable {
     private let fileManager: FileManager
     private let baseDirectory: URL
+    private let logger: any StructuredLogger
     private let queue = DispatchQueue(label: "CoreCache.ManifestStore", attributes: .concurrent)
 
-    public init(baseDirectory: URL) {
+    public init(baseDirectory: URL, logger: any StructuredLogger = NoopStructuredLogger()) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
+        self.logger = logger
+    }
+
+    public convenience init(baseDirectory: URL) {
+        self.init(baseDirectory: baseDirectory, logger: NoopStructuredLogger())
     }
 
     public func manifestFileURL(for resourceID: ResourceID) -> URL {
@@ -30,7 +36,7 @@ public final class ManifestStore: @unchecked Sendable {
     }
 
     public func load(resourceID: ResourceID) throws -> ResourceRecord? {
-        try queue.sync {
+        try queue.sync(flags: .barrier) {
             let fileURL = manifestFileURL(for: resourceID)
             guard fileManager.fileExists(atPath: fileURL.path) else {
                 return nil
@@ -42,7 +48,13 @@ public final class ManifestStore: @unchecked Sendable {
             do {
                 return try decoder.decode(ResourceRecord.self, from: data)
             } catch {
-                // Treat partially-written or corrupted manifests as cache misses so cache can self-heal.
+                quarantineCorruptedManifest(
+                    fileURL: fileURL,
+                    resourceID: resourceID,
+                    decodeError: error,
+                    source: "load"
+                )
+                // Corrupted manifests are quarantined and treated as cache misses so cache can self-heal.
                 return nil
             }
         }
@@ -103,7 +115,7 @@ public final class ManifestStore: @unchecked Sendable {
     }
 
     public func allRecords() -> [StoredManifestRecord] {
-        queue.sync {
+        queue.sync(flags: .barrier) {
             let cacheDirectory = baseDirectory.appendingPathComponent("cache", isDirectory: true)
             guard fileManager.fileExists(atPath: cacheDirectory.path) else {
                 return []
@@ -136,7 +148,16 @@ public final class ManifestStore: @unchecked Sendable {
                 let decoder = JSONDecoder()
                 decoder.dateDecodingStrategy = .iso8601
 
-                guard let record = try? decoder.decode(ResourceRecord.self, from: data) else {
+                let record: ResourceRecord
+                do {
+                    record = try decoder.decode(ResourceRecord.self, from: data)
+                } catch {
+                    quarantineCorruptedManifest(
+                        fileURL: fileURL,
+                        resourceID: resourceID,
+                        decodeError: error,
+                        source: "allRecords"
+                    )
                     continue
                 }
 
@@ -148,7 +169,7 @@ public final class ManifestStore: @unchecked Sendable {
     }
 
     func allManifestResourceIDs() -> [ResourceID] {
-        queue.sync {
+        queue.sync(flags: .barrier) {
             let cacheDirectory = baseDirectory.appendingPathComponent("cache", isDirectory: true)
             guard fileManager.fileExists(atPath: cacheDirectory.path) else {
                 return []
@@ -174,11 +195,111 @@ public final class ManifestStore: @unchecked Sendable {
                 ) else {
                     continue
                 }
+
+                guard let data = try? Data(contentsOf: fileURL) else {
+                    continue
+                }
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                do {
+                    _ = try decoder.decode(ResourceRecord.self, from: data)
+                } catch {
+                    quarantineCorruptedManifest(
+                        fileURL: fileURL,
+                        resourceID: resourceID,
+                        decodeError: error,
+                        source: "allManifestResourceIDs"
+                    )
+                    continue
+                }
                 resourceIDs.append(resourceID)
             }
 
             return resourceIDs
         }
+    }
+
+    private func quarantineCorruptedManifest(
+        fileURL: URL,
+        resourceID: ResourceID,
+        decodeError: Error,
+        source: String
+    ) {
+        let quarantineURL = fileURL.appendingPathExtension("corrupt")
+        let dataFileURL = dataFileURL(for: resourceID)
+        let correlationID = UUID().uuidString
+
+        do {
+            if fileManager.fileExists(atPath: quarantineURL.path) {
+                try fileManager.removeItem(at: quarantineURL)
+            }
+
+            if fileManager.fileExists(atPath: fileURL.path) {
+                try fileManager.moveItem(at: fileURL, to: quarantineURL)
+            }
+
+            let temporaryURL = fileURL.appendingPathExtension("tmp")
+            if fileManager.fileExists(atPath: temporaryURL.path) {
+                try? fileManager.removeItem(at: temporaryURL)
+            }
+
+            var purgedDataBytes: Int64 = 0
+            if fileManager.fileExists(atPath: dataFileURL.path) {
+                purgedDataBytes = (try? fileSize(at: dataFileURL)) ?? 0
+                try fileManager.removeItem(at: dataFileURL)
+            }
+
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "CoreCache",
+                    operation: "manifestDecodeRecovery",
+                    level: .warning,
+                    correlationID: correlationID,
+                    metadata: [
+                        "result": "recovered_decode_failure",
+                        "source": source,
+                        "cacheKey": resourceID.cacheKey.rawValue,
+                        "kind": resourceID.kind.rawValue,
+                        "resourceKey": resourceID.resourceKey,
+                        "manifestPath": fileURL.path,
+                        "quarantinePath": quarantineURL.path,
+                        "recoveryAction": "quarantine_manifest_and_purge_data",
+                        "purgedDataBytes": String(purgedDataBytes),
+                        "error": String(describing: decodeError)
+                    ]
+                )
+            )
+        } catch {
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "CoreCache",
+                    operation: "manifestDecodeRecovery",
+                    level: .error,
+                    correlationID: correlationID,
+                    metadata: [
+                        "result": "recovery_failed",
+                        "source": source,
+                        "cacheKey": resourceID.cacheKey.rawValue,
+                        "kind": resourceID.kind.rawValue,
+                        "resourceKey": resourceID.resourceKey,
+                        "manifestPath": fileURL.path,
+                        "quarantinePath": quarantineURL.path,
+                        "recoveryAction": "quarantine_manifest_and_purge_data",
+                        "error": String(describing: decodeError),
+                        "recoveryError": String(describing: error)
+                    ]
+                )
+            )
+        }
+    }
+
+    private func dataFileURL(for resourceID: ResourceID) -> URL {
+        manifestFileURL(for: resourceID).deletingPathExtension().appendingPathExtension("bin")
+    }
+
+    private func fileSize(at fileURL: URL) throws -> Int64 {
+        let attributes = try fileManager.attributesOfItem(atPath: fileURL.path)
+        return (attributes[.size] as? NSNumber)?.int64Value ?? 0
     }
 
     private func resourceID(
