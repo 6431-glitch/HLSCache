@@ -58,6 +58,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
     private var serverBaseURL: URL?
     private var runtimeState: ProxyRuntimeState = .stopped
     private var plugins: [any HLSCachePlugin] = []
+    private var offlinePlaybackModeEnabled = false
 
     public init(
         baseDirectory: URL,
@@ -467,6 +468,24 @@ public final class HLSCacheFacade: @unchecked Sendable {
         }
     }
 
+    @discardableResult
+    public func setOfflinePlaybackMode(enabled: Bool) -> Bool {
+        let correlationID = UUID().uuidString
+        return queue.sync(flags: .barrier) {
+            offlinePlaybackModeEnabled = enabled
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "setOfflinePlaybackMode",
+                    level: .info,
+                    correlationID: correlationID,
+                    metadata: ["enabled": String(enabled)]
+                )
+            )
+            return offlinePlaybackModeEnabled
+        }
+    }
+
     private func cacheDirectory(for cacheKey: CacheKey) -> URL {
         baseDirectory
             .appendingPathComponent("cache", isDirectory: true)
@@ -523,6 +542,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
     @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
     private func handleProxyRequest(_ request: ProxyServerHTTPRequest) async -> ProxyServerHTTPResponse {
         let correlationID = UUID().uuidString
+        let offlineModeEnabled = queue.sync { offlinePlaybackModeEnabled }
 
         let requestURL: URL
         do {
@@ -607,14 +627,61 @@ public final class HLSCacheFacade: @unchecked Sendable {
             continuityDecision = cachedRecord == nil
                 ? "miss_new_resource_url"
                 : "reuse_existing_resource_url"
-            let metadata = try await resolveRemoteMetadataIfNeeded(
-                cachedRecord: cachedRecord,
-                remoteURL: route.remoteURL,
-                requestHeaders: requestHeaders,
-                networkClient: URLSessionNetworkClient(session: networkSession)
+
+            if offlineModeEnabled {
+                guard let expectedLength = cachedRecord?.expectedLength, expectedLength >= 0 else {
+                    throw ProxyCacheCoordinatorError.offlineCacheMiss(range: ByteRange(start: 0, endExclusive: 0)!)
+                }
+                totalLength = expectedLength
+                contentType = cachedRecord?.contentType
+            } else {
+                let metadata = try await resolveRemoteMetadataIfNeeded(
+                    cachedRecord: cachedRecord,
+                    remoteURL: route.remoteURL,
+                    requestHeaders: requestHeaders,
+                    networkClient: URLSessionNetworkClient(session: networkSession)
+                )
+                totalLength = metadata.totalLength
+                contentType = metadata.contentType
+            }
+        } catch let error as ProxyCacheCoordinatorError {
+            if case let .offlineCacheMiss(range) = error {
+                logger.log(
+                    StructuredLogEvent(
+                        subsystem: "HLSCache",
+                        operation: "proxyRequest",
+                        level: .warning,
+                        correlationID: correlationID,
+                        metadata: [
+                            "alias": route.alias,
+                            "kind": route.kind.rawValue,
+                            "path": request.path,
+                            "method": request.method,
+                            "status": "503",
+                            "offlineMode": "true",
+                            "missingStart": String(range.start),
+                            "missingEndExclusive": String(range.endExclusive)
+                        ]
+                    )
+                )
+                return .text(statusCode: 503, reasonPhrase: "Service Unavailable", body: "offline cache miss\n")
+            }
+
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "proxyRequest",
+                    level: .error,
+                    correlationID: correlationID,
+                    metadata: [
+                        "path": request.path,
+                        "method": request.method,
+                        "status": "502",
+                        "error": String(describing: error)
+                    ]
+                )
             )
-            totalLength = metadata.totalLength
-            contentType = metadata.contentType
+            return .text(statusCode: 502, reasonPhrase: "Bad Gateway", body: "upstream metadata unavailable\n")
         } catch {
             logger.log(
                 StructuredLogEvent(
@@ -626,6 +693,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
                         "path": request.path,
                         "method": request.method,
                         "status": "502",
+                        "offlineMode": String(offlineModeEnabled),
                         "error": String(describing: error)
                     ]
                 )
@@ -655,7 +723,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
                         "kind": route.kind.rawValue,
                         "status": String(response.statusCode),
                         "bytes": headers["Content-Length"] ?? "0",
-                        "continuityDecision": continuityDecision
+                        "continuityDecision": continuityDecision,
+                        "offlineMode": String(offlineModeEnabled)
                     ]
                 )
             )
@@ -676,7 +745,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
                 rangeHeader: rangeHeader,
                 totalLength: totalLength,
                 contentType: contentType,
-                allowNetworkFallback: true,
+                allowNetworkFallback: !offlineModeEnabled,
                 networkClient: networkClient
             ) { _, chunk in
                 payload.append(chunk)
@@ -698,7 +767,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
                         "kind": route.kind.rawValue,
                         "status": String(result.response.statusCode),
                         "bytes": String(payload.count),
-                        "continuityDecision": continuityDecision
+                        "continuityDecision": continuityDecision,
+                        "offlineMode": String(offlineModeEnabled)
                     ]
                 )
             )
@@ -709,6 +779,47 @@ public final class HLSCacheFacade: @unchecked Sendable {
                 headers: headers,
                 body: payload
             )
+        } catch let error as ProxyCacheCoordinatorError {
+            if case let .offlineCacheMiss(range) = error {
+                logger.log(
+                    StructuredLogEvent(
+                        subsystem: "HLSCache",
+                        operation: "proxyRequest",
+                        level: .warning,
+                        correlationID: correlationID,
+                        metadata: [
+                            "alias": route.alias,
+                            "kind": route.kind.rawValue,
+                            "path": request.path,
+                            "method": request.method,
+                            "status": "503",
+                            "offlineMode": "true",
+                            "missingStart": String(range.start),
+                            "missingEndExclusive": String(range.endExclusive)
+                        ]
+                    )
+                )
+                return .text(statusCode: 503, reasonPhrase: "Service Unavailable", body: "offline cache miss\n")
+            }
+
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "proxyRequest",
+                    level: .error,
+                    correlationID: correlationID,
+                    metadata: [
+                        "alias": route.alias,
+                        "kind": route.kind.rawValue,
+                        "path": request.path,
+                        "method": request.method,
+                        "status": "502",
+                        "offlineMode": String(offlineModeEnabled),
+                        "error": String(describing: error)
+                    ]
+                )
+            )
+            return .text(statusCode: 502, reasonPhrase: "Bad Gateway", body: "proxy upstream error\n")
         } catch {
             logger.log(
                 StructuredLogEvent(
@@ -722,6 +833,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
                         "path": request.path,
                         "method": request.method,
                         "status": "502",
+                        "offlineMode": String(offlineModeEnabled),
                         "error": String(describing: error)
                     ]
                 )
@@ -826,6 +938,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
             return "Range Not Satisfiable"
         case 502:
             return "Bad Gateway"
+        case 503:
+            return "Service Unavailable"
         default:
             return "Internal Server Error"
         }
@@ -856,6 +970,11 @@ public func stopServer() {
 
 public func proxyStatus() -> ProxyServerStatus {
     sharedFacade.proxyStatus()
+}
+
+@discardableResult
+public func setOfflinePlaybackMode(enabled: Bool) -> Bool {
+    sharedFacade.setOfflinePlaybackMode(enabled: enabled)
 }
 
 @discardableResult
