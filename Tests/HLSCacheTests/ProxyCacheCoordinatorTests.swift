@@ -491,6 +491,91 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     #expect(payload == Data(originData[0..<128]))
 }
 
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+@Test func proxyCacheCoordinator_asyncServe_pluginStampMismatch_cacheHit_invalidatesAndRefetches() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-async-stamp-mismatch-hit")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 256
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 187) })
+    let remoteURL = try #require(URL(string: "https://cdn.example.com/video/async-stamp-mismatch.ts"))
+    let resourceID = try makeCoordinatorResourceID()
+    let cache = try CoreCache(baseDirectory: directory)
+
+    let recorderV1 = AsyncRequestRecorder()
+    let networkClientV1 = ClosureNetworkClient { request in
+        await recorderV1.append(request)
+        let range = try parseByteRange(from: request)
+        let payload = Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        let response = try #require(
+            HTTPURLResponse(
+                url: remoteURL,
+                statusCode: 206,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Range": "bytes \(range.start)-\(range.endExclusive - 1)/\(totalLength)"]
+            )
+        )
+        return (payload, response)
+    }
+
+    let coordinatorV1 = ProxyCacheCoordinator(
+        coreCache: cache,
+        transformPipeline: TransformPipeline(transformers: [StampPassThroughPlugin(id: "stamp-pass-through", version: "1.0.0")])
+    )
+    _ = try await coordinatorV1.serve(
+        resourceID: resourceID,
+        remoteURL: remoteURL,
+        rangeHeader: "bytes=0-127",
+        totalLength: totalLength,
+        networkClient: networkClientV1,
+        emit: { _ in }
+    )
+    #expect(await recorderV1.count() == 1)
+
+    let recorderV2 = AsyncRequestRecorder()
+    let networkClientV2 = ClosureNetworkClient { request in
+        await recorderV2.append(request)
+        let range = try parseByteRange(from: request)
+        let payload = Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        let response = try #require(
+            HTTPURLResponse(
+                url: remoteURL,
+                statusCode: 206,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Range": "bytes \(range.start)-\(range.endExclusive - 1)/\(totalLength)"]
+            )
+        )
+        return (payload, response)
+    }
+
+    let coordinatorV2 = ProxyCacheCoordinator(
+        coreCache: cache,
+        transformPipeline: TransformPipeline(transformers: [StampPassThroughPlugin(id: "stamp-pass-through", version: "2.0.0")])
+    )
+
+    var payload = Data()
+    let result = try await coordinatorV2.serve(
+        resourceID: resourceID,
+        remoteURL: remoteURL,
+        rangeHeader: "bytes=0-127",
+        totalLength: totalLength,
+        networkClient: networkClientV2,
+        emit: { payload.append($0) }
+    )
+
+    #expect(result.chunks == [
+        ProxyStreamChunk(source: .network, range: try #require(ByteRange(start: 0, endExclusive: 128)), byteCount: 128)
+    ])
+    #expect(payload == Data(originData[0..<128]))
+    #expect(await recorderV2.count() == 1)
+
+    let record = try #require(try cache.resourceRecord(for: resourceID))
+    #expect(record.pluginsApplied == [PluginStamp(id: "stamp-pass-through", version: "2.0.0")])
+}
+
 @Test func proxyCacheCoordinator_isFinalSemantics_syncMixedCachePrefixAndNetworkTail_emitsUnmodifiedPayload() throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("hlscache-proxy-coordinator-is-final-sync-mixed")
@@ -576,6 +661,79 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
 
     #expect(networkFetches == 0)
     #expect(payload == Data(originData[0..<128]))
+}
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+@Test func proxyCacheCoordinator_asyncServe_authenticatedEncryptAtRest_tamperedCache_refetchesWhenFallbackAllowed() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-async-auth-tamper-refetch")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 256
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 179) })
+    let remoteURL = try #require(URL(string: "https://cdn.example.com/video/async-auth-tamper-refetch.ts"))
+    let resourceID = try makeCoordinatorResourceID()
+
+    let cache = try CoreCache(baseDirectory: directory)
+    let coordinator = ProxyCacheCoordinator(
+        coreCache: cache,
+        transformPipeline: TransformPipeline(
+            transformers: [EncryptAtRestPlugin(key: Data("authenticated-async-key".utf8), mode: .authenticatedV1)]
+        )
+    )
+    let recorder = AsyncRequestRecorder()
+    let networkClient = ClosureNetworkClient { request in
+        await recorder.append(request)
+        let range = try parseByteRange(from: request)
+        let payload = Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        let response = try #require(
+            HTTPURLResponse(
+                url: remoteURL,
+                statusCode: 206,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Range": "bytes \(range.start)-\(range.endExclusive - 1)/\(totalLength)"]
+            )
+        )
+        return (payload, response)
+    }
+
+    _ = try await coordinator.serve(
+        resourceID: resourceID,
+        remoteURL: remoteURL,
+        rangeHeader: "bytes=0-255",
+        totalLength: totalLength,
+        networkClient: networkClient,
+        emit: { _ in }
+    )
+    #expect(await recorder.count() == 1)
+
+    let diskStore = DiskStore(baseDirectory: directory)
+    let fileURL = diskStore.dataFileURL(for: resourceID)
+    let fileHandle = try FileHandle(forWritingTo: fileURL)
+    try fileHandle.seek(toOffset: 7)
+    try fileHandle.write(contentsOf: Data([0xEE]))
+    try fileHandle.close()
+
+    var payload = Data()
+    let result = try await coordinator.serve(
+        resourceID: resourceID,
+        remoteURL: remoteURL,
+        rangeHeader: "bytes=0-127",
+        totalLength: totalLength,
+        networkClient: networkClient,
+        emit: { payload.append($0) }
+    )
+
+    #expect(await recorder.count() == 2)
+    #expect(result.chunks == [
+        ProxyStreamChunk(source: .network, range: try #require(ByteRange(start: 0, endExclusive: 128)), byteCount: 128)
+    ])
+    #expect(payload == Data(originData[0..<128]))
+    #expect((try #require(try cache.resourceRecord(for: resourceID))).pluginsApplied == [
+        PluginStamp(id: "encrypt-at-rest-authenticated", version: "2.0.0-auth-v1")
+    ])
 }
 
 @Test func proxyCacheCoordinator_offlineMode_cacheMiss_throwsWithoutNetworkFallback() throws {
