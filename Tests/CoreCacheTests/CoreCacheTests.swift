@@ -789,6 +789,41 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(String(decoding: readBack, as: UTF8.self) == "lock-safe")
 }
 
+@Test func coreCache_directoryLock_symlinkAliasContention_usesCanonicalIdentity() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-lock-alias")
+    let aliasDirectory = directory.deletingLastPathComponent()
+        .appendingPathComponent("core-cache-lock-alias-link-\(UUID().uuidString)")
+    defer {
+        try? FileManager.default.removeItem(at: aliasDirectory)
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    try FileManager.default.createSymbolicLink(at: aliasDirectory, withDestinationURL: directory)
+
+    do {
+        let first = try CoreCache(baseDirectory: directory)
+        _ = try first.metrics()
+
+        do {
+            _ = try CoreCache(baseDirectory: aliasDirectory)
+            #expect(Bool(false))
+        } catch let error as CoreCacheDirectoryLockError {
+            switch error {
+            case let .directoryInUse(lockFilePath):
+                let expectedPath = directory
+                    .resolvingSymlinksInPath()
+                    .appendingPathComponent(".corecache.lock")
+                    .path
+                #expect(lockFilePath == expectedPath)
+            case .lockIOFailure:
+                #expect(Bool(false))
+            }
+        }
+    }
+
+    _ = try CoreCache(baseDirectory: aliasDirectory)
+}
+
 private func assertPlanCoherent(_ parts: [ReadPlanPart], requested: ByteRange) throws {
     var cursor = requested.start
     for part in parts {

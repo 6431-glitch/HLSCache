@@ -23,27 +23,39 @@ extension CoreCacheDirectoryLockError: LocalizedError {
 }
 
 final class DirectoryLock: @unchecked Sendable {
+    private struct LockIdentityKey: Hashable {
+        let deviceID: UInt64
+        let inode: UInt64
+    }
+
     private static let reservationLock = NSLock()
-    private nonisolated(unsafe) static var reservedLockFilePaths: Set<String> = []
+    private nonisolated(unsafe) static var reservedLockIdentityKeys: Set<LockIdentityKey> = []
 
     private let lockFilePath: String
+    private let lockIdentityKey: LockIdentityKey
     private let fileDescriptor: Int32
 
     init(baseDirectory: URL, fileManager: FileManager = .default) throws {
         try fileManager.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
-        let lockFileURL = baseDirectory.appendingPathComponent(".corecache.lock")
-        let lockFilePath = lockFileURL.standardizedFileURL.path
+        let canonicalBaseDirectory = baseDirectory.resolvingSymlinksInPath().standardizedFileURL
+        let lockFileURL = canonicalBaseDirectory.appendingPathComponent(".corecache.lock")
+        let lockFilePath = lockFileURL.path
 
-        try Self.reserve(lockFilePath: lockFilePath)
+        let descriptor = open(lockFilePath, O_CREAT | O_RDWR, 0o644)
+        guard descriptor >= 0 else {
+            throw CoreCacheDirectoryLockError.lockIOFailure(lockFilePath: lockFilePath, code: errno)
+        }
+
         do {
-            let descriptor = open(lockFilePath, O_CREAT | O_RDWR, 0o644)
-            guard descriptor >= 0 else {
-                throw CoreCacheDirectoryLockError.lockIOFailure(lockFilePath: lockFilePath, code: errno)
-            }
+            let lockIdentityKey = try Self.makeLockIdentityKey(
+                fileDescriptor: descriptor,
+                lockFilePath: lockFilePath
+            )
+            try Self.reserve(lockIdentityKey: lockIdentityKey, lockFilePath: lockFilePath)
 
             if flock(descriptor, LOCK_EX | LOCK_NB) != 0 {
                 let errorCode = errno
-                _ = close(descriptor)
+                Self.unreserve(lockIdentityKey: lockIdentityKey)
                 if errorCode == EWOULDBLOCK || errorCode == EAGAIN {
                     throw CoreCacheDirectoryLockError.directoryInUse(lockFilePath: lockFilePath)
                 }
@@ -51,9 +63,10 @@ final class DirectoryLock: @unchecked Sendable {
             }
 
             self.lockFilePath = lockFilePath
+            self.lockIdentityKey = lockIdentityKey
             self.fileDescriptor = descriptor
         } catch {
-            Self.unreserve(lockFilePath: lockFilePath)
+            _ = close(descriptor)
             throw error
         }
     }
@@ -61,22 +74,34 @@ final class DirectoryLock: @unchecked Sendable {
     deinit {
         _ = flock(fileDescriptor, LOCK_UN)
         _ = close(fileDescriptor)
-        Self.unreserve(lockFilePath: lockFilePath)
+        Self.unreserve(lockIdentityKey: lockIdentityKey)
     }
 
-    private static func reserve(lockFilePath: String) throws {
+    private static func reserve(lockIdentityKey: LockIdentityKey, lockFilePath: String) throws {
         reservationLock.lock()
         defer { reservationLock.unlock() }
 
-        guard !reservedLockFilePaths.contains(lockFilePath) else {
+        guard !reservedLockIdentityKeys.contains(lockIdentityKey) else {
             throw CoreCacheDirectoryLockError.directoryInUse(lockFilePath: lockFilePath)
         }
-        reservedLockFilePaths.insert(lockFilePath)
+        reservedLockIdentityKeys.insert(lockIdentityKey)
     }
 
-    private static func unreserve(lockFilePath: String) {
+    private static func unreserve(lockIdentityKey: LockIdentityKey) {
         reservationLock.lock()
-        reservedLockFilePaths.remove(lockFilePath)
+        reservedLockIdentityKeys.remove(lockIdentityKey)
         reservationLock.unlock()
+    }
+
+    private static func makeLockIdentityKey(
+        fileDescriptor: Int32,
+        lockFilePath: String
+    ) throws -> LockIdentityKey {
+        var fileStatus = stat()
+        guard fstat(fileDescriptor, &fileStatus) == 0 else {
+            throw CoreCacheDirectoryLockError.lockIOFailure(lockFilePath: lockFilePath, code: errno)
+        }
+
+        return LockIdentityKey(deviceID: UInt64(fileStatus.st_dev), inode: UInt64(fileStatus.st_ino))
     }
 }
