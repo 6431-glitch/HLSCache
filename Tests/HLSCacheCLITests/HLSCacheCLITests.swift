@@ -616,6 +616,56 @@ private func parseJSONObject(_ line: String) throws -> [String: Any] {
     #expect(io.outputLines.contains { $0 == "proxy.base_url=unavailable" })
 }
 
+@Test func cliProxyCommand_status_whenStarting_emitsLifecycleStateInStableFields() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(
+        context: context,
+        io: io,
+        proxyStatusProvider: {
+            ProxyServerStatus(
+                isRunning: false,
+                host: "127.0.0.1",
+                port: 8080,
+                baseURL: nil,
+                state: .starting
+            )
+        }
+    )
+
+    let exitCode = app.run(command: .proxy(ProxyCommand(action: .status)))
+    #expect(exitCode == 2)
+    #expect(io.outputLines.contains { $0 == "State: starting" })
+    #expect(io.outputLines.contains { $0 == "proxy.state=starting" })
+}
+
+@Test func cliProxyCommand_status_jsonOutput_whenStopping_emitsLifecycleState() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory, outputFormat: .json))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(
+        context: context,
+        io: io,
+        proxyStatusProvider: {
+            ProxyServerStatus(isRunning: false, host: nil, port: nil, baseURL: nil, state: .stopping)
+        }
+    )
+
+    let exitCode = app.run(command: .proxy(ProxyCommand(action: .status)))
+    #expect(exitCode == 2)
+
+    let line = try #require(io.outputLines.last)
+    let payload = try parseJSONObject(line)
+    #expect(payload["schemaVersion"] as? String == "1")
+    #expect(payload["command"] as? String == "proxy.status")
+    #expect(payload["state"] as? String == "stopping")
+}
+
 @Test func cliProxyCommand_restartFailure_returnsDeterministicExitCode() throws {
     let directory = try makeCLITempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
