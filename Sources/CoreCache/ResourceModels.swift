@@ -22,6 +22,16 @@ public struct PluginStamp: Codable, Hashable, Sendable {
     }
 }
 
+public struct ResourceIntegrity: Codable, Hashable, Sendable {
+    public let algorithm: String
+    public let digestHex: String
+
+    public init(algorithm: String, digestHex: String) {
+        self.algorithm = algorithm
+        self.digestHex = digestHex
+    }
+}
+
 public struct ResourceID: Codable, Hashable, Sendable {
     public let cacheKey: CacheKey
     public let kind: ResourceKind
@@ -248,6 +258,7 @@ public struct ResourceRecord: Codable, Hashable, Sendable {
     public var expectedLength: Int64?
     public var completedRanges: IntervalSet
     public var pluginsApplied: [PluginStamp]
+    public var integrity: ResourceIntegrity?
     public var lastUpdated: Date
 
     public init(
@@ -257,6 +268,7 @@ public struct ResourceRecord: Codable, Hashable, Sendable {
         expectedLength: Int64? = nil,
         completedRanges: IntervalSet = .init(),
         pluginsApplied: [PluginStamp] = [],
+        integrity: ResourceIntegrity? = nil,
         lastUpdated: Date = Date()
     ) {
         self.kind = kind
@@ -265,6 +277,7 @@ public struct ResourceRecord: Codable, Hashable, Sendable {
         self.expectedLength = expectedLength
         self.completedRanges = completedRanges
         self.pluginsApplied = pluginsApplied
+        self.integrity = integrity
         self.lastUpdated = lastUpdated
     }
 

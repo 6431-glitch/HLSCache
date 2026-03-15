@@ -20,8 +20,8 @@ public struct CacheKey: RawRepresentable, Codable, Hashable, Sendable {
     }
 }
 
-enum SHA256Hex {
-    static func digest(_ data: Data) -> String {
+public enum SHA256Hex {
+    public static func digest(_ data: Data) -> String {
         #if canImport(CryptoKit)
         if #available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *) {
             let digest = CryptoKit.SHA256.hash(data: data)

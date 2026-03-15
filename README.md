@@ -182,6 +182,13 @@ Plugins can:
 
 Recommended for sensitive content. Stored bytes are encrypted on write and decrypted when served.
 
+`EncryptAtRestPlugin` supports two modes:
+
+- `EncryptAtRestPlugin.Mode.xorInsecure` (default): legacy reversible XOR stream mode for backward compatibility only.
+- `EncryptAtRestPlugin.Mode.authenticatedV1`: authenticated mode with keyed stream encryption + HMAC integrity metadata persisted in cache manifests.
+
+When authenticated mode is enabled, cached-resource tampering is detected deterministically before serve. On mismatch, cache entries are invalidated and normal network fallback/offline policies apply.
+
 ### AES-128 HLS Caution
 
 If HLS uses `#EXT-X-KEY METHOD=AES-128`, segment data is already encrypted. Arbitrary byte-level transformations on ciphertext will break playback. Prefer wrapping ciphertext with an additional encrypt-at-rest layer rather than modifying HLS-level encryption.
@@ -289,7 +296,8 @@ Facade methods now available from `HLSCache`:
 
 Baseline plugin available:
 - `NoopPlugin(version: "1.0.0")`
-- `EncryptAtRestPlugin(key:)` for reversible at-rest encryption/decryption in streaming mode
+- `EncryptAtRestPlugin(key:)` for legacy reversible XOR at-rest encryption/decryption
+- `EncryptAtRestPlugin(key:mode: .authenticatedV1)` for authenticated at-rest mode with integrity verification metadata
 - `ByteTransformer` / `ByteStreamTransformer` protocol pair for streaming chunk transforms
 - `TransformPipeline` and `TransformPipelineProcessor` for ordered plugin execution without full buffering
 

@@ -281,6 +281,68 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     #expect(secondRecord.pluginsApplied == [stamp])
 }
 
+@Test func proxyCacheCoordinator_authenticatedEncryptAtRest_tamperedCache_invalidatesAndFailsOfflineDeterministically() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-encrypt-auth")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 256
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 173) })
+    let resourceID = try makeCoordinatorResourceID()
+
+    let cache = try CoreCache(baseDirectory: directory)
+    let pipeline = TransformPipeline(
+        transformers: [
+            EncryptAtRestPlugin(key: Data("authenticated-encrypt-key".utf8), mode: .authenticatedV1)
+        ]
+    )
+    let coordinator = ProxyCacheCoordinator(coreCache: cache, transformPipeline: pipeline)
+
+    _ = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-255",
+        totalLength: totalLength,
+        fetchNetworkRange: { range in
+            Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        },
+        emit: { _ in }
+    )
+
+    let record = try #require(try cache.resourceRecord(for: resourceID))
+    #expect(record.pluginsApplied == [PluginStamp(id: "encrypt-at-rest-authenticated", version: "2.0.0-auth-v1")])
+    #expect(record.integrity != nil)
+
+    let diskStore = DiskStore(baseDirectory: directory)
+    let fileURL = diskStore.dataFileURL(for: resourceID)
+    let fileHandle = try FileHandle(forWritingTo: fileURL)
+    try fileHandle.seek(toOffset: 10)
+    try fileHandle.write(contentsOf: Data([0xA7]))
+    try fileHandle.close()
+
+    var networkFetches = 0
+    do {
+        _ = try coordinator.serve(
+            resourceID: resourceID,
+            rangeHeader: "bytes=0-255",
+            totalLength: totalLength,
+            allowNetworkFallback: false,
+            fetchNetworkRange: { _ in
+                networkFetches += 1
+                return Data()
+            },
+            emit: { _ in }
+        )
+        #expect(Bool(false))
+    } catch let error as ProxyCacheCoordinatorError {
+        #expect(error == .offlineCacheMiss(range: try #require(ByteRange(start: 0, endExclusive: 256))))
+    }
+
+    #expect(networkFetches == 0)
+    #expect(try cache.resourceRecord(for: resourceID) == nil)
+}
+
 @Test func proxyCacheCoordinator_pluginStampCompatibility_match_keepsCacheHitBehavior() throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("hlscache-proxy-coordinator-stamp-match")

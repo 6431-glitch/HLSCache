@@ -103,6 +103,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         }
 
         try invalidateResourceIfPluginStampsIncompatible(resourceID: resourceID)
+        try invalidateResourceIfIntegrityMismatch(resourceID: resourceID)
         let plan = try coreCache.plan(resource: resourceID, requested: response.requestedRange)
         let normalizedChunkSize = max(Int64(1), chunkSizeBytes)
 
@@ -155,7 +156,8 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         }
 
         if wroteNetworkData {
-            _ = try coreCache.finalizeWrite(resource: resourceID, expectedLength: totalLength)
+            let record = try coreCache.finalizeWrite(resource: resourceID, expectedLength: totalLength)
+            try refreshResourceIntegrity(resourceID: resourceID, record: record)
         }
 
         return ProxyCacheServeResult(response: response, chunks: chunks, totalBytesStreamed: totalStreamed)
@@ -176,6 +178,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
             return ProxyCacheServeResult(response: response, chunks: [], totalBytesStreamed: 0)
         }
         try invalidateResourceIfPluginStampsIncompatible(resourceID: resourceID)
+        try invalidateResourceIfIntegrityMismatch(resourceID: resourceID)
         let plan = try coreCache.plan(resource: resourceID, requested: response.requestedRange)
 
         var chunks: [ProxyStreamChunk] = []
@@ -263,7 +266,8 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         }
 
         if wroteNetworkData {
-            _ = try coreCache.finalizeWrite(resource: resourceID, expectedLength: totalLength)
+            let record = try coreCache.finalizeWrite(resource: resourceID, expectedLength: totalLength)
+            try refreshResourceIntegrity(resourceID: resourceID, record: record)
         }
 
         return ProxyCacheServeResult(response: response, chunks: chunks, totalBytesStreamed: totalStreamed)
@@ -292,6 +296,50 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
             return
         }
         try coreCache.invalidate(resource: resourceID)
+    }
+
+    private func invalidateResourceIfIntegrityMismatch(resourceID: ResourceID) throws {
+        guard let record = try coreCache.resourceRecord(for: resourceID),
+              let storedIntegrity = record.integrity else {
+            return
+        }
+
+        guard let expectedLength = record.expectedLength,
+              expectedLength > 0,
+              let fullRange = ByteRange(start: 0, endExclusive: expectedLength),
+              record.completedRanges.contains(fullRange) else {
+            return
+        }
+
+        let cachedPayload = try coreCache.read(resource: resourceID, range: fullRange)
+        let context = TransformContext(resourceID: resourceID, byteOffset: 0)
+        guard let computedIntegrity = try transformPipeline.integrityMetadata(for: cachedPayload, context: context) else {
+            return
+        }
+
+        guard storedIntegrity == computedIntegrity else {
+            try coreCache.invalidate(resource: resourceID)
+            return
+        }
+    }
+
+    private func refreshResourceIntegrity(resourceID: ResourceID, record: ResourceRecord) throws {
+        guard let expectedLength = record.expectedLength,
+              expectedLength > 0,
+              let fullRange = ByteRange(start: 0, endExclusive: expectedLength),
+              record.completedRanges.contains(fullRange) else {
+            if record.integrity != nil {
+                _ = try coreCache.setResourceIntegrity(resource: resourceID, integrity: nil)
+            }
+            return
+        }
+
+        let cachedPayload = try coreCache.read(resource: resourceID, range: fullRange)
+        let context = TransformContext(resourceID: resourceID, byteOffset: 0)
+        let integrity = try transformPipeline.integrityMetadata(for: cachedPayload, context: context)
+        if integrity != record.integrity {
+            _ = try coreCache.setResourceIntegrity(resource: resourceID, integrity: integrity)
+        }
     }
 
     private func activePluginStamps(for resourceID: ResourceID) -> [PluginStamp] {
