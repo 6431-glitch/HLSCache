@@ -42,10 +42,9 @@ public enum HLSPlaylistParser {
         var segments: [HLSPlaylistSegment] = []
         var keys: [HLSPlaylistKey] = []
 
-        let lines = playlist.split(separator: "\n", omittingEmptySubsequences: false)
-        for (index, rawLine) in lines.enumerated() {
-            let line = String(rawLine)
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let lines = playlist.components(separatedBy: .newlines)
+        for (index, line) in lines.enumerated() {
+            let trimmed = normalizeToken(line)
             guard !trimmed.isEmpty else {
                 continue
             }
@@ -126,7 +125,7 @@ public enum HLSPlaylistParser {
 
         var attributes: [String: String] = [:]
         for part in parts {
-            let trimmed = part.trimmingCharacters(in: .whitespaces)
+            let trimmed = normalizeToken(part)
             guard !trimmed.isEmpty else {
                 continue
             }
@@ -137,19 +136,25 @@ public enum HLSPlaylistParser {
 
             let rawKey = trimmed[..<equalsIndex]
             let rawValue = trimmed[trimmed.index(after: equalsIndex)...]
-            let key = rawKey.trimmingCharacters(in: .whitespaces).uppercased()
+            let key = normalizeToken(String(rawKey)).uppercased()
             guard !key.isEmpty else {
                 continue
             }
 
-            var value = rawValue.trimmingCharacters(in: .whitespaces)
+            var value = normalizeToken(String(rawValue))
             if value.hasPrefix("\""), value.hasSuffix("\""), value.count >= 2 {
                 value = String(value.dropFirst().dropLast())
             }
+            value = normalizeToken(value)
 
             attributes[key] = value
         }
 
         return attributes
+    }
+
+    private static func normalizeToken(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasPrefix("\u{FEFF}") ? String(trimmed.dropFirst()) : trimmed
     }
 }
