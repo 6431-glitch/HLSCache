@@ -31,6 +31,7 @@ The architecture cleanly separates playback proxying, storage, and background do
 
 - `bytesPlannedFromCache` / `bytesPlannedFromNetwork` reflect `CoreCache.plan(...)` output.
 - `bytesServedFromDisk` / `bytesServedFromNetwork` reflect actual bytes emitted at serve boundaries.
+- Metrics counters are synchronized on CoreCache's single queue; mutations (`plan`, `recordServedBytes`, write/finalize paths) use barrier writes to avoid lock-order inversions.
 
 This separation highlights divergence cases (for example, planned cache bytes falling back to network due to corrupted/truncated disk payload).
 
