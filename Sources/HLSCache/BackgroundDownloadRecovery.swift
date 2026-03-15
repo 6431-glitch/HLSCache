@@ -83,7 +83,9 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
         resourceID: ResourceID,
         remoteURL: URL,
         contentType: String? = nil,
-        expectedLength: Int64? = nil
+        expectedLength: Int64? = nil,
+        clearContentType: Bool = false,
+        clearExpectedLength: Bool = false
     ) throws -> BackgroundDownloadTaskRecord {
         guard taskIdentifier > 0 else {
             throw BackgroundDownloadTaskRegistryError.invalidTaskIdentifier(taskIdentifier)
@@ -92,12 +94,24 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
         return try queue.sync(flags: .barrier) {
             let now = Date()
             let existing = records[taskIdentifier]
+            let mergedContentType: String?
+            if clearContentType {
+                mergedContentType = nil
+            } else {
+                mergedContentType = contentType ?? existing?.contentType
+            }
+            let mergedExpectedLength: Int64?
+            if clearExpectedLength {
+                mergedExpectedLength = nil
+            } else {
+                mergedExpectedLength = expectedLength ?? existing?.expectedLength
+            }
             let record = BackgroundDownloadTaskRecord(
                 taskIdentifier: taskIdentifier,
                 resourceID: resourceID,
                 remoteURL: remoteURL,
-                contentType: contentType,
-                expectedLength: expectedLength,
+                contentType: mergedContentType,
+                expectedLength: mergedExpectedLength,
                 createdAt: existing?.createdAt ?? now,
                 lastUpdated: now
             )
@@ -274,14 +288,18 @@ public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable {
         resourceID: ResourceID,
         remoteURL: URL,
         contentType: String? = nil,
-        expectedLength: Int64? = nil
+        expectedLength: Int64? = nil,
+        clearContentType: Bool = false,
+        clearExpectedLength: Bool = false
     ) throws -> BackgroundDownloadTaskRecord {
         try registry.upsert(
             taskIdentifier: taskIdentifier,
             resourceID: resourceID,
             remoteURL: remoteURL,
             contentType: contentType,
-            expectedLength: expectedLength
+            expectedLength: expectedLength,
+            clearContentType: clearContentType,
+            clearExpectedLength: clearExpectedLength
         )
     }
 
