@@ -59,6 +59,19 @@ import Testing
     #expect(canonical == canonicalAgain)
 }
 
+@Test func resourceID_makeLegacyResourceKeyCandidates_supportsTransitionFromPreCanonicalKeys() throws {
+    let url = try #require(URL(string: "https://Example.com:443/media/seg.ts?b=2&a=1#frag"))
+    let primaryKey = ResourceID.makeResourceKey(from: url)
+    let directLegacyKey = ResourceID.makeResourceKey(from: url.absoluteString)
+    let candidates = ResourceID.makeLegacyResourceKeyCandidates(from: url)
+
+    #expect(!candidates.isEmpty)
+    #expect(candidates.contains(directLegacyKey))
+    #expect(!candidates.contains(primaryKey))
+    #expect(Set(candidates).count == candidates.count)
+    #expect(candidates.allSatisfy { $0.count == 64 })
+}
+
 @Test func resourceRecord_codableRoundTrip_preservesFieldsAndCompletedRanges() throws {
     let firstRange = try #require(ByteRange(start: 0, endExclusive: 10))
     let secondRange = try #require(ByteRange(start: 20, endExclusive: 30))

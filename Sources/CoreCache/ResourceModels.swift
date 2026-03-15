@@ -48,21 +48,65 @@ public struct ResourceID: Codable, Hashable, Sendable {
             return makeResourceKey(from: url.absoluteString)
         }
 
-        return makeResourceKey(from: canonicalURLString(from: &components, fallback: url.absoluteString))
+        return makeResourceKey(
+            from: canonicalURLString(
+                from: &components,
+                fallback: url.absoluteString,
+                queryNormalization: .sortedByName
+            )
+        )
     }
 
     public static func canonicalURLString(from url: URL) -> String {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             return url.absoluteString
         }
-        return canonicalURLString(from: &components, fallback: url.absoluteString)
+        return canonicalURLString(
+            from: &components,
+            fallback: url.absoluteString,
+            queryNormalization: .sortedByName
+        )
+    }
+
+    public static func makeLegacyResourceKeyCandidates(from url: URL) -> [String] {
+        let primaryKey = makeResourceKey(from: url)
+        var candidates: [String] = []
+
+        let directLegacyKey = makeResourceKey(from: url.absoluteString)
+        if directLegacyKey != primaryKey {
+            candidates.append(directLegacyKey)
+        }
+
+        if var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            let legacyCanonical = canonicalURLString(
+                from: &components,
+                fallback: url.absoluteString,
+                queryNormalization: .preserveOrder
+            )
+            let preservedQueryOrderKey = makeResourceKey(from: legacyCanonical)
+            if preservedQueryOrderKey != primaryKey,
+               !candidates.contains(preservedQueryOrderKey) {
+                candidates.append(preservedQueryOrderKey)
+            }
+        }
+
+        return candidates
     }
 
     public static func makeResourceKey(from canonical: String) -> String {
         SHA256Hex.digest(Data(canonical.utf8))
     }
 
-    private static func canonicalURLString(from components: inout URLComponents, fallback: String) -> String {
+    private enum QueryNormalization {
+        case sortedByName
+        case preserveOrder
+    }
+
+    private static func canonicalURLString(
+        from components: inout URLComponents,
+        fallback: String,
+        queryNormalization: QueryNormalization
+    ) -> String {
         components.scheme = components.scheme?.lowercased()
         components.host = components.host?.lowercased()
         components.fragment = nil
@@ -74,7 +118,12 @@ public struct ResourceID: Codable, Hashable, Sendable {
         }
 
         components.percentEncodedPath = normalizePath(components.percentEncodedPath)
-        components.percentEncodedQuery = normalizeQuery(components.percentEncodedQuery)
+        switch queryNormalization {
+        case .sortedByName:
+            components.percentEncodedQuery = normalizeQuery(components.percentEncodedQuery)
+        case .preserveOrder:
+            components.percentEncodedQuery = normalizeQueryPreservingOrder(components.percentEncodedQuery)
+        }
 
         return components.string ?? fallback
     }
@@ -181,6 +230,31 @@ public struct ResourceID: Codable, Hashable, Sendable {
                 return "\(part.name)=\(part.value ?? "")"
             }
             return part.name
+        }
+        .joined(separator: "&")
+    }
+
+    private static func normalizeQueryPreservingOrder(_ percentEncodedQuery: String?) -> String? {
+        guard let percentEncodedQuery else {
+            return nil
+        }
+
+        let parts = percentEncodedQuery.split(separator: "&", omittingEmptySubsequences: false)
+        if parts.isEmpty {
+            return percentEncodedQuery
+        }
+
+        return parts.map { rawPart in
+            let part = String(rawPart)
+            if let equalsIndex = part.firstIndex(of: "=") {
+                let rawName = String(part[..<equalsIndex])
+                let rawValue = String(part[part.index(after: equalsIndex)...])
+                let normalizedName = normalizePercentEncoding(rawName)
+                let normalizedValue = normalizePercentEncoding(rawValue)
+                return "\(normalizedName)=\(normalizedValue)"
+            }
+
+            return normalizePercentEncoding(part)
         }
         .joined(separator: "&")
     }

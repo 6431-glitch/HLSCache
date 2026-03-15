@@ -375,6 +375,117 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(originRequestCounter.totalRequests(for: oldKeyURL) == oldKeyOriginCountAfterFirstFetch)
 }
 
+@Test func facade_proxyRuntime_legacyResourceKeyFallback_reusesCachedBytesWithoutOriginFetch() async throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-legacy-resource-key-fallback")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let playlistURL = try #require(URL(string: "https://origin.example.com/hls/master.m3u8"))
+    let segmentURL = try #require(URL(string: "https://origin.example.com/hls/seg.ts?b=2&a=1"))
+    let payload = Data((0..<16).map { UInt8($0 + 10) })
+    let originRequestCounter = OriginRequestCounter()
+
+    let sessionConfiguration = URLSessionConfiguration.ephemeral
+    sessionConfiguration.protocolClasses = [LegacyFallbackOriginURLProtocol.self]
+    let originSession = URLSession(configuration: sessionConfiguration)
+
+    LegacyFallbackOriginURLProtocol.setHandler { request in
+        let url = try #require(request.url)
+        let method = (request.httpMethod ?? "GET").uppercased()
+        originRequestCounter.record(method: method, url: url)
+
+        if method == "HEAD" {
+            let response = try #require(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: [
+                        "Content-Length": String(payload.count),
+                        "Content-Type": "video/mp2t"
+                    ]
+                )
+            )
+            return (response, Data())
+        }
+
+        let totalLength = Int64(payload.count)
+        let rangeHeader = request.value(forHTTPHeaderField: "Range")
+        let parsedRange = rangeHeader.flatMap { ByteRange.parseHTTPRange($0, totalLength: totalLength) }
+            ?? ByteRange(start: 0, endExclusive: totalLength)
+        let range = try #require(parsedRange)
+        let start = Int(range.start)
+        let endExclusive = Int(range.endExclusive)
+        let slice = Data(payload[start..<endExclusive])
+        let response = try #require(
+            HTTPURLResponse(
+                url: url,
+                statusCode: rangeHeader == nil ? 200 : 206,
+                httpVersion: "HTTP/1.1",
+                headerFields: [
+                    "Content-Length": String(slice.count),
+                    "Content-Type": "video/mp2t",
+                    "Content-Range": "bytes \(range.start)-\(range.endExclusive - 1)/\(payload.count)"
+                ]
+            )
+        )
+        return (response, slice)
+    }
+    defer { LegacyFallbackOriginURLProtocol.resetHandler() }
+
+    let logger = RecordingStructuredLogger()
+    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger, networkSession: originSession)
+    let record = try facade.register(
+        alias: "MDLEGACY",
+        assetID: "asset-legacy-fallback",
+        remoteURL: playlistURL
+    )
+
+    do {
+        let cache = try CoreCache(baseDirectory: directory)
+        let legacyResourceID = ResourceID(
+            cacheKey: record.cacheKey,
+            kind: .segment,
+            resourceKey: ResourceID.makeResourceKey(from: segmentURL.absoluteString)
+        )
+        _ = try cache.write(
+            payload,
+            resource: legacyResourceID,
+            at: 0,
+            contentType: "video/mp2t",
+            expectedLength: Int64(payload.count)
+        )
+        _ = try cache.finalizeWrite(resource: legacyResourceID, expectedLength: Int64(payload.count))
+    }
+
+    _ = try facade.startServer(host: "127.0.0.1", port: 0)
+    defer { facade.stopServer() }
+
+    let proxyURL = try facade.proxyURL(for: "MDLEGACY", kind: .segment, remoteURL: segmentURL)
+    let proxySession = URLSession(configuration: .ephemeral)
+    let (data, response) = try await proxySession.data(from: proxyURL)
+    let httpResponse = try #require(response as? HTTPURLResponse)
+    #expect(httpResponse.statusCode == 200)
+    #expect(data == payload)
+    #expect(originRequestCounter.totalRequests(for: segmentURL) == 0)
+
+    let fallbackEvent = try #require(logger.events().first {
+        $0.operation == "legacyResourceKeyFallback"
+            && $0.metadata["alias"] == "MDLEGACY"
+            && $0.metadata["kind"] == ProxyResourceKind.segment.rawValue
+    })
+    #expect(!(fallbackEvent.metadata["currentResourceKey"] ?? "").isEmpty)
+    #expect(!(fallbackEvent.metadata["fallbackResourceKey"] ?? "").isEmpty)
+    #expect(fallbackEvent.metadata["currentResourceKey"] != fallbackEvent.metadata["fallbackResourceKey"])
+
+    let proxyRequestEvent = try #require(logger.events().first {
+        $0.operation == "proxyRequest"
+            && $0.metadata["alias"] == "MDLEGACY"
+            && $0.metadata["continuityDecision"] == "reuse_legacy_resource_key_fallback"
+            && $0.metadata["status"] == "200"
+    })
+    #expect(proxyRequestEvent.level == .debug)
+}
+
 @Test func facade_proxyRouting_buildAndDecode_roundTripsEncodedRemoteURL() throws {
     let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-proxy-routing")
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -1351,6 +1462,57 @@ private final class RotationContinuityOriginURLProtocol: URLProtocol, @unchecked
 }
 
 private final class CorrelationTraceOriginURLProtocol: URLProtocol, @unchecked Sendable {
+    typealias Handler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var handler: Handler?
+
+    static func setHandler(_ handler: @escaping Handler) {
+        lock.lock()
+        self.handler = handler
+        lock.unlock()
+    }
+
+    static func resetHandler() {
+        lock.lock()
+        handler = nil
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.lock.lock()
+        let handler = Self.handler
+        Self.lock.unlock()
+
+        guard let handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unknown))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if !data.isEmpty {
+                client?.urlProtocol(self, didLoad: data)
+            }
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private final class LegacyFallbackOriginURLProtocol: URLProtocol, @unchecked Sendable {
     typealias Handler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
 
     private static let lock = NSLock()
