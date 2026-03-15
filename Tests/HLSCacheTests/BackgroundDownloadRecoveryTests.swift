@@ -112,6 +112,41 @@ private final class RecordingStructuredLogger: StructuredLogger, @unchecked Send
     #expect(restored.remoteURL == remoteURL)
 }
 
+@Test func backgroundDownloadTaskRegistry_loadFailure_quarantinesFaultyPathAndEmitsTelemetry() throws {
+    let directory = try makeBackgroundDownloadTempDirectory(prefix: "bg-registry-load-failure")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let registryFileURL = directory.appendingPathComponent("background_download_tasks.json")
+    try FileManager.default.createDirectory(at: registryFileURL, withIntermediateDirectories: true)
+
+    let logger = RecordingStructuredLogger()
+    let registry = BackgroundDownloadTaskRegistry(baseDirectory: directory, logger: logger)
+
+    #expect(registry.allRecords().isEmpty)
+
+    let corruptFileURL = directory.appendingPathComponent("background_download_tasks.json.corrupt")
+    var isCorruptDirectory = ObjCBool(false)
+    #expect(FileManager.default.fileExists(atPath: corruptFileURL.path, isDirectory: &isCorruptDirectory))
+    #expect(isCorruptDirectory.boolValue)
+    #expect(FileManager.default.fileExists(atPath: registryFileURL.path))
+
+    let restoredData = try Data(contentsOf: registryFileURL)
+    let restoredRecords = try JSONDecoder.withISO8601.decode([Int: BackgroundDownloadTaskRecord].self, from: restoredData)
+    #expect(restoredRecords.isEmpty)
+
+    let event = try #require(
+        logger.events().first {
+            $0.operation == "loadBackgroundDownloadTaskRegistry"
+                && $0.metadata["result"] == "recovered_load_failure"
+        }
+    )
+    #expect(event.level == .warning)
+    #expect(event.metadata["registryPath"] == registryFileURL.path)
+    #expect(event.metadata["recoveryPath"] == corruptFileURL.path)
+    #expect(event.metadata["recoveryAction"] == "quarantine_and_reset")
+    #expect(!(event.metadata["error"] ?? "").isEmpty)
+}
+
 @Test func backgroundDownloadRecovery_startupReconciliation_purgesOrphansAndEmitsDiagnostics() throws {
     let directory = try makeBackgroundDownloadTempDirectory(prefix: "bg-recovery-reconcile-orphans")
     defer { try? FileManager.default.removeItem(at: directory) }

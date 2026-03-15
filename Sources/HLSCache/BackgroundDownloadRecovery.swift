@@ -153,26 +153,19 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
             decoder.dateDecodingStrategy = .iso8601
             records = try decoder.decode([Int: BackgroundDownloadTaskRecord].self, from: data)
         } catch let decodeError as DecodingError {
-            recoverFromDecodeFailure(decodeError)
+            recoverFromLoadFailure(
+                loadError: decodeError,
+                result: "recovered_decode_failure"
+            )
         } catch {
-            records = [:]
-            logger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "loadBackgroundDownloadTaskRegistry",
-                    level: .error,
-                    metadata: [
-                        "result": "load_failed",
-                        "registryPath": fileURL.path,
-                        "recoveryAction": "in_memory_reset",
-                        "error": String(describing: error)
-                    ]
-                )
+            recoverFromLoadFailure(
+                loadError: error,
+                result: "recovered_load_failure"
             )
         }
     }
 
-    private func recoverFromDecodeFailure(_ decodeError: DecodingError) {
+    private func recoverFromLoadFailure(loadError: Error, result: String) {
         records = [:]
 
         do {
@@ -191,11 +184,11 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
                     operation: "loadBackgroundDownloadTaskRegistry",
                     level: .warning,
                     metadata: [
-                        "result": "recovered_decode_failure",
+                        "result": result,
                         "registryPath": fileURL.path,
                         "recoveryPath": corruptFileURL.path,
                         "recoveryAction": "quarantine_and_reset",
-                        "error": String(describing: decodeError)
+                        "error": String(describing: loadError)
                     ]
                 )
             )
@@ -209,7 +202,7 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
                         "result": "recovery_failed",
                         "registryPath": fileURL.path,
                         "recoveryPath": corruptFileURL.path,
-                        "error": String(describing: decodeError),
+                        "error": String(describing: loadError),
                         "recoveryError": String(describing: error)
                     ]
                 )
