@@ -277,6 +277,12 @@ If a manifest decode fails, recovery quarantines it to `*.json.corrupt`, purges 
 - Recovery emits structured telemetry with `operation=loadBackgroundDownloadTaskRegistry` and `recoveryAction=quarantine_and_reset`.
 - On non-decode load failures, startup follows the same deterministic quarantine-and-reset policy and emits explicit recovery telemetry (`result=recovered_load_failure`) instead of silently dropping pending task state.
 
+### CLI Settings Persistence
+
+- CLI settings are persisted at `BaseDirectory/cli_settings.json`.
+- On corrupted/partial or unreadable settings files, startup quarantines the original file to `cli_settings.json.corrupt` and resets `cli_settings.json` to defaults.
+- CLI surfaces explicit recovery diagnostics (result, settings path, recovery path, action, and reason) so settings resets are traceable and actionable.
+
 ### Background Recovery Reconciliation Policy
 
 - On startup, recovery reconciles `cache` data files and manifests:
