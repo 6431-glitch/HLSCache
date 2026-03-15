@@ -525,6 +525,42 @@ private func seedCachedExporterPlaylistFixture(
     }
 }
 
+@Test func exporter_exportAV1Mode_invalidBitrate_failsBeforeEncoderProbe() throws {
+    let directory = try makeExporterTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedCachedMediaPlaylist(baseDirectory: directory, alias: "MDEXPORT8", completeCache: true, includeKeyTag: false)
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    let outputURL = directory.appendingPathComponent("out/video-av1.mp4")
+    var exportInvoked = false
+    var probeInvoked = false
+
+    let exporter = CLIExporter(
+        baseDirectory: directory,
+        facade: facade,
+        exportRunner: { _, _, _ in
+            exportInvoked = true
+            throw CLIExportError.remuxFailed("export should not run when bitrate is invalid")
+        },
+        encoderAvailabilityChecker: { _ in
+            probeInvoked = true
+        }
+    )
+
+    do {
+        _ = try exporter.export(
+            alias: "MDEXPORT8",
+            outputURL: outputURL,
+            videoCodec: .av1(AV1TranscodeOptions(preset: "6", crf: 32, bitrate: "1400"))
+        )
+        #expect(Bool(false))
+    } catch let error as CLIExportError {
+        #expect(!exportInvoked)
+        #expect(!probeInvoked)
+        #expect(error == .invalidAV1Bitrate("1400"))
+    }
+}
+
 @Test func exporter_exportCompleteCache_reportsProgressEvents() throws {
     let directory = try makeExporterTempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }

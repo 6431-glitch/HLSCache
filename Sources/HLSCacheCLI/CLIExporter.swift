@@ -7,6 +7,7 @@ enum CLIExportError: Error, LocalizedError, Equatable {
     case invalidOutputPath(String)
     case noCachedPlaylist(String)
     case incompleteCache(String)
+    case invalidAV1Bitrate(String)
     case ffmpegUnavailable(String)
     case remuxFailed(String)
 
@@ -20,6 +21,8 @@ enum CLIExportError: Error, LocalizedError, Equatable {
             return "No cached media playlist was found for alias '\(alias)'."
         case let .incompleteCache(reason):
             return "Cache is incomplete: \(reason)"
+        case let .invalidAV1Bitrate(value):
+            return "Invalid AV1 bitrate '\(value)'. Use a positive integer plus unit suffix k or M (examples: 1200k, 2M)."
         case let .ffmpegUnavailable(reason):
             return "ffmpeg is unavailable: \(reason)"
         case let .remuxFailed(reason):
@@ -205,7 +208,12 @@ struct CLIExporter {
         let localPlaylistURL = stagingDirectory.appendingPathComponent("input.m3u8")
         try rewrittenPlaylist.write(to: localPlaylistURL, atomically: true, encoding: .utf8)
 
-        if case .av1 = videoCodec {
+        if case let .av1(options) = videoCodec {
+            if let bitrate = options.bitrate {
+                guard Self.isValidAV1Bitrate(bitrate.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                    throw CLIExportError.invalidAV1Bitrate(bitrate)
+                }
+            }
             try encoderAvailabilityChecker("libsvtav1")
         }
 
@@ -565,5 +573,9 @@ struct CLIExporter {
         let lower = stderrOutput.lowercased()
         return (lower.contains("ffmpeg:") && lower.contains("not found"))
             || (lower.contains("no such file or directory") && lower.contains("ffmpeg"))
+    }
+
+    private static func isValidAV1Bitrate(_ value: String) -> Bool {
+        value.range(of: "^[1-9][0-9]*[kKmM]$", options: .regularExpression) != nil
     }
 }

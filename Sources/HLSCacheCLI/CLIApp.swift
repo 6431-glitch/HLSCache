@@ -916,6 +916,16 @@ struct CLIApp {
             } else {
                 io.writeLine("Export failed after \(elapsedText).")
             }
+            if case .av1 = command.videoCodec, let exportError = error as? CLIExportError {
+                switch exportError {
+                case .invalidAV1Bitrate:
+                    io.writeLine("AV1 argument validation failed.")
+                case .ffmpegUnavailable:
+                    io.writeLine("AV1 preflight failed (encoder availability).")
+                default:
+                    break
+                }
+            }
             io.writeLine(error.localizedDescription)
             return 1
         }

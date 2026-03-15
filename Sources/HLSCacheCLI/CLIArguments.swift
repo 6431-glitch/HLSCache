@@ -275,6 +275,7 @@ struct CLIArguments: Equatable {
                                    Required: --alias, --output <file.mp4>
                                    Optional: --av1 for AV1 transcode mode
                                    Optional AV1 tuning: --av1-preset, --av1-crf, --av1-bitrate
+                                   AV1 bitrate format: <positive-int><k|M> (for example 1200k, 2M)
           settings get              Show persisted CLI settings.
           settings set default-user-agent "<value>"
                                    Persist global default User-Agent.
@@ -548,11 +549,7 @@ struct CLIArguments: Equatable {
                 guard index < args.count else {
                     throw CLIArgumentParseError.missingValue(option)
                 }
-                let value = args[index].trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !value.isEmpty else {
-                    throw CLIArgumentParseError.invalidArgument("AV1 bitrate must not be empty")
-                }
-                av1Bitrate = value
+                av1Bitrate = try parseAV1Bitrate(args[index])
                 index += 1
             default:
                 if option.hasPrefix("-") {
@@ -593,6 +590,23 @@ struct CLIArguments: Equatable {
                 videoCodec: videoCodec
             )
         )
+    }
+
+    private static func parseAV1Bitrate(_ raw: String) throws -> String {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else {
+            throw CLIArgumentParseError.invalidArgument("AV1 bitrate must not be empty")
+        }
+        guard isValidAV1Bitrate(value) else {
+            throw CLIArgumentParseError.invalidArgument(
+                "Invalid AV1 bitrate '\(raw)'. Use a positive integer plus unit suffix k or M (examples: 1200k, 2M)."
+            )
+        }
+        return value
+    }
+
+    private static func isValidAV1Bitrate(_ value: String) -> Bool {
+        value.range(of: "^[1-9][0-9]*[kKmM]$", options: .regularExpression) != nil
     }
 
     private static func parseSettingsCommand(_ args: [String]) throws -> CLICommand {
