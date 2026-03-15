@@ -534,6 +534,72 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     }
 }
 
+@Test func coreCache_concurrencyStress_planMetricsWriteFinalize_remainsConsistent() async throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-metrics-stress")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let cache = try CoreCache(baseDirectory: directory)
+    let resource = try makeCoreCacheResourceID(suffix: "metrics-stress.ts")
+    let totalLength: Int64 = 32 * 1024
+
+    _ = try cache.write(Data(repeating: 0, count: 512), resource: resource, at: 0, expectedLength: totalLength)
+
+    try await withThrowingTaskGroup(of: Void.self) { group in
+        for worker in 0..<4 {
+            group.addTask {
+                for iteration in 0..<240 {
+                    let start = Int64((worker * 53 + iteration * 31) % (Int(totalLength) - 256))
+                    let requested = try br(start, start + 256)
+                    let parts = try cache.plan(resource: resource, requested: requested)
+                    try assertPlanCoherent(parts, requested: requested)
+
+                    let servedBytes = parts.reduce(into: (disk: Int64(0), network: Int64(0))) { partial, part in
+                        switch part {
+                        case let .file(range):
+                            partial.disk += range.length
+                        case let .network(range):
+                            partial.network += range.length
+                        }
+                    }
+                    cache.recordServedBytes(disk: servedBytes.disk, network: servedBytes.network)
+                }
+            }
+        }
+
+        group.addTask {
+            for iteration in 0..<260 {
+                let offset = Int64((iteration * 83) % (Int(totalLength) - 128))
+                let payload = Data(repeating: UInt8((iteration % 220) + 1), count: 128)
+                _ = try cache.write(payload, resource: resource, at: offset, expectedLength: totalLength)
+            }
+        }
+
+        group.addTask {
+            for _ in 0..<120 {
+                _ = try cache.finalizeWrite(resource: resource, expectedLength: totalLength)
+            }
+        }
+
+        group.addTask {
+            for _ in 0..<320 {
+                let snapshot = try cache.metrics()
+                #expect(snapshot.totalRequests >= 0)
+                #expect(snapshot.fullHitRequests + snapshot.partialHitRequests + snapshot.missRequests == snapshot.totalRequests)
+                #expect(snapshot.requestedBytes == snapshot.bytesPlannedFromCache + snapshot.bytesPlannedFromNetwork)
+            }
+        }
+
+        try await group.waitForAll()
+    }
+
+    let record = try #require(try cache.resourceRecord(for: resource))
+    #expect(record.expectedLength == totalLength)
+
+    let finalMetrics = try cache.metrics()
+    #expect(finalMetrics.fullHitRequests + finalMetrics.partialHitRequests + finalMetrics.missRequests == finalMetrics.totalRequests)
+    #expect(finalMetrics.requestedBytes == finalMetrics.bytesPlannedFromCache + finalMetrics.bytesPlannedFromNetwork)
+}
+
 @Test func coreCache_directoryLock_contentionFailsFastWithTypedError_andDataRemainsReadableAfterRelease() throws {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-lock-contention")
     defer { try? FileManager.default.removeItem(at: directory) }

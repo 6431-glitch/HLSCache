@@ -97,7 +97,6 @@ public final class CoreCache: @unchecked Sendable {
     private let manifestStore: ManifestStore
     private let diskQuotaBytes: Int64?
     private let logger: any StructuredLogger
-    private let metricsLock = NSLock()
     private var planMetrics = PlanMetricsAccumulator()
 
     public init(
@@ -118,7 +117,8 @@ public final class CoreCache: @unchecked Sendable {
 
     public func plan(resource: ResourceID, requested: ByteRange) throws -> [ReadPlanPart] {
         let correlationID = UUID().uuidString
-        return try queue.sync {
+        // Planning mutates aggregate counters, so it runs as a barrier mutation.
+        return try queue.sync(flags: .barrier) {
             guard requested.length > 0 else {
                 return []
             }
@@ -162,20 +162,15 @@ public final class CoreCache: @unchecked Sendable {
             return
         }
 
-        metricsLock.lock()
-        planMetrics.bytesServedFromDisk += normalizedDisk
-        planMetrics.bytesServedFromNetwork += normalizedNetwork
-        metricsLock.unlock()
+        queue.sync(flags: .barrier) {
+            planMetrics.bytesServedFromDisk += normalizedDisk
+            planMetrics.bytesServedFromNetwork += normalizedNetwork
+        }
     }
 
     public func metrics() throws -> CoreCacheMetrics {
-        let planSnapshot: PlanMetricsAccumulator = {
-            metricsLock.lock()
-            defer { metricsLock.unlock() }
-            return planMetrics
-        }()
-
         return try queue.sync {
+            let planSnapshot = planMetrics
             let entries = manifestStore.allRecords()
             var bytesByResource: [ResourceID: Int64] = [:]
             var totalBytesOnDisk: Int64 = 0
@@ -458,9 +453,6 @@ public final class CoreCache: @unchecked Sendable {
                 networkBytes += range.length
             }
         }
-
-        metricsLock.lock()
-        defer { metricsLock.unlock() }
 
         planMetrics.totalRequests += 1
         planMetrics.requestedBytes += requestedBytes
