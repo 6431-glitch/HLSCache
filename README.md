@@ -25,6 +25,15 @@ The architecture cleanly separates playback proxying, storage, and background do
 - Thread-safe concurrent read/write support
 - Documented async-first API policy and Swift Concurrency ADR for migration work
 
+### Metrics Semantics
+
+`CoreCacheMetrics` separates planning and serving counters:
+
+- `bytesPlannedFromCache` / `bytesPlannedFromNetwork` reflect `CoreCache.plan(...)` output.
+- `bytesServedFromDisk` / `bytesServedFromNetwork` reflect actual bytes emitted at serve boundaries.
+
+This separation highlights divergence cases (for example, planned cache bytes falling back to network due to corrupted/truncated disk payload).
+
 ---
 
 ## Architecture Decisions

@@ -180,6 +180,19 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     ])
     #expect(networkFetches == 1)
     #expect(payload == Data(originData[256..<512]))
+
+    let metrics = try cache.metrics()
+    #expect(metrics.totalRequests == 2)
+    #expect(metrics.fullHitRequests == 1)
+    #expect(metrics.partialHitRequests == 0)
+    #expect(metrics.missRequests == 1)
+    #expect(metrics.requestedBytes == 768)
+    #expect(metrics.bytesPlannedFromCache == 256)
+    #expect(metrics.bytesPlannedFromNetwork == 512)
+    #expect(metrics.bytesServedFromDisk == 44)
+    #expect(metrics.bytesServedFromNetwork == 724)
+    #expect(abs(metrics.diskServeRatio - (44.0 / 768.0)) < 0.000_000_1)
+    #expect(abs(metrics.networkServeRatio - (724.0 / 768.0)) < 0.000_000_1)
 }
 
 @Test func proxyCacheCoordinator_networkChunkLengthMismatch_throws() throws {

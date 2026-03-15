@@ -85,6 +85,8 @@ public final class CoreCache: @unchecked Sendable {
         var requestedBytes: Int64 = 0
         var bytesPlannedFromCache: Int64 = 0
         var bytesPlannedFromNetwork: Int64 = 0
+        var bytesServedFromDisk: Int64 = 0
+        var bytesServedFromNetwork: Int64 = 0
     }
 
     // Single synchronization strategy for mutable CoreCache state.
@@ -153,6 +155,19 @@ public final class CoreCache: @unchecked Sendable {
         }
     }
 
+    public func recordServedBytes(disk: Int64 = 0, network: Int64 = 0) {
+        let normalizedDisk = max(Int64(0), disk)
+        let normalizedNetwork = max(Int64(0), network)
+        guard normalizedDisk > 0 || normalizedNetwork > 0 else {
+            return
+        }
+
+        metricsLock.lock()
+        planMetrics.bytesServedFromDisk += normalizedDisk
+        planMetrics.bytesServedFromNetwork += normalizedNetwork
+        metricsLock.unlock()
+    }
+
     public func metrics() throws -> CoreCacheMetrics {
         let planSnapshot: PlanMetricsAccumulator = {
             metricsLock.lock()
@@ -198,8 +213,8 @@ public final class CoreCache: @unchecked Sendable {
             }
             .sorted { $0.cacheKey.rawValue < $1.cacheKey.rawValue }
 
-            let bytesServedFromDisk = planSnapshot.bytesPlannedFromCache
-            let bytesServedFromNetwork = planSnapshot.bytesPlannedFromNetwork
+            let bytesServedFromDisk = planSnapshot.bytesServedFromDisk
+            let bytesServedFromNetwork = planSnapshot.bytesServedFromNetwork
             let diskServeRatio = planSnapshot.requestedBytes > 0
                 ? Double(bytesServedFromDisk) / Double(planSnapshot.requestedBytes)
                 : 0

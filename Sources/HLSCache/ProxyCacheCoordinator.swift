@@ -230,6 +230,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                     pluginsApplied: writeProcessor.pluginStamps
                 )
                 try emit(networkData)
+                coreCache.recordServedBytes(network: Int64(networkData.count))
                 chunks.append(ProxyStreamChunk(source: .network, range: range, byteCount: networkData.count))
                 totalStreamed += Int64(networkData.count)
                 wroteNetworkData = true
@@ -245,6 +246,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                     let payload = Data(cachedData.prefix(expectedCount))
                     let decodedPayload = try readProcessor.process(payload, isFinal: isResponseFinalPart)
                     try emit(decodedPayload)
+                    coreCache.recordServedBytes(disk: Int64(decodedPayload.count))
                     chunks.append(ProxyStreamChunk(source: .cache, range: range, byteCount: expectedCount))
                     totalStreamed += Int64(expectedCount)
                     continue
@@ -259,6 +261,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                 if !cachedData.isEmpty {
                     let decodedPayload = try readProcessor.process(cachedData, isFinal: false)
                     try emit(decodedPayload)
+                    coreCache.recordServedBytes(disk: Int64(decodedPayload.count))
                     let availableRange = try requireRange(
                         start: range.start,
                         endExclusive: range.start + Int64(cachedData.count)
@@ -282,6 +285,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                     pluginsApplied: missingWriteProcessor.pluginStamps
                 )
                 try emit(networkData)
+                coreCache.recordServedBytes(network: Int64(networkData.count))
                 chunks.append(ProxyStreamChunk(source: .network, range: missingRange, byteCount: networkData.count))
                 totalStreamed += Int64(networkData.count)
                 wroteNetworkData = true
@@ -502,6 +506,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
 
             let emittedChunk = ProxyStreamChunk(source: .network, range: chunkRange, byteCount: networkData.count)
             try await emitChunk(emittedChunk, networkData)
+            coreCache.recordServedBytes(network: Int64(networkData.count))
             chunks.append(emittedChunk)
             totalBytesStreamed += Int64(networkData.count)
             cursor = chunkRange.endExclusive
@@ -546,6 +551,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                 let decodedPayload = try readProcessor.process(payload, isFinal: isFinalChunk)
                 let emittedChunk = ProxyStreamChunk(source: .cache, range: chunkRange, byteCount: expectedCount)
                 try await emitChunk(emittedChunk, decodedPayload)
+                coreCache.recordServedBytes(disk: Int64(decodedPayload.count))
                 chunks.append(emittedChunk)
                 totalBytesStreamed += Int64(expectedCount)
                 cursor = chunkRange.endExclusive
@@ -558,6 +564,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                 let decodedPayload = try readProcessor.process(cachedData, isFinal: false)
                 let emittedChunk = ProxyStreamChunk(source: .cache, range: availableRange, byteCount: cachedData.count)
                 try await emitChunk(emittedChunk, decodedPayload)
+                coreCache.recordServedBytes(disk: Int64(decodedPayload.count))
                 chunks.append(emittedChunk)
                 totalBytesStreamed += Int64(cachedData.count)
                 cursor = availableEnd
