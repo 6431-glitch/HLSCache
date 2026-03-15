@@ -112,6 +112,114 @@ private final class RecordingStructuredLogger: StructuredLogger, @unchecked Send
     #expect(restored.remoteURL == remoteURL)
 }
 
+@Test func backgroundDownloadRecovery_startupReconciliation_purgesOrphansAndEmitsDiagnostics() throws {
+    let directory = try makeBackgroundDownloadTempDirectory(prefix: "bg-recovery-reconcile-orphans")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let diskStore = DiskStore(baseDirectory: directory)
+    let manifestStore = ManifestStore(baseDirectory: directory)
+
+    let orphanDataResource = try makeBackgroundDownloadResourceID(assetID: "asset-bg-orphan-data", suffix: "seg-orphan-data.ts")
+    let orphanManifestResource = try makeBackgroundDownloadResourceID(assetID: "asset-bg-orphan-manifest", suffix: "seg-orphan-manifest.ts")
+    let stagingResource = try makeBackgroundDownloadResourceID(assetID: "asset-bg-orphan-staging", suffix: "seg-orphan-staging.ts")
+
+    let orphanDataPayload = Data("ORPHAN-DATA".utf8)
+    _ = try diskStore.write(orphanDataPayload, for: orphanDataResource, at: 0)
+
+    var orphanManifestRecord = ResourceRecord(kind: orphanManifestResource.kind)
+    orphanManifestRecord.originalURL = URL(string: "https://origin.example.com/seg-orphan-manifest.ts")
+    orphanManifestRecord.expectedLength = 25
+    orphanManifestRecord.touch()
+    try manifestStore.save(resourceID: orphanManifestResource, record: orphanManifestRecord)
+
+    let stagingURL = diskStore.dataFileURL(for: stagingResource).appendingPathExtension("downloading")
+    try FileManager.default.createDirectory(at: stagingURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let orphanStagingPayload = Data("PARTIAL".utf8)
+    try orphanStagingPayload.write(to: stagingURL)
+
+    let logger = RecordingStructuredLogger()
+    _ = BackgroundDownloadRecoveryCoordinator(baseDirectory: directory, logger: logger)
+
+    #expect(FileManager.default.fileExists(atPath: diskStore.dataFileURL(for: orphanDataResource).path) == false)
+    #expect(try manifestStore.load(resourceID: orphanManifestResource) == nil)
+    #expect(FileManager.default.fileExists(atPath: stagingURL.path) == false)
+
+    let orphanDataEvent = try #require(
+        logger.events().first {
+            $0.operation == "reconcileBackgroundStartup"
+                && $0.metadata["action"] == "purgeOrphanData"
+                && $0.metadata["cacheKey"] == orphanDataResource.cacheKey.rawValue
+        }
+    )
+    #expect(orphanDataEvent.level == .warning)
+    #expect(orphanDataEvent.metadata["bytes"] == String(orphanDataPayload.count))
+
+    let orphanManifestEvent = try #require(
+        logger.events().first {
+            $0.operation == "reconcileBackgroundStartup"
+                && $0.metadata["action"] == "purgeOrphanManifest"
+                && $0.metadata["cacheKey"] == orphanManifestResource.cacheKey.rawValue
+        }
+    )
+    #expect(orphanManifestEvent.level == .warning)
+
+    let orphanStagingEvent = try #require(
+        logger.events().first {
+            $0.operation == "reconcileBackgroundStartup"
+                && $0.metadata["action"] == "purgeOrphanDownloadStaging"
+                && $0.metadata["bytes"] == String(orphanStagingPayload.count)
+        }
+    )
+    #expect(orphanStagingEvent.level == .warning)
+    #expect((orphanStagingEvent.metadata["path"] ?? "").hasSuffix(".downloading"))
+    #expect(orphanStagingEvent.metadata["bytes"] == String(orphanStagingPayload.count))
+
+    let summaryEvent = try #require(
+        logger.events().first {
+            $0.operation == "reconcileBackgroundStartup" && $0.metadata["action"] == "summary"
+        }
+    )
+    #expect(summaryEvent.metadata["orphanManifestCount"] == "1")
+    #expect(summaryEvent.metadata["orphanDataCount"] == "1")
+    #expect(summaryEvent.metadata["orphanDownloadStagingCount"] == "1")
+}
+
+@Test func backgroundDownloadRecovery_startupReconciliation_keepsMatchedStateUnchanged() throws {
+    let directory = try makeBackgroundDownloadTempDirectory(prefix: "bg-recovery-reconcile-matched")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let diskStore = DiskStore(baseDirectory: directory)
+    let manifestStore = ManifestStore(baseDirectory: directory)
+    let resourceID = try makeBackgroundDownloadResourceID(assetID: "asset-bg-reconcile-keep", suffix: "seg-reconcile-keep.ts")
+
+    let payload = Data("MATCHED-DATA".utf8)
+    let writtenRange = try diskStore.write(payload, for: resourceID, at: 0)
+
+    var record = ResourceRecord(kind: resourceID.kind)
+    record.originalURL = URL(string: "https://origin.example.com/seg-reconcile-keep.ts")
+    record.expectedLength = Int64(payload.count)
+    record.completedRanges.insert(writtenRange)
+    record.touch()
+    try manifestStore.save(resourceID: resourceID, record: record)
+
+    let logger = RecordingStructuredLogger()
+    _ = BackgroundDownloadRecoveryCoordinator(baseDirectory: directory, logger: logger)
+
+    #expect(FileManager.default.fileExists(atPath: diskStore.dataFileURL(for: resourceID).path))
+    let restored = try #require(try manifestStore.load(resourceID: resourceID))
+    #expect(restored.expectedLength == Int64(payload.count))
+    #expect(restored.completedRanges.contains(writtenRange))
+
+    let summaryEvent = try #require(
+        logger.events().first {
+            $0.operation == "reconcileBackgroundStartup" && $0.metadata["action"] == "summary"
+        }
+    )
+    #expect(summaryEvent.metadata["orphanManifestCount"] == "0")
+    #expect(summaryEvent.metadata["orphanDataCount"] == "0")
+    #expect(summaryEvent.metadata["orphanDownloadStagingCount"] == "0")
+}
+
 @Test func backgroundDownloadRecovery_recoverPendingTasks_prunesStaleMappings() throws {
     let directory = try makeBackgroundDownloadTempDirectory(prefix: "bg-recovery-relaunch")
     defer { try? FileManager.default.removeItem(at: directory) }

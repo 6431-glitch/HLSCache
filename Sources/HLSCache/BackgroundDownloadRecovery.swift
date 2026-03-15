@@ -250,6 +250,8 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
 
 public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable {
     private let fileManager: FileManager
+    private let baseDirectory: URL
+    private let logger: any StructuredLogger
     public let registry: BackgroundDownloadTaskRegistry
     private let diskStore: DiskStore
     private let manifestStore: ManifestStore
@@ -263,9 +265,14 @@ public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable {
         logger: any StructuredLogger = NoopStructuredLogger()
     ) {
         self.fileManager = .default
+        self.baseDirectory = baseDirectory
+        self.logger = logger
         self.registry = registry ?? BackgroundDownloadTaskRegistry(baseDirectory: baseDirectory, logger: logger)
         self.diskStore = diskStore ?? DiskStore(baseDirectory: baseDirectory)
         self.manifestStore = manifestStore ?? ManifestStore(baseDirectory: baseDirectory)
+        queue.sync(flags: .barrier) {
+            reconcileStorageOnStartup()
+        }
     }
 
     @discardableResult
@@ -362,5 +369,199 @@ public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable {
     private func fileLength(at fileURL: URL) throws -> Int64 {
         let attributes = try fileManager.attributesOfItem(atPath: fileURL.path)
         return (attributes[.size] as? NSNumber)?.int64Value ?? 0
+    }
+
+    private func reconcileStorageOnStartup() {
+        let correlationID = UUID().uuidString
+
+        do {
+            let manifestIDs = Set(manifestStore.allRecords().map(\.resourceID))
+            let dataIDs = Set(allStoredResourceIDs())
+
+            let orphanManifestIDs = manifestIDs.subtracting(dataIDs).sorted(by: Self.resourceIDSort)
+            let orphanDataIDs = dataIDs.subtracting(manifestIDs).sorted(by: Self.resourceIDSort)
+            let orphanStagingURLs = try allOrphanDownloadStagingURLs()
+
+            var purgedOrphanDataBytes: Int64 = 0
+            var purgedOrphanStagingBytes: Int64 = 0
+
+            for resourceID in orphanManifestIDs {
+                try manifestStore.delete(resourceID: resourceID)
+                logger.log(
+                    StructuredLogEvent(
+                        subsystem: "HLSCache",
+                        operation: "reconcileBackgroundStartup",
+                        level: .warning,
+                        correlationID: correlationID,
+                        metadata: [
+                            "action": "purgeOrphanManifest",
+                            "cacheKey": resourceID.cacheKey.rawValue,
+                            "kind": resourceID.kind.rawValue
+                        ]
+                    )
+                )
+            }
+
+            for resourceID in orphanDataIDs {
+                let bytes = try diskStore.fileLength(for: resourceID)
+                try diskStore.remove(resourceID: resourceID)
+                purgedOrphanDataBytes += bytes
+                logger.log(
+                    StructuredLogEvent(
+                        subsystem: "HLSCache",
+                        operation: "reconcileBackgroundStartup",
+                        level: .warning,
+                        correlationID: correlationID,
+                        metadata: [
+                            "action": "purgeOrphanData",
+                            "cacheKey": resourceID.cacheKey.rawValue,
+                            "kind": resourceID.kind.rawValue,
+                            "bytes": String(bytes)
+                        ]
+                    )
+                )
+            }
+
+            for stagingURL in orphanStagingURLs {
+                let bytes = (try? fileLength(at: stagingURL)) ?? 0
+                try fileManager.removeItem(at: stagingURL)
+                purgedOrphanStagingBytes += bytes
+                logger.log(
+                    StructuredLogEvent(
+                        subsystem: "HLSCache",
+                        operation: "reconcileBackgroundStartup",
+                        level: .warning,
+                        correlationID: correlationID,
+                        metadata: [
+                            "action": "purgeOrphanDownloadStaging",
+                            "path": stagingURL.path,
+                            "bytes": String(bytes)
+                        ]
+                    )
+                )
+            }
+
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "reconcileBackgroundStartup",
+                    level: .info,
+                    correlationID: correlationID,
+                    metadata: [
+                        "action": "summary",
+                        "orphanManifestCount": String(orphanManifestIDs.count),
+                        "orphanDataCount": String(orphanDataIDs.count),
+                        "orphanDownloadStagingCount": String(orphanStagingURLs.count),
+                        "purgedOrphanDataBytes": String(purgedOrphanDataBytes),
+                        "purgedOrphanDownloadStagingBytes": String(purgedOrphanStagingBytes)
+                    ]
+                )
+            )
+        } catch {
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "reconcileBackgroundStartup",
+                    level: .error,
+                    correlationID: correlationID,
+                    metadata: [
+                        "action": "failed",
+                        "error": String(describing: error)
+                    ]
+                )
+            )
+        }
+    }
+
+    private func allOrphanDownloadStagingURLs() throws -> [URL] {
+        let cacheDirectory = baseDirectory.appendingPathComponent("cache", isDirectory: true)
+        guard fileManager.fileExists(atPath: cacheDirectory.path) else {
+            return []
+        }
+
+        let enumerator = fileManager.enumerator(
+            at: cacheDirectory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )
+
+        var stagingURLs: [URL] = []
+        while let entry = enumerator?.nextObject() as? URL {
+            guard entry.pathExtension == "downloading" else {
+                continue
+            }
+            let values = try? entry.resourceValues(forKeys: [.isRegularFileKey])
+            guard values?.isRegularFile ?? true else {
+                continue
+            }
+            stagingURLs.append(entry)
+        }
+
+        return stagingURLs.sorted { $0.path < $1.path }
+    }
+
+    private func allStoredResourceIDs() -> [ResourceID] {
+        let cacheDirectory = baseDirectory.appendingPathComponent("cache", isDirectory: true)
+        guard fileManager.fileExists(atPath: cacheDirectory.path) else {
+            return []
+        }
+
+        guard let enumerator = fileManager.enumerator(
+            at: cacheDirectory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        let cacheComponents = cacheDirectory.resolvingSymlinksInPath().pathComponents
+        var resourceIDs: [ResourceID] = []
+        resourceIDs.reserveCapacity(32)
+
+        for case let fileURL as URL in enumerator {
+            guard let resourceID = resourceID(from: fileURL, under: cacheComponents, fileExtension: "bin") else {
+                continue
+            }
+            resourceIDs.append(resourceID)
+        }
+
+        return resourceIDs
+    }
+
+    private func resourceID(from fileURL: URL, under cacheComponents: [String], fileExtension: String) -> ResourceID? {
+        guard fileURL.pathExtension == fileExtension else {
+            return nil
+        }
+
+        guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]),
+              values.isRegularFile == true else {
+            return nil
+        }
+
+        let fileComponents = fileURL.resolvingSymlinksInPath().pathComponents
+        guard fileComponents.count >= cacheComponents.count,
+              Array(fileComponents.prefix(cacheComponents.count)) == cacheComponents else {
+            return nil
+        }
+
+        let components = Array(fileComponents.dropFirst(cacheComponents.count))
+        guard components.count == 4,
+              components[1] == "resources",
+              let kind = ResourceKind(rawValue: components[2]) else {
+            return nil
+        }
+
+        let resourceKey = URL(fileURLWithPath: components[3]).deletingPathExtension().lastPathComponent
+        return ResourceID(cacheKey: CacheKey(rawValue: components[0]), kind: kind, resourceKey: resourceKey)
+    }
+
+    private static func resourceIDSort(lhs: ResourceID, rhs: ResourceID) -> Bool {
+        if lhs.cacheKey.rawValue != rhs.cacheKey.rawValue {
+            return lhs.cacheKey.rawValue < rhs.cacheKey.rawValue
+        }
+        if lhs.kind.rawValue != rhs.kind.rawValue {
+            return lhs.kind.rawValue < rhs.kind.rawValue
+        }
+        return lhs.resourceKey < rhs.resourceKey
     }
 }
