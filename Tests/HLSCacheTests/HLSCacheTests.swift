@@ -530,7 +530,239 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(keyData == Data(keyPayload[2..<6]))
 }
 
+@Test func facade_proxyRuntime_servesRewrittenSegmentAndKeyRoutes_overLocalhostTransport() async throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-runtime-playback-routes")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let playlistURL = try #require(URL(string: "https://origin.example.com/hls/media.m3u8"))
+    let segmentRemoteURL = try #require(URL(string: "https://origin.example.com/hls/seg-1.ts"))
+    let keyRemoteURL = try #require(URL(string: "https://origin.example.com/hls/keys/enc.key"))
+    let segmentPayload = Data((0..<16).map { UInt8($0 + 10) })
+    let keyPayload = Data([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF])
+    let originRequestCounter = OriginRequestCounter()
+
+    let originHeaders = ["X-Origin-Token": "token-playback-1"]
+    let sessionConfiguration = URLSessionConfiguration.ephemeral
+    sessionConfiguration.protocolClasses = [RewrittenRouteOriginURLProtocol.self]
+    let originSession = URLSession(configuration: sessionConfiguration)
+
+    RewrittenRouteOriginURLProtocol.setHandler { request in
+        #expect(request.value(forHTTPHeaderField: "X-Origin-Token") == originHeaders["X-Origin-Token"])
+        let url = try #require(request.url)
+        let method = (request.httpMethod ?? "GET").uppercased()
+        originRequestCounter.record(method: method, url: url)
+
+        let payload: Data
+        let contentType: String
+        switch url {
+        case segmentRemoteURL:
+            payload = segmentPayload
+            contentType = "video/mp2t"
+        case keyRemoteURL:
+            payload = keyPayload
+            contentType = "application/octet-stream"
+        default:
+            let response = try #require(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 404,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Length": "0"]
+                )
+            )
+            return (response, Data())
+        }
+
+        if method == "HEAD" {
+            let response = try #require(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: [
+                        "Content-Length": String(payload.count),
+                        "Content-Type": contentType
+                    ]
+                )
+            )
+            return (response, Data())
+        }
+
+        let totalLength = Int64(payload.count)
+        let rangeValue = request.value(forHTTPHeaderField: "Range")
+        let parsedRange = rangeValue.flatMap { ByteRange.parseHTTPRange($0, totalLength: totalLength) }
+            ?? ByteRange(start: 0, endExclusive: totalLength)
+        let range = try #require(parsedRange)
+        let start = Int(range.start)
+        let endExclusive = Int(range.endExclusive)
+        let slice = Data(payload[start..<endExclusive])
+        let response = try #require(
+            HTTPURLResponse(
+                url: url,
+                statusCode: 206,
+                httpVersion: "HTTP/1.1",
+                headerFields: [
+                    "Content-Length": String(slice.count),
+                    "Content-Range": "bytes \(range.start)-\(range.endExclusive - 1)/\(payload.count)",
+                    "Content-Type": contentType
+                ]
+            )
+        )
+        return (response, slice)
+    }
+    defer { RewrittenRouteOriginURLProtocol.resetHandler() }
+
+    let facade = HLSCacheFacade(baseDirectory: directory, networkSession: originSession)
+    _ = try facade.register(
+        alias: "MDPLAY",
+        assetID: "asset-playback",
+        remoteURL: playlistURL,
+        headers: originHeaders
+    )
+    _ = try facade.startServer(host: "127.0.0.1", port: 0)
+    defer { facade.stopServer() }
+
+    let playlistFixture = """
+    #EXTM3U
+    #EXT-X-VERSION:3
+    #EXT-X-KEY:METHOD=AES-128,URI="keys/enc.key"
+    #EXTINF:4.0,
+    seg-1.ts
+    #EXT-X-ENDLIST
+    """
+
+    let rewrittenPlaylist = try HLSPlaylistRewriter.rewrite(
+        playlistFixture,
+        alias: "MDPLAY",
+        playlistURL: playlistURL
+    ) { alias, kind, remoteURL in
+        try facade.proxyURL(for: alias, kind: kind, remoteURL: remoteURL)
+    }
+
+    let rewritten = HLSPlaylistParser.parse(rewrittenPlaylist, playlistURL: playlistURL)
+    #expect(rewritten.segments.count == 1)
+    #expect(rewritten.keys.count == 1)
+
+    let segmentProxyURL = try #require(rewritten.segments.first?.remoteURL)
+    let keyProxyURL = try #require(rewritten.keys.first?.remoteURL)
+
+    let decodedSegmentRoute = try facade.decodeProxyRequestURL(segmentProxyURL)
+    #expect(decodedSegmentRoute.kind == .segment)
+    #expect(decodedSegmentRoute.remoteURL == segmentRemoteURL)
+
+    let decodedKeyRoute = try facade.decodeProxyRequestURL(keyProxyURL)
+    #expect(decodedKeyRoute.kind == .key)
+    #expect(decodedKeyRoute.remoteURL == keyRemoteURL)
+
+    let proxySession = URLSession(configuration: .ephemeral)
+
+    let (firstSegmentData, firstSegmentResponse) = try await proxySession.data(from: segmentProxyURL)
+    let firstSegmentHTTPResponse = try #require(firstSegmentResponse as? HTTPURLResponse)
+    #expect(firstSegmentHTTPResponse.statusCode == 200)
+    #expect(firstSegmentHTTPResponse.value(forHTTPHeaderField: "Accept-Ranges") == "bytes")
+    #expect(firstSegmentHTTPResponse.value(forHTTPHeaderField: "Content-Length") == String(segmentPayload.count))
+    #expect(firstSegmentData == segmentPayload)
+    let segmentOriginRequestsAfterFirstGET = originRequestCounter.totalRequests(for: segmentRemoteURL)
+    #expect(segmentOriginRequestsAfterFirstGET >= 1)
+
+    let (secondSegmentData, secondSegmentResponse) = try await proxySession.data(from: segmentProxyURL)
+    let secondSegmentHTTPResponse = try #require(secondSegmentResponse as? HTTPURLResponse)
+    #expect(secondSegmentHTTPResponse.statusCode == 200)
+    #expect(secondSegmentHTTPResponse.value(forHTTPHeaderField: "Accept-Ranges") == "bytes")
+    #expect(secondSegmentHTTPResponse.value(forHTTPHeaderField: "Content-Length") == String(segmentPayload.count))
+    #expect(secondSegmentData == segmentPayload)
+
+    var segmentHeadRequest = URLRequest(url: segmentProxyURL)
+    segmentHeadRequest.httpMethod = "HEAD"
+    let (segmentHeadData, segmentHeadResponse) = try await proxySession.data(for: segmentHeadRequest)
+    let segmentHeadHTTPResponse = try #require(segmentHeadResponse as? HTTPURLResponse)
+    #expect(segmentHeadHTTPResponse.statusCode == 200)
+    #expect(segmentHeadHTTPResponse.value(forHTTPHeaderField: "Accept-Ranges") == "bytes")
+    #expect(segmentHeadHTTPResponse.value(forHTTPHeaderField: "Content-Length") == String(segmentPayload.count))
+    #expect(segmentHeadData.isEmpty)
+    let segmentOriginRequestsAfterCacheHitAndHEAD = originRequestCounter.totalRequests(for: segmentRemoteURL)
+    #expect(segmentOriginRequestsAfterCacheHitAndHEAD == segmentOriginRequestsAfterFirstGET)
+
+    let (firstKeyData, firstKeyResponse) = try await proxySession.data(from: keyProxyURL)
+    let firstKeyHTTPResponse = try #require(firstKeyResponse as? HTTPURLResponse)
+    #expect(firstKeyHTTPResponse.statusCode == 200)
+    #expect(firstKeyHTTPResponse.value(forHTTPHeaderField: "Accept-Ranges") == "bytes")
+    #expect(firstKeyHTTPResponse.value(forHTTPHeaderField: "Content-Length") == String(keyPayload.count))
+    #expect(firstKeyData == keyPayload)
+    let keyOriginRequestsAfterFirstGET = originRequestCounter.totalRequests(for: keyRemoteURL)
+    #expect(keyOriginRequestsAfterFirstGET >= 1)
+
+    let (secondKeyData, secondKeyResponse) = try await proxySession.data(from: keyProxyURL)
+    let secondKeyHTTPResponse = try #require(secondKeyResponse as? HTTPURLResponse)
+    #expect(secondKeyHTTPResponse.statusCode == 200)
+    #expect(secondKeyHTTPResponse.value(forHTTPHeaderField: "Accept-Ranges") == "bytes")
+    #expect(secondKeyHTTPResponse.value(forHTTPHeaderField: "Content-Length") == String(keyPayload.count))
+    #expect(secondKeyData == keyPayload)
+
+    var keyHeadRequest = URLRequest(url: keyProxyURL)
+    keyHeadRequest.httpMethod = "HEAD"
+    let (keyHeadData, keyHeadResponse) = try await proxySession.data(for: keyHeadRequest)
+    let keyHeadHTTPResponse = try #require(keyHeadResponse as? HTTPURLResponse)
+    #expect(keyHeadHTTPResponse.statusCode == 200)
+    #expect(keyHeadHTTPResponse.value(forHTTPHeaderField: "Accept-Ranges") == "bytes")
+    #expect(keyHeadHTTPResponse.value(forHTTPHeaderField: "Content-Length") == String(keyPayload.count))
+    #expect(keyHeadData.isEmpty)
+    let keyOriginRequestsAfterCacheHitAndHEAD = originRequestCounter.totalRequests(for: keyRemoteURL)
+    #expect(keyOriginRequestsAfterCacheHitAndHEAD == keyOriginRequestsAfterFirstGET)
+}
+
 private final class ProxyRuntimeOriginURLProtocol: URLProtocol, @unchecked Sendable {
+    typealias Handler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var handler: Handler?
+
+    static func setHandler(_ handler: @escaping Handler) {
+        lock.lock()
+        self.handler = handler
+        lock.unlock()
+    }
+
+    static func resetHandler() {
+        lock.lock()
+        handler = nil
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.lock.lock()
+        let handler = Self.handler
+        Self.lock.unlock()
+
+        guard let handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unknown))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if !data.isEmpty {
+                client?.urlProtocol(self, didLoad: data)
+            }
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private final class RewrittenRouteOriginURLProtocol: URLProtocol, @unchecked Sendable {
     typealias Handler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
 
     private static let lock = NSLock()
