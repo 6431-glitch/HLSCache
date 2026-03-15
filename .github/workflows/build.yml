@@ -18,3 +18,10 @@ jobs:
       run: swift build -v
     - name: Run tests
       run: swift test -v
+    - name: HLS-84 readiness gate (minimum)
+      if: ${{ secrets.JIRA_BASE_URL != '' && secrets.JIRA_USER_EMAIL != '' && secrets.JIRA_API_TOKEN != '' }}
+      env:
+        JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+        JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+        JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+      run: swift Scripts/check_hls84_readiness_gate.swift --mode minimum --format text

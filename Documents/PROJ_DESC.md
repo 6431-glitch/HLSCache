@@ -266,8 +266,12 @@ The CLI epic (`HLS-84`) must not be marked complete until lower-layer dependency
 
 ## Enforcement
 
-- Before moving `HLS-84` to `Done`, run a Jira check against the dependency keys and verify statuses explicitly.
-- Record the gate result in the final CLI completion ticket comment (pass/fail + status snapshot).
+- Before moving `HLS-84` to `Done`, run the automated gate checker:
+  - `swift Scripts/check_hls84_readiness_gate.swift --mode final --format text`
+  - Required environment: `JIRA_BASE_URL`, `JIRA_USER_EMAIL`, `JIRA_API_TOKEN`.
+- For ongoing CLI delivery checks, use:
+  - `swift Scripts/check_hls84_readiness_gate.swift --mode minimum --format text`
+- Record the gate result in the final CLI completion ticket comment (pass/fail + timestamped status snapshot).
 
 ---
 
