@@ -110,7 +110,8 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         var totalStreamed: Int64 = 0
         var wroteNetworkData = false
 
-        for part in plan {
+        for (index, part) in plan.enumerated() {
+            let isResponseFinalPart = index == plan.count - 1
             switch part {
             case let .network(range):
                 guard allowNetworkFallback else {
@@ -126,6 +127,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                     contentType: contentType,
                     networkClient: networkClient,
                     chunkSizeBytes: normalizedChunkSize,
+                    isResponseFinalPart: isResponseFinalPart,
                     emitChunk: emitChunk
                 )
                 chunks.append(contentsOf: networkResult.chunks)
@@ -143,6 +145,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                     allowNetworkFallback: allowNetworkFallback,
                     networkClient: networkClient,
                     chunkSizeBytes: normalizedChunkSize,
+                    isResponseFinalPart: isResponseFinalPart,
                     emitChunk: emitChunk
                 )
                 chunks.append(contentsOf: fileResult.chunks)
@@ -179,7 +182,8 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         var totalStreamed: Int64 = 0
         var wroteNetworkData = false
 
-        for part in plan {
+        for (index, part) in plan.enumerated() {
+            let isResponseFinalPart = index == plan.count - 1
             switch part {
             case let .network(range):
                 guard allowNetworkFallback else {
@@ -190,7 +194,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                     context: TransformContext(resourceID: resourceID, byteOffset: range.start),
                     direction: .writeToCache
                 )
-                let cachePayload = try writeProcessor.process(networkData, isFinal: true)
+                let cachePayload = try writeProcessor.process(networkData, isFinal: isResponseFinalPart)
                 _ = try coreCache.write(
                     cachePayload,
                     resource: resourceID,
@@ -213,7 +217,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                 if cachedData.count >= Int(range.length) {
                     let expectedCount = Int(range.length)
                     let payload = Data(cachedData.prefix(expectedCount))
-                    let decodedPayload = try readProcessor.process(payload, isFinal: true)
+                    let decodedPayload = try readProcessor.process(payload, isFinal: isResponseFinalPart)
                     try emit(decodedPayload)
                     chunks.append(ProxyStreamChunk(source: .cache, range: range, byteCount: expectedCount))
                     totalStreamed += Int64(expectedCount)
@@ -227,7 +231,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                 }
 
                 if !cachedData.isEmpty {
-                    let decodedPayload = try readProcessor.process(cachedData, isFinal: true)
+                    let decodedPayload = try readProcessor.process(cachedData, isFinal: false)
                     try emit(decodedPayload)
                     let availableRange = try requireRange(
                         start: range.start,
@@ -242,7 +246,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                     context: TransformContext(resourceID: resourceID, byteOffset: missingRange.start),
                     direction: .writeToCache
                 )
-                let cachePayload = try missingWriteProcessor.process(networkData, isFinal: true)
+                let cachePayload = try missingWriteProcessor.process(networkData, isFinal: isResponseFinalPart)
                 _ = try coreCache.write(
                     cachePayload,
                     resource: resourceID,
@@ -315,6 +319,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         contentType: String?,
         networkClient: any NetworkClient,
         chunkSizeBytes: Int64,
+        isResponseFinalPart: Bool,
         emitChunk: (ProxyStreamChunk, Data) async throws -> Void
     ) async throws -> (chunks: [ProxyStreamChunk], totalBytesStreamed: Int64) {
         let writeProcessor = transformPipeline.makeProcessor(
@@ -337,7 +342,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
                 headers: headers,
                 using: networkClient
             )
-            let isFinalChunk = chunkRange.endExclusive == range.endExclusive
+            let isFinalChunk = isResponseFinalPart && chunkRange.endExclusive == range.endExclusive
             let cachePayload = try writeProcessor.process(networkData, isFinal: isFinalChunk)
             _ = try coreCache.write(
                 cachePayload,
@@ -369,6 +374,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         allowNetworkFallback: Bool,
         networkClient: any NetworkClient,
         chunkSizeBytes: Int64,
+        isResponseFinalPart: Bool,
         emitChunk: (ProxyStreamChunk, Data) async throws -> Void
     ) async throws -> (chunks: [ProxyStreamChunk], totalBytesStreamed: Int64, wroteNetworkData: Bool) {
         let readProcessor = transformPipeline.makeProcessor(
@@ -389,7 +395,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
             if cachedData.count >= Int(chunkRange.length) {
                 let expectedCount = Int(chunkRange.length)
                 let payload = Data(cachedData.prefix(expectedCount))
-                let isFinalChunk = chunkRange.endExclusive == range.endExclusive
+                let isFinalChunk = isResponseFinalPart && chunkRange.endExclusive == range.endExclusive
                 let decodedPayload = try readProcessor.process(payload, isFinal: isFinalChunk)
                 let emittedChunk = ProxyStreamChunk(source: .cache, range: chunkRange, byteCount: expectedCount)
                 try await emitChunk(emittedChunk, decodedPayload)
@@ -402,7 +408,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
             if !cachedData.isEmpty {
                 let availableEnd = chunkRange.start + Int64(cachedData.count)
                 let availableRange = try requireRange(start: chunkRange.start, endExclusive: availableEnd)
-                let decodedPayload = try readProcessor.process(cachedData, isFinal: true)
+                let decodedPayload = try readProcessor.process(cachedData, isFinal: false)
                 let emittedChunk = ProxyStreamChunk(source: .cache, range: availableRange, byteCount: cachedData.count)
                 try await emitChunk(emittedChunk, decodedPayload)
                 chunks.append(emittedChunk)
@@ -432,6 +438,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
             contentType: contentType,
             networkClient: networkClient,
             chunkSizeBytes: chunkSizeBytes,
+            isResponseFinalPart: isResponseFinalPart,
             emitChunk: emitChunk
         )
         chunks.append(contentsOf: networkResult.chunks)
