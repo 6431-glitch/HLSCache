@@ -47,6 +47,51 @@ private struct StampPassThroughTransformer: ByteStreamTransformer {
     }
 }
 
+private struct FinalMarkerPlugin: ReversibleByteTransformer {
+    let id: String = "final-marker"
+    let version: String = "1.0.0"
+    let marker: Data
+
+    init(marker: Data = Data("<<FINAL>>".utf8)) {
+        self.marker = marker
+    }
+
+    func makeStreamTransformer(context: TransformContext) -> any ByteStreamTransformer {
+        makeStreamTransformer(context: context, direction: .writeToCache)
+    }
+
+    func makeStreamTransformer(
+        context: TransformContext,
+        direction: TransformDirection
+    ) -> any ByteStreamTransformer {
+        switch direction {
+        case .writeToCache:
+            return PassThroughFinalMarkerTransformer()
+        case .readFromCache:
+            return FinalMarkerReadTransformer(marker: marker)
+        }
+    }
+}
+
+private struct PassThroughFinalMarkerTransformer: ByteStreamTransformer {
+    func transform(_ chunk: Data, isFinal: Bool) throws -> Data {
+        chunk
+    }
+}
+
+private struct FinalMarkerReadTransformer: ByteStreamTransformer {
+    let marker: Data
+
+    func transform(_ chunk: Data, isFinal: Bool) throws -> Data {
+        guard isFinal else { return chunk }
+        var output = Data()
+        output.reserveCapacity(chunk.count + marker.count)
+        output.append(chunk)
+        output.append(marker)
+        return output
+    }
+}
+
 private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     guard let rangeHeader = request.value(forHTTPHeaderField: "Range") else {
         throw AsyncProxyCoordinatorTestError.missingRangeHeader
@@ -380,6 +425,51 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     #expect(networkFetches == 1)
     #expect(result.chunks == [
         ProxyStreamChunk(source: .network, range: try #require(ByteRange(start: 0, endExclusive: 128)), byteCount: 128)
+    ])
+    #expect(payload == Data(originData[0..<128]))
+}
+
+@Test func proxyCacheCoordinator_isFinalSemantics_syncMixedCachePrefixAndNetworkTail_emitsUnmodifiedPayload() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-is-final-sync-mixed")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 128
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 191) })
+    let resourceID = try makeCoordinatorResourceID()
+    let cache = try CoreCache(baseDirectory: directory)
+    let pipeline = TransformPipeline(transformers: [FinalMarkerPlugin()])
+    let coordinator = ProxyCacheCoordinator(coreCache: cache, transformPipeline: pipeline)
+
+    _ = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-63",
+        totalLength: totalLength,
+        fetchNetworkRange: { range in
+            Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        },
+        emit: { _ in }
+    )
+
+    var networkFetches = 0
+    var payload = Data()
+    let result = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-127",
+        totalLength: totalLength,
+        fetchNetworkRange: { range in
+            networkFetches += 1
+            return Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        },
+        emit: { payload.append($0) }
+    )
+
+    #expect(networkFetches == 1)
+    #expect(result.chunks == [
+        ProxyStreamChunk(source: .cache, range: try #require(ByteRange(start: 0, endExclusive: 64)), byteCount: 64),
+        ProxyStreamChunk(source: .network, range: try #require(ByteRange(start: 64, endExclusive: 128)), byteCount: 64)
     ])
     #expect(payload == Data(originData[0..<128]))
 }
@@ -768,6 +858,72 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
         "bytes=64-95",
         "bytes=96-127"
     ])
+}
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+@Test func proxyCacheCoordinator_isFinalSemantics_asyncMixedCachePrefixAndNetworkTail_emitsUnmodifiedPayload() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-is-final-async-mixed")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 256
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 181) })
+    let remoteURL = try #require(URL(string: "https://cdn.example.com/video/is-final-async-mixed.ts"))
+    let resourceID = try makeCoordinatorResourceID()
+    let cache = try CoreCache(baseDirectory: directory)
+    let pipeline = TransformPipeline(transformers: [FinalMarkerPlugin()])
+    let coordinator = ProxyCacheCoordinator(coreCache: cache, transformPipeline: pipeline)
+    let recorder = AsyncRequestRecorder()
+
+    let networkClient = ClosureNetworkClient { request in
+        await recorder.append(request)
+        let byteRange = try parseByteRange(from: request)
+        let payload = Data(originData[Int(byteRange.start)..<Int(byteRange.endExclusive)])
+        let response = try #require(
+            HTTPURLResponse(
+                url: remoteURL,
+                statusCode: 206,
+                httpVersion: "HTTP/1.1",
+                headerFields: [
+                    "Content-Range": "bytes \(byteRange.start)-\(byteRange.endExclusive - 1)/\(totalLength)"
+                ]
+            )
+        )
+        return (payload, response)
+    }
+
+    _ = try await coordinator.serve(
+        resourceID: resourceID,
+        remoteURL: remoteURL,
+        rangeHeader: "bytes=0-63",
+        totalLength: totalLength,
+        networkClient: networkClient,
+        emit: { _ in }
+    )
+
+    var emittedPayload = Data()
+    let result = try await coordinator.serveStreaming(
+        resourceID: resourceID,
+        remoteURL: remoteURL,
+        rangeHeader: "bytes=0-127",
+        totalLength: totalLength,
+        networkClient: networkClient,
+        chunkSizeBytes: 32,
+        emitChunk: { _, payload in
+            emittedPayload.append(payload)
+        }
+    )
+
+    #expect(result.chunks.map(\.source) == [.cache, .cache, .network, .network])
+    #expect(result.chunks.map(\.range) == [
+        try #require(ByteRange(start: 0, endExclusive: 32)),
+        try #require(ByteRange(start: 32, endExclusive: 64)),
+        try #require(ByteRange(start: 64, endExclusive: 96)),
+        try #require(ByteRange(start: 96, endExclusive: 128))
+    ])
+    #expect(emittedPayload == Data(originData[0..<128]))
 }
 
 @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
