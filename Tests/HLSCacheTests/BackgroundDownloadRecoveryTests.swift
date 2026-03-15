@@ -60,6 +60,60 @@ private final class RecordingStructuredLogger: StructuredLogger, @unchecked Send
     #expect(restored.expectedLength == 1024)
 }
 
+@Test func backgroundDownloadTaskRegistry_upsert_mergesUpdatesAndClearsMetadataDeterministically() throws {
+    let directory = try makeBackgroundDownloadTempDirectory(prefix: "bg-registry-upsert-merge")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let registry = BackgroundDownloadTaskRegistry(baseDirectory: directory)
+    let resourceID = try makeBackgroundDownloadResourceID(assetID: "asset-bg-merge", suffix: "seg-merge.ts")
+    let remoteURL = try #require(URL(string: "https://origin.example.com/seg-merge.ts"))
+
+    let initial = try registry.upsert(
+        taskIdentifier: 1101,
+        resourceID: resourceID,
+        remoteURL: remoteURL,
+        contentType: "video/mp2t",
+        expectedLength: 1024
+    )
+    #expect(initial.contentType == "video/mp2t")
+    #expect(initial.expectedLength == 1024)
+
+    let merged = try registry.upsert(
+        taskIdentifier: 1101,
+        resourceID: resourceID,
+        remoteURL: remoteURL
+    )
+    #expect(merged.contentType == "video/mp2t")
+    #expect(merged.expectedLength == 1024)
+
+    let updated = try registry.upsert(
+        taskIdentifier: 1101,
+        resourceID: resourceID,
+        remoteURL: remoteURL,
+        contentType: "video/mp4"
+    )
+    #expect(updated.contentType == "video/mp4")
+    #expect(updated.expectedLength == 1024)
+
+    let clearedLength = try registry.upsert(
+        taskIdentifier: 1101,
+        resourceID: resourceID,
+        remoteURL: remoteURL,
+        clearExpectedLength: true
+    )
+    #expect(clearedLength.contentType == "video/mp4")
+    #expect(clearedLength.expectedLength == nil)
+
+    let clearedType = try registry.upsert(
+        taskIdentifier: 1101,
+        resourceID: resourceID,
+        remoteURL: remoteURL,
+        clearContentType: true
+    )
+    #expect(clearedType.contentType == nil)
+    #expect(clearedType.expectedLength == nil)
+}
+
 @Test func backgroundDownloadTaskRegistry_decodeFailure_quarantinesCorruptFileAndEmitsTelemetry() throws {
     let directory = try makeBackgroundDownloadTempDirectory(prefix: "bg-registry-decode-failure")
     defer { try? FileManager.default.removeItem(at: directory) }

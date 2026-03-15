@@ -271,6 +271,8 @@ If a manifest decode fails, recovery quarantines it to `*.json.corrupt`, purges 
 
 - Background task mappings are persisted at `BaseDirectory/background_download_tasks.json`.
 - Writes are atomic (`background_download_tasks.json.tmp` + replace).
+- `BackgroundDownloadTaskRegistry.upsert(...)` preserves existing `contentType` and `expectedLength` when incoming values are `nil`.
+- Explicit metadata clear is deterministic via `clearContentType` and `clearExpectedLength` flags (clear flags take precedence over provided values).
 - On decode corruption, the registry file is quarantined to `background_download_tasks.json.corrupt`, then reset to an empty JSON mapping so startup can continue deterministically.
 - Recovery emits structured telemetry with `operation=loadBackgroundDownloadTaskRegistry` and `recoveryAction=quarantine_and_reset`.
 - On non-decode load failures, startup follows the same deterministic quarantine-and-reset policy and emits explicit recovery telemetry (`result=recovered_load_failure`) instead of silently dropping pending task state.

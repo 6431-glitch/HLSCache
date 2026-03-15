@@ -23,14 +23,18 @@ public final class BackgroundURLSessionDownloadCoordinator: @unchecked Sendable 
         resourceID: ResourceID,
         remoteURL: URL,
         contentType: String? = nil,
-        expectedLength: Int64? = nil
+        expectedLength: Int64? = nil,
+        clearContentType: Bool = false,
+        clearExpectedLength: Bool = false
     ) throws -> BackgroundDownloadTaskRecord {
         try recoveryCoordinator.registerTask(
             taskIdentifier: task.taskIdentifier,
             resourceID: resourceID,
             remoteURL: remoteURL,
             contentType: contentType,
-            expectedLength: expectedLength
+            expectedLength: expectedLength,
+            clearContentType: clearContentType,
+            clearExpectedLength: clearExpectedLength
         )
     }
 
