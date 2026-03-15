@@ -294,6 +294,49 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     }
 }
 
+@Test func proxyCacheCoordinator_offlineMode_partialHit_throwsExactMissingRangeWithoutNetworkFallback() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-offline-partial-miss")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 256
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 227) })
+    let cache = try CoreCache(baseDirectory: directory)
+    let coordinator = ProxyCacheCoordinator(coreCache: cache)
+    let resourceID = try makeCoordinatorResourceID()
+
+    _ = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-63",
+        totalLength: totalLength,
+        fetchNetworkRange: { range in
+            Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        },
+        emit: { _ in }
+    )
+
+    var networkFetches = 0
+    do {
+        _ = try coordinator.serve(
+            resourceID: resourceID,
+            rangeHeader: "bytes=0-127",
+            totalLength: totalLength,
+            allowNetworkFallback: false,
+            fetchNetworkRange: { _ in
+                networkFetches += 1
+                return Data(repeating: 0xAA, count: 64)
+            },
+            emit: { _ in }
+        )
+        #expect(Bool(false))
+    } catch let error as ProxyCacheCoordinatorError {
+        #expect(networkFetches == 0)
+        #expect(error == .offlineCacheMiss(range: try #require(ByteRange(start: 64, endExclusive: 128))))
+    }
+}
+
 @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
 @Test func proxyCacheCoordinator_asyncServe_ordersNetworkThenCacheAndPreservesPayload() async throws {
     let directory = FileManager.default.temporaryDirectory
@@ -360,6 +403,69 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
         ProxyStreamChunk(source: .cache, range: requestedRange, byteCount: 128)
     ])
     #expect(secondPayload == Data(originData[0..<128]))
+    #expect(await recorder.count() == 1)
+}
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+@Test func proxyCacheCoordinator_asyncServe_offlinePartialHit_throwsExactMissingRangeWithoutNetworkFallback() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-async-offline-partial-miss")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 256
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 223) })
+    let remoteURL = try #require(URL(string: "https://cdn.example.com/video/async-offline-partial.ts"))
+    let cache = try CoreCache(baseDirectory: directory)
+    let coordinator = ProxyCacheCoordinator(coreCache: cache)
+    let resourceID = try makeCoordinatorResourceID()
+    let recorder = AsyncRequestRecorder()
+
+    let networkClient = ClosureNetworkClient { request in
+        await recorder.append(request)
+        let byteRange = try parseByteRange(from: request)
+        let payload = Data(originData[Int(byteRange.start)..<Int(byteRange.endExclusive)])
+        let response = try #require(
+            HTTPURLResponse(
+                url: remoteURL,
+                statusCode: 206,
+                httpVersion: "HTTP/1.1",
+                headerFields: [
+                    "Content-Range": "bytes \(byteRange.start)-\(byteRange.endExclusive - 1)/\(totalLength)"
+                ]
+            )
+        )
+        return (payload, response)
+    }
+
+    _ = try await coordinator.serve(
+        resourceID: resourceID,
+        remoteURL: remoteURL,
+        rangeHeader: "bytes=0-63",
+        totalLength: totalLength,
+        networkClient: networkClient,
+        emit: { _ in }
+    )
+    #expect(await recorder.count() == 1)
+
+    var emittedPayload = Data()
+    do {
+        _ = try await coordinator.serve(
+            resourceID: resourceID,
+            remoteURL: remoteURL,
+            rangeHeader: "bytes=0-127",
+            totalLength: totalLength,
+            allowNetworkFallback: false,
+            networkClient: networkClient,
+            emit: { emittedPayload.append($0) }
+        )
+        #expect(Bool(false))
+    } catch let error as ProxyCacheCoordinatorError {
+        #expect(error == .offlineCacheMiss(range: try #require(ByteRange(start: 64, endExclusive: 128))))
+    }
+
+    #expect(emittedPayload == Data(originData[0..<64]))
     #expect(await recorder.count() == 1)
 }
 
@@ -562,4 +668,76 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
         "bytes=0-31",
         "bytes=32-63"
     ])
+}
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+@Test func proxyCacheCoordinator_streamingServe_offlinePartialHit_throwsExactMissingRangeWithoutNetworkFallback() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-streaming-offline-partial-miss")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 256
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 219) })
+    let remoteURL = try #require(URL(string: "https://cdn.example.com/video/streaming-offline-partial.ts"))
+    let chunkSize: Int64 = 32
+
+    let cache = try CoreCache(baseDirectory: directory)
+    let coordinator = ProxyCacheCoordinator(coreCache: cache)
+    let resourceID = try makeCoordinatorResourceID()
+    let recorder = AsyncRequestRecorder()
+
+    let networkClient = ClosureNetworkClient { request in
+        await recorder.append(request)
+        let byteRange = try parseByteRange(from: request)
+        let payload = Data(originData[Int(byteRange.start)..<Int(byteRange.endExclusive)])
+        let response = try #require(
+            HTTPURLResponse(
+                url: remoteURL,
+                statusCode: 206,
+                httpVersion: "HTTP/1.1",
+                headerFields: [
+                    "Content-Range": "bytes \(byteRange.start)-\(byteRange.endExclusive - 1)/\(totalLength)"
+                ]
+            )
+        )
+        return (payload, response)
+    }
+
+    _ = try await coordinator.serveStreaming(
+        resourceID: resourceID,
+        remoteURL: remoteURL,
+        rangeHeader: "bytes=0-63",
+        totalLength: totalLength,
+        networkClient: networkClient,
+        chunkSizeBytes: chunkSize,
+        emitChunk: { _, _ in }
+    )
+    #expect(await recorder.rangeHeaders() == ["bytes=0-31", "bytes=32-63"])
+
+    var emittedCacheRanges: [ByteRange] = []
+    do {
+        _ = try await coordinator.serveStreaming(
+            resourceID: resourceID,
+            remoteURL: remoteURL,
+            rangeHeader: "bytes=0-127",
+            totalLength: totalLength,
+            allowNetworkFallback: false,
+            networkClient: networkClient,
+            chunkSizeBytes: chunkSize,
+            emitChunk: { chunk, _ in
+                emittedCacheRanges.append(chunk.range)
+            }
+        )
+        #expect(Bool(false))
+    } catch let error as ProxyCacheCoordinatorError {
+        #expect(error == .offlineCacheMiss(range: try #require(ByteRange(start: 64, endExclusive: 128))))
+    }
+
+    #expect(emittedCacheRanges == [
+        try #require(ByteRange(start: 0, endExclusive: 32)),
+        try #require(ByteRange(start: 32, endExclusive: 64))
+    ])
+    #expect(await recorder.rangeHeaders() == ["bytes=0-31", "bytes=32-63"])
 }
