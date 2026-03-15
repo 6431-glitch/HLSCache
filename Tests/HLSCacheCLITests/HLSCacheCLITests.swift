@@ -1088,6 +1088,81 @@ private func loadRepositoryREADME() throws -> String {
     #expect(io.outputLines.contains { $0.contains("Alias 'DOES_NOT_EXIST' was not found.") })
 }
 
+@Test func cliHLSDownloader_timeoutError_usesConfiguredTimeoutAndTypedFailure() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    let rootURL = try #require(URL(string: "https://cdn.example.com/timeout/master.m3u8"))
+    _ = try facade.register(alias: "MDTIMEOUT", assetID: "asset-timeout", remoteURL: rootURL)
+
+    var seenTimeout: TimeInterval = 0
+    let downloader = CLIHLSDownloader(
+        baseDirectory: directory,
+        facade: facade,
+        requestTimeout: 0.25,
+        fetcher: { request in
+            seenTimeout = request.timeoutInterval
+            throw URLError(.timedOut)
+        }
+    )
+
+    do {
+        _ = try downloader.download(alias: "MDTIMEOUT")
+        #expect(Bool(false))
+    } catch let error as CLIDownloadError {
+        switch error {
+        case let .requestTimedOut(url, timeout):
+            #expect(url == rootURL)
+            #expect(timeout == 0.25)
+            #expect(seenTimeout == 0.25)
+        default:
+            #expect(Bool(false))
+        }
+    }
+}
+
+@Test func cliHLSDownloader_cancellationChecker_stopsBeforeTransportFetch() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    let rootURL = try #require(URL(string: "https://cdn.example.com/cancel/master.m3u8"))
+    _ = try facade.register(alias: "MDCANCEL", assetID: "asset-cancel", remoteURL: rootURL)
+
+    var fetchInvoked = false
+    let downloader = CLIHLSDownloader(
+        baseDirectory: directory,
+        facade: facade,
+        cancellationChecker: { true },
+        fetcher: { request in
+            fetchInvoked = true
+            let response = try #require(
+                HTTPURLResponse(
+                    url: request.url ?? URL(fileURLWithPath: "/"),
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: nil
+                )
+            )
+            return (Data(), response)
+        }
+    )
+
+    do {
+        _ = try downloader.download(alias: "MDCANCEL")
+        #expect(Bool(false))
+    } catch let error as CLIDownloadError {
+        switch error {
+        case let .requestCancelled(url):
+            #expect(url == rootURL)
+            #expect(fetchInvoked == false)
+        default:
+            #expect(Bool(false))
+        }
+    }
+}
+
 @Test func cliInteractive_quickstartFlow_coversCoreCommandsAndNavigation() throws {
     let directory = try makeCLITempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }

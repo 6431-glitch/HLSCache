@@ -9,6 +9,9 @@ import FoundationNetworking
 enum CLIDownloadError: Error, LocalizedError {
     case aliasNotFound(String)
     case requestFailed(url: URL, statusCode: Int?, reason: String)
+    case requestTimedOut(url: URL, timeout: TimeInterval)
+    case requestCancelled(url: URL)
+    case transportFailure(url: URL, reason: String)
     case invalidPlaylistEncoding(URL)
     case responseMissing(URL)
 
@@ -21,6 +24,12 @@ enum CLIDownloadError: Error, LocalizedError {
                 return "Request failed (\(statusCode)) for \(url.absoluteString): \(reason)"
             }
             return "Request failed for \(url.absoluteString): \(reason)"
+        case let .requestTimedOut(url, timeout):
+            return "Request timed out after \(timeout)s for \(url.absoluteString)."
+        case let .requestCancelled(url):
+            return "Request was cancelled for \(url.absoluteString)."
+        case let .transportFailure(url, reason):
+            return "Transport failed for \(url.absoluteString): \(reason)"
         case let .invalidPlaylistEncoding(url):
             return "Playlist is not valid UTF-8: \(url.absoluteString)"
         case let .responseMissing(url):
@@ -56,6 +65,7 @@ struct CLIDownloadPlan: Equatable {
 
 struct CLIHLSDownloader {
     typealias Fetcher = (_ request: URLRequest) throws -> (Data, URLResponse)
+    typealias CancellationChecker = () -> Bool
     typealias PlanHandler = (_ plan: CLIDownloadPlan) -> Void
     typealias ProgressHandler = (_ progress: CLIDownloadProgress) -> Void
 
@@ -76,10 +86,58 @@ struct CLIHLSDownloader {
         }
     }
 
+    private final class FetchResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private let condition = NSCondition()
+        private var data: Data?
+        private var response: URLResponse?
+        private var error: Error?
+        private var completed = false
+
+        func complete(data: Data?, response: URLResponse?, error: Error?) {
+            lock.lock()
+            self.data = data
+            self.response = response
+            self.error = error
+            self.completed = true
+            lock.unlock()
+            condition.lock()
+            condition.broadcast()
+            condition.unlock()
+        }
+
+        func wait(until deadline: Date) -> Bool {
+            condition.lock()
+            defer { condition.unlock() }
+
+            while true {
+                lock.lock()
+                let isCompleted = completed
+                lock.unlock()
+
+                if isCompleted {
+                    return true
+                }
+                if !condition.wait(until: deadline) {
+                    return false
+                }
+            }
+        }
+
+        func snapshot() -> (data: Data?, response: URLResponse?, error: Error?, completed: Bool) {
+            lock.lock()
+            let snapshot = (data: data, response: response, error: error, completed: completed)
+            lock.unlock()
+            return snapshot
+        }
+    }
+
     private let baseDirectory: URL
     private let facade: HLSCacheFacade
     private let diskStore: DiskStore
     private let manifestStore: ManifestStore
+    private let requestTimeout: TimeInterval
+    private let cancellationChecker: CancellationChecker
     private let fetcher: Fetcher
 
     init(
@@ -87,13 +145,17 @@ struct CLIHLSDownloader {
         facade: HLSCacheFacade,
         diskStore: DiskStore? = nil,
         manifestStore: ManifestStore? = nil,
-        fetcher: @escaping Fetcher = CLIHLSDownloader.defaultFetcher
+        requestTimeout: TimeInterval = 30,
+        cancellationChecker: @escaping CancellationChecker = { false },
+        fetcher: Fetcher? = nil
     ) {
         self.baseDirectory = baseDirectory
         self.facade = facade
         self.diskStore = diskStore ?? DiskStore(baseDirectory: baseDirectory)
         self.manifestStore = manifestStore ?? ManifestStore(baseDirectory: baseDirectory)
-        self.fetcher = fetcher
+        self.requestTimeout = max(requestTimeout, 0.001)
+        self.cancellationChecker = cancellationChecker
+        self.fetcher = fetcher ?? Self.makeDefaultFetcher(cancellationChecker: cancellationChecker)
     }
 
     func download(
@@ -105,6 +167,7 @@ struct CLIHLSDownloader {
             throw CLIDownloadError.aliasNotFound(alias)
         }
 
+        try ensureNotCancelled(for: asset.currentRemoteURL)
         let plan = try buildDiscoveryPlan(rootURL: asset.currentRemoteURL, headers: asset.headers)
 
         let playlistCount = plan.playlistURLsInOrder.count
@@ -126,6 +189,7 @@ struct CLIHLSDownloader {
         var bytesWritten: Int64 = 0
 
         for playlistURL in plan.playlistURLsInOrder {
+            try ensureNotCancelled(for: playlistURL)
             let playlistKey = canonicalURLKey(for: playlistURL)
             guard let fetchedPlaylist = plan.fetchedPlaylists[playlistKey] else {
                 throw CLIDownloadError.responseMissing(playlistURL)
@@ -220,6 +284,7 @@ struct CLIHLSDownloader {
 
         while !pendingPlaylists.isEmpty {
             let playlistURL = pendingPlaylists.removeFirst()
+            try ensureNotCancelled(for: playlistURL)
             let playlistKey = canonicalURLKey(for: playlistURL)
             guard visitedPlaylists.insert(playlistKey).inserted else {
                 continue
@@ -282,13 +347,32 @@ struct CLIHLSDownloader {
     }
 
     private func fetchResource(url: URL, headers: [String: String]?) throws -> FetchedResource {
+        try ensureNotCancelled(for: url)
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
+        request.timeoutInterval = requestTimeout
         for (name, value) in (headers ?? [:]) {
             request.setValue(value, forHTTPHeaderField: name)
         }
 
-        let (data, response) = try fetcher(request)
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try fetcher(request)
+        } catch let error as CLIDownloadError {
+            throw error
+        } catch let error as URLError {
+            switch error.code {
+            case .timedOut:
+                throw CLIDownloadError.requestTimedOut(url: url, timeout: requestTimeout)
+            case .cancelled:
+                throw CLIDownloadError.requestCancelled(url: url)
+            default:
+                throw CLIDownloadError.transportFailure(url: url, reason: error.localizedDescription)
+            }
+        } catch {
+            throw CLIDownloadError.transportFailure(url: url, reason: error.localizedDescription)
+        }
+
         guard let httpResponse = response as? HTTPURLResponse else {
             guard response.url != nil else {
                 throw CLIDownloadError.responseMissing(url)
@@ -429,14 +513,6 @@ struct CLIHLSDownloader {
         ResourceID.makeResourceKey(from: url)
     }
 
-    private func makeResourceID(url: URL, kind: ResourceKind, cacheKey: CacheKey) -> ResourceID {
-        ResourceID(
-            cacheKey: cacheKey,
-            kind: kind,
-            resourceKey: ResourceID.makeResourceKey(from: url)
-        )
-    }
-
     private func looksLikePlaylistURL(_ url: URL) -> Bool {
         let absolute = url.absoluteString.lowercased()
         return absolute.contains(".m3u8")
@@ -447,26 +523,55 @@ struct CLIHLSDownloader {
     }
 
     static func defaultFetcher(request: URLRequest) throws -> (Data, URLResponse) {
-        let semaphore = DispatchSemaphore(value: 0)
-        var outputData: Data?
-        var outputResponse: URLResponse?
-        var outputError: Error?
+        try makeDefaultFetcher(cancellationChecker: { false })(request)
+    }
 
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
-            outputData = data
-            outputResponse = response
-            outputError = error
-            semaphore.signal()
+    private func ensureNotCancelled(for url: URL) throws {
+        if cancellationChecker() {
+            throw CLIDownloadError.requestCancelled(url: url)
         }
-        task.resume()
-        semaphore.wait()
+    }
 
-        if let outputError {
-            throw outputError
+    private static func makeDefaultFetcher(cancellationChecker: @escaping CancellationChecker) -> Fetcher {
+        { request in
+            let box = FetchResultBox()
+            let task = URLSession.shared.dataTask(with: request) { data, response, error in
+                box.complete(data: data, response: response, error: error)
+            }
+            task.resume()
+
+            let timeout = max(request.timeoutInterval, 0.001)
+            let startedAt = Date()
+            let pollInterval: TimeInterval = 0.05
+
+            while true {
+                if cancellationChecker() {
+                    task.cancel()
+                    throw URLError(.cancelled)
+                }
+
+                let elapsed = Date().timeIntervalSince(startedAt)
+                if elapsed >= timeout {
+                    task.cancel()
+                    throw URLError(.timedOut)
+                }
+
+                let remaining = timeout - elapsed
+                let waitWindow = min(pollInterval, remaining)
+                let deadline = Date().addingTimeInterval(waitWindow)
+                if box.wait(until: deadline) {
+                    break
+                }
+            }
+
+            let snapshot = box.snapshot()
+            if let error = snapshot.error {
+                throw error
+            }
+            guard let data = snapshot.data, let response = snapshot.response else {
+                throw CLIDownloadError.responseMissing(request.url ?? URL(fileURLWithPath: "/"))
+            }
+            return (data, response)
         }
-        guard let outputData, let outputResponse else {
-            throw CLIDownloadError.responseMissing(request.url ?? URL(fileURLWithPath: "/"))
-        }
-        return (outputData, outputResponse)
     }
 }
