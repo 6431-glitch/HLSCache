@@ -923,6 +923,136 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(keyOriginRequestsAfterCacheHitAndHEAD == keyOriginRequestsAfterFirstGET)
 }
 
+@Test func facade_proxyRuntime_offlineMode_servesCachedDataAndFailsCacheMissWithoutNetworkFallback() async throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-runtime-offline-transport")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let rootRemoteURL = try #require(URL(string: "https://origin.example.com/hls/root.m3u8"))
+    let cachedSegmentURL = try #require(URL(string: "https://origin.example.com/hls/seg-cached.ts"))
+    let uncachedSegmentURL = try #require(URL(string: "https://origin.example.com/hls/seg-uncached.ts"))
+
+    let cachedPayload = Data((0..<20).map { UInt8($0 + 20) })
+    let uncachedPayload = Data((100..<120).map { UInt8($0) })
+    let originRequestCounter = OriginRequestCounter()
+
+    let originHeaders = ["X-Origin-Token": "token-offline-transport"]
+    let sessionConfiguration = URLSessionConfiguration.ephemeral
+    sessionConfiguration.protocolClasses = [OfflineModeOriginURLProtocol.self]
+    let originSession = URLSession(configuration: sessionConfiguration)
+
+    OfflineModeOriginURLProtocol.setHandler { request in
+        #expect(request.value(forHTTPHeaderField: "X-Origin-Token") == originHeaders["X-Origin-Token"])
+        let url = try #require(request.url)
+        let method = (request.httpMethod ?? "GET").uppercased()
+        originRequestCounter.record(method: method, url: url)
+
+        let payload: Data
+        let contentType: String
+        switch url {
+        case cachedSegmentURL:
+            payload = cachedPayload
+            contentType = "video/mp2t"
+        case uncachedSegmentURL:
+            payload = uncachedPayload
+            contentType = "video/mp2t"
+        default:
+            let response = try #require(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 404,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Length": "0"]
+                )
+            )
+            return (response, Data())
+        }
+
+        if method == "HEAD" {
+            let response = try #require(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: [
+                        "Content-Length": String(payload.count),
+                        "Content-Type": contentType
+                    ]
+                )
+            )
+            return (response, Data())
+        }
+
+        let totalLength = Int64(payload.count)
+        let rangeValue = request.value(forHTTPHeaderField: "Range")
+        let parsedRange = rangeValue.flatMap { ByteRange.parseHTTPRange($0, totalLength: totalLength) }
+            ?? ByteRange(start: 0, endExclusive: totalLength)
+        let range = try #require(parsedRange)
+        let start = Int(range.start)
+        let endExclusive = Int(range.endExclusive)
+        let slice = Data(payload[start..<endExclusive])
+        let response = try #require(
+            HTTPURLResponse(
+                url: url,
+                statusCode: 206,
+                httpVersion: "HTTP/1.1",
+                headerFields: [
+                    "Content-Length": String(slice.count),
+                    "Content-Range": "bytes \(range.start)-\(range.endExclusive - 1)/\(payload.count)",
+                    "Content-Type": contentType
+                ]
+            )
+        )
+        return (response, slice)
+    }
+    defer { OfflineModeOriginURLProtocol.resetHandler() }
+
+    let facade = HLSCacheFacade(baseDirectory: directory, networkSession: originSession)
+    _ = try facade.register(
+        alias: "MDOFFLINE",
+        assetID: "asset-offline",
+        remoteURL: rootRemoteURL,
+        headers: originHeaders
+    )
+    _ = try facade.startServer(host: "127.0.0.1", port: 0)
+    defer { facade.stopServer() }
+
+    let proxySession = URLSession(configuration: .ephemeral)
+    let cachedProxyURL = try facade.proxyURL(for: "MDOFFLINE", kind: .segment, remoteURL: cachedSegmentURL)
+
+    let (firstCachedData, firstCachedResponse) = try await proxySession.data(from: cachedProxyURL)
+    let firstCachedHTTPResponse = try #require(firstCachedResponse as? HTTPURLResponse)
+    #expect(firstCachedHTTPResponse.statusCode == 200)
+    #expect(firstCachedData == cachedPayload)
+    let cachedOriginRequestsAfterWarmup = originRequestCounter.totalRequests(for: cachedSegmentURL)
+    #expect(cachedOriginRequestsAfterWarmup >= 1)
+
+    let offlineEnabled = facade.setOfflinePlaybackMode(enabled: true)
+    #expect(offlineEnabled == true)
+
+    let (secondCachedData, secondCachedResponse) = try await proxySession.data(from: cachedProxyURL)
+    let secondCachedHTTPResponse = try #require(secondCachedResponse as? HTTPURLResponse)
+    #expect(secondCachedHTTPResponse.statusCode == 200)
+    #expect(secondCachedHTTPResponse.value(forHTTPHeaderField: "Content-Length") == String(cachedPayload.count))
+    #expect(secondCachedData == cachedPayload)
+
+    var cachedHeadRequest = URLRequest(url: cachedProxyURL)
+    cachedHeadRequest.httpMethod = "HEAD"
+    let (cachedHeadData, cachedHeadResponse) = try await proxySession.data(for: cachedHeadRequest)
+    let cachedHeadHTTPResponse = try #require(cachedHeadResponse as? HTTPURLResponse)
+    #expect(cachedHeadHTTPResponse.statusCode == 200)
+    #expect(cachedHeadHTTPResponse.value(forHTTPHeaderField: "Content-Length") == String(cachedPayload.count))
+    #expect(cachedHeadData.isEmpty)
+    let cachedOriginRequestsAfterOfflineReplay = originRequestCounter.totalRequests(for: cachedSegmentURL)
+    #expect(cachedOriginRequestsAfterOfflineReplay == cachedOriginRequestsAfterWarmup)
+
+    let uncachedProxyURL = try facade.proxyURL(for: "MDOFFLINE", kind: .segment, remoteURL: uncachedSegmentURL)
+    let (offlineMissData, offlineMissResponse) = try await proxySession.data(from: uncachedProxyURL)
+    let offlineMissHTTPResponse = try #require(offlineMissResponse as? HTTPURLResponse)
+    #expect(offlineMissHTTPResponse.statusCode == 503)
+    #expect(String(data: offlineMissData, encoding: .utf8) == "offline cache miss\n")
+    #expect(originRequestCounter.totalRequests(for: uncachedSegmentURL) == 0)
+}
+
 private final class ProxyRuntimeOriginURLProtocol: URLProtocol, @unchecked Sendable {
     typealias Handler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
 
@@ -975,6 +1105,57 @@ private final class ProxyRuntimeOriginURLProtocol: URLProtocol, @unchecked Senda
 }
 
 private final class RewrittenRouteOriginURLProtocol: URLProtocol, @unchecked Sendable {
+    typealias Handler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var handler: Handler?
+
+    static func setHandler(_ handler: @escaping Handler) {
+        lock.lock()
+        self.handler = handler
+        lock.unlock()
+    }
+
+    static func resetHandler() {
+        lock.lock()
+        handler = nil
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.lock.lock()
+        let handler = Self.handler
+        Self.lock.unlock()
+
+        guard let handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unknown))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if !data.isEmpty {
+                client?.urlProtocol(self, didLoad: data)
+            }
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private final class OfflineModeOriginURLProtocol: URLProtocol, @unchecked Sendable {
     typealias Handler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
 
     private static let lock = NSLock()
