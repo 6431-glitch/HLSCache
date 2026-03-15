@@ -97,11 +97,13 @@ public enum HLSPlaylistRewriter {
 
         if directivePrefix == "#EXT-X-KEY:",
            let method = attributes.first(where: { $0.key == "METHOD" })?.value,
-           method.uppercased() == "NONE" {
+           normalizeToken(method).uppercased() == "NONE" {
             return line
         }
 
-        guard let remoteURL = URL(string: uriAttribute.value, relativeTo: playlistURL)?.absoluteURL else {
+        let normalizedURI = normalizeToken(uriAttribute.value)
+        guard !normalizedURI.isEmpty,
+              let remoteURL = URL(string: normalizedURI, relativeTo: playlistURL)?.absoluteURL else {
             return line
         }
 
@@ -156,10 +158,15 @@ public enum HLSPlaylistRewriter {
             return nil
         }
 
-        let valueRange: Range<String.Index>
         let rawValue = line[rawValueRange]
-        if rawValue.first == "\"",
-           rawValue.last == "\"",
+        let startsQuoted = rawValue.first == "\""
+        let endsQuoted = rawValue.last == "\""
+        if startsQuoted != endsQuoted {
+            return nil
+        }
+
+        let valueRange: Range<String.Index>
+        if startsQuoted,
            line.distance(from: rawValueRange.lowerBound, to: rawValueRange.upperBound) >= 2 {
             let start = line.index(after: rawValueRange.lowerBound)
             let end = line.index(before: rawValueRange.upperBound)
@@ -196,5 +203,10 @@ public enum HLSPlaylistRewriter {
             return nil
         }
         return lower..<upper
+    }
+
+    private static func normalizeToken(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasPrefix("\u{FEFF}") ? String(trimmed.dropFirst()) : trimmed
     }
 }
