@@ -163,3 +163,85 @@ import Testing
 
     #expect(plan.segmentURLs.count == 1)
 }
+
+@Test func hlsDownloadPlanner_resolvesURIAttributes_withSpacingVariantsForMediaAndMap() throws {
+    let rootURL = try #require(URL(string: "https://cdn.example.com/root/master.m3u8"))
+    let videoURL = try #require(URL(string: "https://cdn.example.com/root/video/main.m3u8"))
+    let audioURL = try #require(URL(string: "https://cdn.example.com/root/audio/audio.m3u8"))
+
+    let playlists: [URL: String] = [
+        rootURL: """
+        #EXTM3U
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="en",URI = " audio/audio.m3u8 "
+        #EXT-X-STREAM-INF:BANDWIDTH=1000000
+        video/main.m3u8
+        """,
+        videoURL: """
+        #EXTM3U
+        #EXT-X-MAP: URI = " init/init.mp4 "
+        #EXTINF:4.0,
+        seg-1.ts
+        """,
+        audioURL: """
+        #EXTM3U
+        #EXTINF:4.0,
+        audio-1.ts
+        """
+    ]
+
+    let plan = try HLSDownloadPlanner.plan(
+        rootPlaylistURL: rootURL,
+        alias: "MDURI",
+        loadPlaylist: { url in
+            try #require(playlists[url])
+        },
+        proxyURLBuilder: { alias, kind, remoteURL in
+            let encoded = ResourceID.makeResourceKey(from: remoteURL)
+            return try #require(URL(string: "http://127.0.0.1:8081/\(alias)/\(kind.rawValue)/\(encoded)"))
+        }
+    )
+
+    #expect(plan.playlistURLs.count == 3)
+    #expect(plan.playlistURLs.contains(audioURL))
+    #expect(plan.playlistURLs.contains(videoURL))
+    #expect(plan.mapURLs.count == 1)
+    #expect(plan.mapURLs[0].absoluteString == "https://cdn.example.com/root/video/init/init.mp4")
+}
+
+@Test func hlsDownloadPlanner_ignoresMalformedURIAttributes_withoutCrashingOrRegressingOtherDiscovery() throws {
+    let rootURL = try #require(URL(string: "https://cdn.example.com/root/master.m3u8"))
+    let videoURL = try #require(URL(string: "https://cdn.example.com/root/video/main.m3u8"))
+
+    let playlists: [URL: String] = [
+        rootURL: """
+        #EXTM3U
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="en",URI = "http://[broken"
+        #EXT-X-STREAM-INF:BANDWIDTH=1000000
+        video/main.m3u8
+        """,
+        videoURL: """
+        #EXTM3U
+        #EXT-X-MAP:URI = "http://[also-broken"
+        #EXTINF:4.0,
+        seg-1.ts
+        """
+    ]
+
+    let plan = try HLSDownloadPlanner.plan(
+        rootPlaylistURL: rootURL,
+        alias: "MDMAL",
+        loadPlaylist: { url in
+            try #require(playlists[url])
+        },
+        proxyURLBuilder: { alias, kind, remoteURL in
+            let encoded = ResourceID.makeResourceKey(from: remoteURL)
+            return try #require(URL(string: "http://127.0.0.1:8082/\(alias)/\(kind.rawValue)/\(encoded)"))
+        }
+    )
+
+    #expect(plan.playlistURLs.count == 2)
+    #expect(plan.playlistURLs.contains(videoURL))
+    #expect(plan.mapURLs.isEmpty)
+    #expect(plan.segmentURLs.count == 1)
+    #expect(plan.segmentURLs[0].absoluteString == "https://cdn.example.com/root/video/seg-1.ts")
+}
