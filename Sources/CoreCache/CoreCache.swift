@@ -76,6 +76,11 @@ public struct CoreCacheMetrics: Equatable, Sendable {
     }
 }
 
+public enum EvictionRecencyPolicy: String, Equatable, Sendable {
+    case leastRecentlyUpdated
+    case leastRecentlyAccessed
+}
+
 public final class CoreCache: @unchecked Sendable {
     private struct PlanMetricsAccumulator {
         var totalRequests: Int64 = 0
@@ -96,12 +101,14 @@ public final class CoreCache: @unchecked Sendable {
     private let diskStore: DiskStore
     private let manifestStore: ManifestStore
     private let diskQuotaBytes: Int64?
+    private let evictionRecencyPolicy: EvictionRecencyPolicy
     private let logger: any StructuredLogger
     private var planMetrics = PlanMetricsAccumulator()
 
     public init(
         baseDirectory: URL,
         diskQuotaBytes: Int64? = nil,
+        evictionRecencyPolicy: EvictionRecencyPolicy = .leastRecentlyUpdated,
         logger: any StructuredLogger = NoopStructuredLogger()
     ) throws {
         self.directoryLock = try DirectoryLock(baseDirectory: baseDirectory)
@@ -109,6 +116,7 @@ public final class CoreCache: @unchecked Sendable {
         self.logger = logger
         self.manifestStore = ManifestStore(baseDirectory: baseDirectory, logger: logger)
         self.diskQuotaBytes = diskQuotaBytes.map { max($0, 0) }
+        self.evictionRecencyPolicy = evictionRecencyPolicy
 
         queue.sync(flags: .barrier) {
             reconcileStorageOnStartup()
@@ -123,12 +131,20 @@ public final class CoreCache: @unchecked Sendable {
                 return []
             }
 
+            let record = try manifestStore.load(resourceID: resource)
             let parts: [ReadPlanPart]
-            if let record = try manifestStore.load(resourceID: resource) {
+            if let record {
                 let missingRanges = record.completedRanges.missingSubranges(for: requested)
                 parts = validatedPlanParts(requested: requested, missingRanges: missingRanges)
             } else {
                 parts = [.network(requested)]
+            }
+
+            if evictionRecencyPolicy == .leastRecentlyAccessed,
+               var accessedRecord = record,
+               parts.contains(where: { if case .file = $0 { return true }; return false }) {
+                accessedRecord.touch()
+                try manifestStore.save(resourceID: resource, record: accessedRecord)
             }
 
             recordPlanMetrics(parts: parts, requested: requested)
@@ -575,14 +591,15 @@ public final class CoreCache: @unchecked Sendable {
             let cacheKey: CacheKey
             let resources: [StoredManifestRecord]
             let totalBytes: Int64
-            let lastUpdated: Date
+            let recencyTimestamp: Date
         }
 
         var assets = entriesByAsset.map { cacheKey, resources in
             let total = resources.reduce(Int64(0)) { partial, entry in
                 partial + (bytesByResource[entry.resourceID] ?? 0)
             }
-            let newestUpdate = resources.map(\.record.lastUpdated).max() ?? .distantPast
+            // `lastUpdated` tracks write/finalize recency by default and access recency in access-aware mode.
+            let newestRecency = resources.map(\.record.lastUpdated).max() ?? .distantPast
             let sortedResources = resources.sorted { lhs, rhs in
                 if lhs.record.lastUpdated != rhs.record.lastUpdated {
                     return lhs.record.lastUpdated < rhs.record.lastUpdated
@@ -596,12 +613,12 @@ public final class CoreCache: @unchecked Sendable {
                 cacheKey: cacheKey,
                 resources: sortedResources,
                 totalBytes: total,
-                lastUpdated: newestUpdate
+                recencyTimestamp: newestRecency
             )
         }
         assets.sort { lhs, rhs in
-            if lhs.lastUpdated != rhs.lastUpdated {
-                return lhs.lastUpdated < rhs.lastUpdated
+            if lhs.recencyTimestamp != rhs.recencyTimestamp {
+                return lhs.recencyTimestamp < rhs.recencyTimestamp
             }
             return lhs.cacheKey.rawValue < rhs.cacheKey.rawValue
         }
@@ -622,7 +639,8 @@ public final class CoreCache: @unchecked Sendable {
                         metadata: [
                             "cacheKey": resource.cacheKey.rawValue,
                             "kind": resource.kind.rawValue,
-                            "bytes": String(length)
+                            "bytes": String(length),
+                            "evictionPolicy": evictionRecencyPolicy.rawValue
                         ]
                     )
                 )
