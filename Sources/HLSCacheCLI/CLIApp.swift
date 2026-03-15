@@ -6,6 +6,7 @@ struct CLIApp {
     private let io: any CLIIO
     private let makeExporter: (CLIAppContext) -> CLIExporter
     private let makeDownloader: (CLIAppContext) -> CLIHLSDownloader
+    private let cacheInfoProvider: (String) throws -> CacheInfo
     private let proxyStatusProvider: () -> ProxyServerStatus
     private let stopProxyServer: () -> Void
     private let startProxyServer: (_ host: String, _ port: Int) throws -> URL
@@ -19,6 +20,7 @@ struct CLIApp {
         makeDownloader: @escaping (CLIAppContext) -> CLIHLSDownloader = { context in
             CLIHLSDownloader(baseDirectory: context.baseDirectory, facade: context.facade)
         },
+        cacheInfoProvider: ((String) throws -> CacheInfo)? = nil,
         proxyStatusProvider: (() -> ProxyServerStatus)? = nil,
         stopProxyServer: (() -> Void)? = nil,
         startProxyServer: ((_ host: String, _ port: Int) throws -> URL)? = nil
@@ -27,6 +29,9 @@ struct CLIApp {
         self.io = io
         self.makeExporter = makeExporter
         self.makeDownloader = makeDownloader
+        self.cacheInfoProvider = cacheInfoProvider ?? { alias in
+            try context.facade.cacheInfo(alias: alias)
+        }
         self.proxyStatusProvider = proxyStatusProvider ?? { context.facade.proxyStatus() }
         self.stopProxyServer = stopProxyServer ?? { context.facade.stopServer() }
         self.startProxyServer = startProxyServer ?? { host, port in
@@ -238,19 +243,43 @@ struct CLIApp {
         lines.reserveCapacity(aliases.count * 2)
 
         for record in aliases {
-            let cacheBytes: Int64
-            if strictCacheInfo {
-                cacheBytes = try context.facade.cacheInfo(alias: record.alias).totalBytesOnDisk
-            } else {
-                cacheBytes = (try? context.facade.cacheInfo(alias: record.alias).totalBytesOnDisk) ?? 0
-            }
-
             let updated = formattedListDate(record.lastUpdated)
-            lines.append("- \(record.alias) | assetID=\(record.assetID) | bytes=\(cacheBytes) | updated=\(updated)")
+            if strictCacheInfo {
+                let cacheBytes = try cacheInfoProvider(record.alias).totalBytesOnDisk
+                lines.append("- \(record.alias) | assetID=\(record.assetID) | bytes=\(cacheBytes) | updated=\(updated)")
+            } else {
+                do {
+                    let cacheBytes = try cacheInfoProvider(record.alias).totalBytesOnDisk
+                    lines.append("- \(record.alias) | assetID=\(record.assetID) | bytes=\(cacheBytes) | updated=\(updated)")
+                } catch {
+                    let reason = parseableMetadataFailureReason(error)
+                    lines.append(
+                        "- \(record.alias) | assetID=\(record.assetID) | bytes=(degraded) | cache_status=metadata_error | cache_error=\(reason) | updated=\(updated)"
+                    )
+                }
+            }
             lines.append("  remote=\(record.currentRemoteURL.absoluteString)")
         }
 
         return lines
+    }
+
+    private func parseableMetadataFailureReason(_ error: Error) -> String {
+        if let cacheError = error as? HLSCacheError {
+            switch cacheError {
+            case .aliasNotFound:
+                return "alias_not_found"
+            case .serverNotRunning:
+                return "server_not_running"
+            }
+        }
+
+        let reflected = String(reflecting: type(of: error))
+        let sanitized = reflected
+            .replacingOccurrences(of: " ", with: "_")
+            .replacingOccurrences(of: ".", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+        return sanitized.isEmpty ? "metadata_unavailable" : sanitized.lowercased()
     }
 
     private func runSettingsSubflow() {

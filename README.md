@@ -382,7 +382,12 @@ swift run HLSCacheCLI add \
 Alias monitor screen (interactive):
 - Open `Asset management -> List aliases`.
 - Displays alias, assetID, remote URL, cache bytes, and last-updated timestamp.
+- If cache metadata lookup fails for an alias, interactive listing stays resilient and emits a degraded record with parseable fields:
+  `bytes=(degraded) | cache_status=metadata_error | cache_error=<reason>`.
 - Press `Enter` to refresh progressively and `q` to return to menu.
+
+Non-interactive `list` command remains strict:
+- Any cache metadata failure returns exit code `1` and reports `Failed to list aliases: ...`.
 
 Clear cache data from command line (`--yes` is required for non-interactive destructive execution):
 

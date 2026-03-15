@@ -988,6 +988,52 @@ private func loadRepositoryREADME() throws -> String {
     #expect(io.outputLines.contains { $0.contains("Goodbye.") })
 }
 
+@Test func cliAssetManagement_listAliases_mixedHealthyAndDegradedStates_isExplicitAndResilient() throws {
+    enum CacheMetadataFailure: Error { case unavailable }
+
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    _ = try context.facade.register(
+        alias: "MDLISTOK",
+        assetID: "asset-list-ok",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/list-ok.m3u8"))
+    )
+    _ = try context.facade.register(
+        alias: "MDLISTBAD",
+        assetID: "asset-list-bad",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/list-bad.m3u8"))
+    )
+
+    let io = FakeIO(inputs: [
+        "1", // Asset management
+        "2", // List aliases
+        "q", // Return from list
+        "0", // Back from asset management
+        "0" // Exit
+    ])
+    let app = CLIApp(
+        context: context,
+        io: io,
+        cacheInfoProvider: { alias in
+            if alias == "MDLISTBAD" {
+                throw CacheMetadataFailure.unavailable
+            }
+            return try context.facade.cacheInfo(alias: alias)
+        }
+    )
+
+    app.runInteractive()
+
+    #expect(io.outputLines.contains { $0.contains("MDLISTOK | assetID=asset-list-ok | bytes=") })
+    #expect(io.outputLines.contains { $0.contains("MDLISTBAD | assetID=asset-list-bad | bytes=(degraded)") })
+    #expect(io.outputLines.contains { $0.contains("cache_status=metadata_error") })
+    #expect(io.outputLines.contains { $0.contains("cache_error=") })
+    #expect(io.outputLines.contains { $0.contains("remote=https://cdn.example.com/list-bad.m3u8") })
+    #expect(io.outputLines.contains { $0.contains("Main Menu") })
+}
+
 @Test func cliListCommand_nonInteractive_printsAliasInventoryFields() throws {
     let directory = try makeCLITempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -1004,6 +1050,42 @@ private func loadRepositoryREADME() throws -> String {
     #expect(io.outputLines.contains { $0.contains("updated=") })
     #expect(io.outputLines.contains { $0.contains("remote=https://cdn.example.com/MDLISTCLI.m3u8") })
     #expect(io.errorLines.isEmpty)
+}
+
+@Test func cliListCommand_nonInteractive_mixedStateRemainsStrictAndFails() throws {
+    enum CacheMetadataFailure: Error { case unavailable }
+
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    _ = try context.facade.register(
+        alias: "MDSTRICTOK",
+        assetID: "asset-strict-ok",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/strict-ok.m3u8"))
+    )
+    _ = try context.facade.register(
+        alias: "MDSTRICTBAD",
+        assetID: "asset-strict-bad",
+        remoteURL: try #require(URL(string: "https://cdn.example.com/strict-bad.m3u8"))
+    )
+
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(
+        context: context,
+        io: io,
+        cacheInfoProvider: { alias in
+            if alias == "MDSTRICTBAD" {
+                throw CacheMetadataFailure.unavailable
+            }
+            return try context.facade.cacheInfo(alias: alias)
+        }
+    )
+
+    let exitCode = app.run(command: .listAliases)
+
+    #expect(exitCode == 1)
+    #expect(io.errorLines.contains { $0.contains("Failed to list aliases:") })
 }
 
 @Test func cliListCommand_nonInteractive_whenNoAliases_printsEmptyState() throws {
