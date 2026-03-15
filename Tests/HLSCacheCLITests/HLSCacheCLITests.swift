@@ -384,6 +384,51 @@ private func parseJSONObject(_ line: String) throws -> [String: Any] {
     )
 }
 
+@Test func cliArguments_parseExportCommand_withAV1BitrateUppercaseUnit() throws {
+    let parsed = try CLIArguments.parse([
+        "export",
+        "--alias", "MDEXPORT",
+        "--output", "/tmp/output.mp4",
+        "--av1",
+        "--av1-bitrate", "2M"
+    ])
+
+    #expect(
+        parsed.command == .exportMP4(
+            ExportMP4Command(
+                alias: "MDEXPORT",
+                outputURL: URL(fileURLWithPath: "/tmp/output.mp4").standardizedFileURL,
+                videoCodec: .av1(
+                    AV1TranscodeOptions(
+                        preset: AV1TranscodeOptions.defaultPreset,
+                        crf: AV1TranscodeOptions.defaultCRF,
+                        bitrate: "2M"
+                    )
+                )
+            )
+        )
+    )
+}
+
+@Test func cliArguments_parseExportCommand_invalidAV1Bitrate_throws() throws {
+    do {
+        _ = try CLIArguments.parse([
+            "export",
+            "--alias", "MDEXPORT",
+            "--output", "/tmp/output.mp4",
+            "--av1",
+            "--av1-bitrate", "1400"
+        ])
+        #expect(Bool(false))
+    } catch let error as CLIArgumentParseError {
+        #expect(
+            error == .invalidArgument(
+                "Invalid AV1 bitrate '1400'. Use a positive integer plus unit suffix k or M (examples: 1200k, 2M)."
+            )
+        )
+    }
+}
+
 @Test func cliArguments_parseExportCommand_av1TuningWithoutMode_throws() throws {
     do {
         _ = try CLIArguments.parse([
@@ -1531,6 +1576,73 @@ private func parseJSONObject(_ line: String) throws -> [String: Any] {
     #expect(io.outputLines.contains { $0.contains("Video mode: remux (copy)") })
     #expect(io.outputLines.contains { $0.contains("Output: \(outputURL.path)") })
     #expect(io.outputLines.contains { $0.contains("Output size: 8 bytes") })
+}
+
+@Test func cliExportCommand_av1InvalidBitrate_failsFastWithValidationDiagnostics() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedExportableMediaCache(baseDirectory: directory, alias: "MDEXPAV1BAD", assetID: "asset-exp-av1-bad")
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let outputURL = directory.appendingPathComponent("out/video-av1.mp4")
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let exitCode = app.run(
+        command: .exportMP4(
+            ExportMP4Command(
+                alias: "MDEXPAV1BAD",
+                outputURL: outputURL,
+                videoCodec: .av1(AV1TranscodeOptions(preset: "6", crf: 32, bitrate: "1400"))
+            )
+        )
+    )
+
+    #expect(exitCode == 1)
+    #expect(io.outputLines.contains { $0.contains("AV1 argument validation failed.") })
+    #expect(io.outputLines.contains { $0.contains("Invalid AV1 bitrate '1400'") })
+}
+
+@Test func cliExportCommand_av1EncoderUnavailable_reportsPreflightDiagnostics() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedExportableMediaCache(baseDirectory: directory, alias: "MDEXPAV1PREFLIGHT", assetID: "asset-exp-av1-preflight")
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let outputURL = directory.appendingPathComponent("out/video-av1.mp4")
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(
+        context: context,
+        io: io,
+        makeExporter: { appContext in
+            CLIExporter(
+                baseDirectory: appContext.baseDirectory,
+                facade: appContext.facade,
+                exportRunner: { _, _, _ in
+                    throw CLIExportError.remuxFailed("export should not run when encoder probe fails")
+                },
+                encoderAvailabilityChecker: { _ in
+                    throw CLIExportError.ffmpegUnavailable(
+                        "ffmpeg encoder 'libsvtav1' is not available. Install ffmpeg with libsvtav1 support, or rerun export without --av1."
+                    )
+                }
+            )
+        }
+    )
+
+    let exitCode = app.run(
+        command: .exportMP4(
+            ExportMP4Command(
+                alias: "MDEXPAV1PREFLIGHT",
+                outputURL: outputURL,
+                videoCodec: .av1(AV1TranscodeOptions(preset: "6", crf: 32, bitrate: "1200k"))
+            )
+        )
+    )
+
+    #expect(exitCode == 1)
+    #expect(io.outputLines.contains { $0.contains("AV1 preflight failed (encoder availability).") })
+    #expect(io.outputLines.contains { $0.contains("ffmpeg is unavailable:") })
 }
 
 @Test func cliDownloadCommand_runsThroughCLIApp_andPrintsProgressSummary() throws {

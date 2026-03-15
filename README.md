@@ -483,6 +483,7 @@ Export behavior:
 - Default mode remuxes with `-c copy` for backward compatibility
 - Optional `--av1` mode transcodes video with `libsvtav1` (better compression, slower encode)
 - AV1 tuning flags: `--av1-preset`, `--av1-crf`, `--av1-bitrate`
+- AV1 bitrate format contract: positive integer + suffix `k` or `M` (examples: `1200k`, `2M`)
 - Non-interactive `export` shows periodic progress updates with elapsed time and ETA.
 - Completion prints a final summary including total elapsed time.
 - Uses `ffmpeg` for export and reports output path + size on success
@@ -526,6 +527,7 @@ Export prerequisites:
 - AV1 mode requires an ffmpeg build with `libsvtav1` encoder support.
 
 Export troubleshooting:
+- `AV1 argument validation failed`: fix malformed AV1 tuning input (especially `--av1-bitrate` format).
 - `ffmpeg is unavailable`: install ffmpeg and verify with `ffmpeg -version`.
 - `ffmpeg encoder 'libsvtav1' is not available`: install ffmpeg with AV1 encoder support, or run export without `--av1`.
 - `No cached media playlist was found`: ensure the alias was registered and playlist bytes were cached.
