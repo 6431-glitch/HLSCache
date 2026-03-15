@@ -42,6 +42,7 @@ enum CLICommand: Equatable {
     case register(RegisterAssetCommand)
     case listAliases
     case download(DownloadCommand)
+    case proxy(ProxyCommand)
     case clearData(ClearDataCommand)
     case exportMP4(ExportMP4Command)
     case settingsGet
@@ -57,6 +58,15 @@ struct RegisterAssetCommand: Equatable {
 
 struct DownloadCommand: Equatable {
     let alias: String
+}
+
+enum ProxyCommandAction: Equatable {
+    case status
+    case restart
+}
+
+struct ProxyCommand: Equatable {
+    let action: ProxyCommandAction
 }
 
 enum ClearDataScope: Equatable {
@@ -168,6 +178,10 @@ struct CLIArguments: Equatable {
                 let commandArgs = Array(args[(index + 1)...])
                 command = try parseDownloadCommand(commandArgs)
                 index = args.count
+            case "proxy":
+                let commandArgs = Array(args[(index + 1)...])
+                command = try parseProxyCommand(commandArgs)
+                index = args.count
             case "list":
                 let commandArgs = Array(args[(index + 1)...])
                 command = try parseListCommand(commandArgs)
@@ -209,6 +223,8 @@ struct CLIArguments: Equatable {
           swift run HLSCacheCLI [options] register --alias <alias> --asset-id <asset-id> --url <remote-url> [--header "Name: Value"]
           swift run HLSCacheCLI [options] list
           swift run HLSCacheCLI [options] download --alias <alias>
+          swift run HLSCacheCLI [options] proxy status
+          swift run HLSCacheCLI [options] proxy restart
           swift run HLSCacheCLI [options] clear --alias <alias> [--delete-alias] --yes
           swift run HLSCacheCLI [options] clear --all [--delete-alias] --yes
           swift run HLSCacheCLI [options] export --alias <alias> --output <file.mp4> [--av1] [--av1-preset <preset>] [--av1-crf <0...63>] [--av1-bitrate <value>]
@@ -228,6 +244,8 @@ struct CLIArguments: Equatable {
           list                      Print registered aliases and cache metadata.
           download                  Cache entire HLS content for an alias.
                                    Required: --alias
+          proxy status              Print non-interactive proxy runtime status.
+          proxy restart             Restart proxy runtime non-interactively.
           clear                     Clear cache bytes by alias or all aliases.
                                    Required: one of --alias <alias> or --all
                                    Optional: --delete-alias to remove alias metadata
@@ -269,6 +287,28 @@ struct CLIArguments: Equatable {
         }
 
         return .download(DownloadCommand(alias: alias))
+    }
+
+    private static func parseProxyCommand(_ args: [String]) throws -> CLICommand {
+        guard let subcommand = args.first else {
+            throw CLIArgumentParseError.missingRequiredArgument("proxy <status|restart>")
+        }
+        guard args.count == 1 else {
+            let value = args[1]
+            if value.hasPrefix("-") {
+                throw CLIArgumentParseError.unknownOption(value)
+            }
+            throw CLIArgumentParseError.unknownCommand(value)
+        }
+
+        switch subcommand {
+        case "status":
+            return .proxy(ProxyCommand(action: .status))
+        case "restart":
+            return .proxy(ProxyCommand(action: .restart))
+        default:
+            throw CLIArgumentParseError.unknownCommand(subcommand)
+        }
     }
 
     private static func parseRegisterCommand(_ args: [String]) throws -> CLICommand {

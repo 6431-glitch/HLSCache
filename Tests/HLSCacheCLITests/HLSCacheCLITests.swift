@@ -140,12 +140,15 @@ private func loadRepositoryREADME() throws -> String {
 @Test func docs_readmeAndUsageStayAlignedWithImplementedCLI() throws {
     let readme = try loadRepositoryREADME()
     #expect(readme.contains("swift run HLSCacheCLI download --alias MD0534"))
+    #expect(readme.contains("swift run HLSCacheCLI proxy status"))
     #expect(readme.contains("--av1"))
     #expect(readme.contains("AES-128 encrypted playlists are exportable when the referenced key material is already cached."))
     #expect(!readme.contains("AES-128 encrypted playlists are currently not supported by CLI export."))
 
     let usage = CLIArguments.usage.lowercased()
     #expect(usage.contains("download --alias <alias>"))
+    #expect(usage.contains("proxy status"))
+    #expect(usage.contains("proxy restart"))
     #expect(usage.contains("export --alias <alias> --output <file.mp4> [--av1]"))
     #expect(!usage.contains("coming soon"))
     #expect(!usage.contains("placeholder"))
@@ -231,6 +234,25 @@ private func loadRepositoryREADME() throws -> String {
 @Test func cliArguments_parseDownloadCommand_withAlias() throws {
     let parsed = try CLIArguments.parse(["download", "--alias", "MDDL01"])
     #expect(parsed.command == .download(DownloadCommand(alias: "MDDL01")))
+}
+
+@Test func cliArguments_parseProxyStatusCommand() throws {
+    let parsed = try CLIArguments.parse(["proxy", "status"])
+    #expect(parsed.command == .proxy(ProxyCommand(action: .status)))
+}
+
+@Test func cliArguments_parseProxyRestartCommand() throws {
+    let parsed = try CLIArguments.parse(["proxy", "restart"])
+    #expect(parsed.command == .proxy(ProxyCommand(action: .restart)))
+}
+
+@Test func cliArguments_parseProxyCommand_missingSubcommand_throws() throws {
+    do {
+        _ = try CLIArguments.parse(["proxy"])
+        #expect(Bool(false))
+    } catch let error as CLIArgumentParseError {
+        #expect(error == .missingRequiredArgument("proxy <status|restart>"))
+    }
 }
 
 @Test func cliArguments_parseListCommand() throws {
@@ -420,6 +442,76 @@ private func loadRepositoryREADME() throws -> String {
     #expect(io.outputLines.contains { $0.contains("1) Show proxy status") })
     #expect(io.outputLines.contains { $0.contains("2) Restart proxy server") })
     #expect(!io.outputLines.contains { $0.contains("disabled by feature flags") })
+}
+
+@Test func cliProxyCommand_status_whenRunning_returnsSuccessAndStableFields() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let exitCode = app.run(command: .proxy(ProxyCommand(action: .status)))
+    #expect(exitCode == 0)
+    #expect(io.outputLines.contains { $0 == "proxy.state=running" })
+    #expect(io.outputLines.contains { $0 == "proxy.host=127.0.0.1" })
+    #expect(io.outputLines.contains { $0.hasPrefix("proxy.port=") && !$0.hasSuffix("unavailable") })
+    #expect(io.outputLines.contains { $0.hasPrefix("proxy.base_url=http://127.0.0.1:") })
+}
+
+@Test func cliProxyCommand_status_whenUnavailable_returnsRuntimeUnavailableCode() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    context.facade.stopServer()
+
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let exitCode = app.run(command: .proxy(ProxyCommand(action: .status)))
+    #expect(exitCode == 2)
+    #expect(io.outputLines.contains { $0 == "proxy.state=stopped" })
+    #expect(io.outputLines.contains { $0 == "proxy.host=unavailable" })
+    #expect(io.outputLines.contains { $0 == "proxy.port=unavailable" })
+    #expect(io.outputLines.contains { $0 == "proxy.base_url=unavailable" })
+}
+
+@Test func cliProxyCommand_restartFailure_returnsDeterministicExitCode() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let runningURL = try #require(URL(string: "http://127.0.0.1:8080"))
+    var status = ProxyServerStatus(
+        isRunning: true,
+        host: "127.0.0.1",
+        port: 8080,
+        baseURL: runningURL
+    )
+
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(
+        context: context,
+        io: io,
+        proxyStatusProvider: { status },
+        stopProxyServer: {
+            status = ProxyServerStatus(isRunning: false, host: nil, port: nil, baseURL: nil)
+        },
+        startProxyServer: { host, port in
+            status = ProxyServerStatus(isRunning: false, host: nil, port: nil, baseURL: nil)
+            return URL(string: "http://\(host):\(port)")!
+        }
+    )
+
+    let exitCode = app.run(command: .proxy(ProxyCommand(action: .restart)))
+    #expect(exitCode == 3)
+    #expect(io.outputLines.contains { $0.contains("Failed to restart proxy server.") })
+    #expect(io.outputLines.contains { $0 == "proxy.state=stopped" })
+    #expect(io.outputLines.contains { $0 == "proxy.host=unavailable" })
+    #expect(io.outputLines.contains { $0 == "proxy.port=unavailable" })
+    #expect(io.outputLines.contains { $0 == "proxy.base_url=unavailable" })
 }
 
 @Test func cliProxyMenu_statusAction_reportsRuntimeMetadataWhenRunning() throws {

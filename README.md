@@ -389,6 +389,22 @@ Alias monitor screen (interactive):
 Non-interactive `list` command remains strict:
 - Any cache metadata failure returns exit code `1` and reports `Failed to list aliases: ...`.
 
+Non-interactive proxy operations:
+
+```bash
+swift run HLSCacheCLI proxy status
+swift run HLSCacheCLI proxy restart
+```
+
+Proxy command output contract:
+- `proxy status` emits deterministic `proxy.*` fields for automation parsing:
+  `proxy.state`, `proxy.host`, `proxy.port`, `proxy.base_url`.
+- Unavailable runtime fields are explicitly rendered as `unavailable`.
+- Exit codes:
+  - `0`: success
+  - `2`: runtime unavailable (`proxy status`)
+  - `3`: restart failure (`proxy restart`)
+
 Clear cache data from command line (`--yes` is required for non-interactive destructive execution):
 
 ```bash

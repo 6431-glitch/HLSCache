@@ -1,6 +1,12 @@
 import Foundation
 import HLSCache
 
+private enum CLIProxyCommandExitCode {
+    static let success: Int32 = 0
+    static let runtimeUnavailable: Int32 = 2
+    static let restartFailure: Int32 = 3
+}
+
 struct CLIApp {
     private let context: CLIAppContext
     private let io: any CLIIO
@@ -52,6 +58,8 @@ struct CLIApp {
             return runListAliasesCommand()
         case let .download(command):
             return runDownloadCommand(command)
+        case let .proxy(command):
+            return runProxyCommand(command)
         case let .clearData(command):
             return runClearDataCommand(command, allowPrompt: false)
         case let .exportMP4(command):
@@ -354,6 +362,39 @@ struct CLIApp {
         io.writeLine("Registered aliases: \(aliasCount)")
     }
 
+    private func runProxyCommand(_ command: ProxyCommand) -> Int32 {
+        switch command.action {
+        case .status:
+            return runProxyStatusCommand()
+        case .restart:
+            return runProxyRestartCommand()
+        }
+    }
+
+    private func runProxyStatusCommand() -> Int32 {
+        let status = proxyStatusProvider()
+        io.writeLine("Proxy status:")
+        writeProxyStatusContext(status)
+        writeProxyStatusContract(status)
+        guard status.isRunning,
+              status.host != nil,
+              status.port != nil,
+              status.baseURL != nil else {
+            io.writeLine("Proxy server is not running.")
+            return CLIProxyCommandExitCode.runtimeUnavailable
+        }
+        return CLIProxyCommandExitCode.success
+    }
+
+    private func runProxyRestartCommand() -> Int32 {
+        let result = runProxyRestartAction()
+        let status = proxyStatusProvider()
+        io.writeLine("Proxy status (post-restart):")
+        writeProxyStatusContext(status)
+        writeProxyStatusContract(status)
+        return result == 0 ? CLIProxyCommandExitCode.success : CLIProxyCommandExitCode.restartFailure
+    }
+
     @discardableResult
     private func runProxyRestartAction() -> Int32 {
         let before = proxyStatusProvider()
@@ -420,6 +461,13 @@ struct CLIApp {
         io.writeLine("Host: \(status.host ?? "(unavailable)")")
         io.writeLine("Port: \(status.port.map(String.init) ?? "(unavailable)")")
         io.writeLine("Base URL: \(status.baseURL?.absoluteString ?? "(unavailable)")")
+    }
+
+    private func writeProxyStatusContract(_ status: ProxyServerStatus) {
+        io.writeLine("proxy.state=\(status.isRunning ? "running" : "stopped")")
+        io.writeLine("proxy.host=\(status.host ?? "unavailable")")
+        io.writeLine("proxy.port=\(status.port.map(String.init) ?? "unavailable")")
+        io.writeLine("proxy.base_url=\(status.baseURL?.absoluteString ?? "unavailable")")
     }
 
     private func runInteractiveRegisterAssetFlow() {
