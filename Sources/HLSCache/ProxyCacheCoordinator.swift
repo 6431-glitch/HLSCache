@@ -37,6 +37,29 @@ public struct ProxyCacheServeResult: Equatable, Sendable {
 }
 
 public final class ProxyCacheCoordinator: @unchecked Sendable {
+    private struct SemanticVersion: Comparable, Equatable {
+        let major: Int
+        let minor: Int
+        let patch: Int
+
+        static func < (lhs: SemanticVersion, rhs: SemanticVersion) -> Bool {
+            if lhs.major != rhs.major { return lhs.major < rhs.major }
+            if lhs.minor != rhs.minor { return lhs.minor < rhs.minor }
+            return lhs.patch < rhs.patch
+        }
+    }
+
+    private enum PluginMigrationDecision: String {
+        case exactReuse
+        case compatibleReuse
+        case forcedRecache
+    }
+
+    private struct PluginMigrationEvaluation {
+        let decision: PluginMigrationDecision
+        let reason: String
+    }
+
     private let coreCache: CoreCache
     private let transformPipeline: TransformPipeline
 
@@ -292,10 +315,86 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
             return
         }
         let activeStamps = activePluginStamps(for: resourceID)
-        guard record.pluginsApplied != activeStamps else {
+        let evaluation = evaluatePluginMigration(cached: record.pluginsApplied, active: activeStamps)
+        coreCache.logPluginMigrationDecision(
+            resource: resourceID,
+            decision: evaluation.decision.rawValue,
+            reason: evaluation.reason,
+            cachedStamps: record.pluginsApplied,
+            activeStamps: activeStamps
+        )
+        guard evaluation.decision == .forcedRecache else {
             return
         }
-        try coreCache.invalidate(resource: resourceID)
+        try coreCache.invalidate(resource: resourceID, reason: "pluginMigration:\(evaluation.reason)")
+    }
+
+    private func evaluatePluginMigration(
+        cached: [PluginStamp],
+        active: [PluginStamp]
+    ) -> PluginMigrationEvaluation {
+        guard cached.count == active.count else {
+            return PluginMigrationEvaluation(
+                decision: .forcedRecache,
+                reason: "pluginCountChanged"
+            )
+        }
+
+        var foundCompatibleUpgrade = false
+
+        for (cachedStamp, activeStamp) in zip(cached, active) {
+            guard cachedStamp.id == activeStamp.id else {
+                return PluginMigrationEvaluation(
+                    decision: .forcedRecache,
+                    reason: "pluginIDChanged"
+                )
+            }
+
+            if cachedStamp.version == activeStamp.version {
+                continue
+            }
+
+            guard let cachedVersion = parseSemanticVersion(cachedStamp.version),
+                  let activeVersion = parseSemanticVersion(activeStamp.version) else {
+                return PluginMigrationEvaluation(
+                    decision: .forcedRecache,
+                    reason: "nonSemanticVersionChanged"
+                )
+            }
+
+            guard cachedVersion.major == activeVersion.major else {
+                return PluginMigrationEvaluation(
+                    decision: .forcedRecache,
+                    reason: "pluginMajorVersionChanged"
+                )
+            }
+
+            guard activeVersion >= cachedVersion else {
+                return PluginMigrationEvaluation(
+                    decision: .forcedRecache,
+                    reason: "pluginVersionDowngraded"
+                )
+            }
+
+            foundCompatibleUpgrade = true
+        }
+
+        return PluginMigrationEvaluation(
+            decision: foundCompatibleUpgrade ? .compatibleReuse : .exactReuse,
+            reason: foundCompatibleUpgrade ? "pluginVersionUpgradeWithinMajor" : "pluginStampsExactMatch"
+        )
+    }
+
+    private func parseSemanticVersion(_ raw: String) -> SemanticVersion? {
+        let core = raw.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false).first ?? Substring(raw)
+        let components = core.split(separator: ".")
+        guard components.count >= 3,
+              let major = Int(components[0]),
+              let minor = Int(components[1]),
+              let patch = Int(components[2]) else {
+            return nil
+        }
+        return SemanticVersion(major: major, minor: minor, patch: patch)
     }
 
     private func invalidateResourceIfIntegrityMismatch(resourceID: ResourceID) throws {
@@ -318,7 +417,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         }
 
         guard storedIntegrity == computedIntegrity else {
-            try coreCache.invalidate(resource: resourceID)
+            try coreCache.invalidate(resource: resourceID, reason: "integrityMismatch")
             return
         }
     }

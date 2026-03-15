@@ -344,6 +344,34 @@ public final class CoreCache: @unchecked Sendable {
         }
     }
 
+    public func logPluginMigrationDecision(
+        resource: ResourceID,
+        decision: String,
+        reason: String,
+        cachedStamps: [PluginStamp],
+        activeStamps: [PluginStamp]
+    ) {
+        let correlationID = UUID().uuidString
+        queue.sync {
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "CoreCache",
+                    operation: "pluginMigrationDecision",
+                    level: .info,
+                    correlationID: correlationID,
+                    metadata: [
+                        "cacheKey": resource.cacheKey.rawValue,
+                        "kind": resource.kind.rawValue,
+                        "decision": decision,
+                        "reason": reason,
+                        "cachedStamps": cachedStamps.map { "\($0.id)@\($0.version)" }.joined(separator: ","),
+                        "activeStamps": activeStamps.map { "\($0.id)@\($0.version)" }.joined(separator: ",")
+                    ]
+                )
+            )
+        }
+    }
+
     @discardableResult
     public func setResourceIntegrity(resource: ResourceID, integrity: ResourceIntegrity?) throws -> ResourceRecord {
         let correlationID = UUID().uuidString
@@ -369,7 +397,7 @@ public final class CoreCache: @unchecked Sendable {
         }
     }
 
-    public func invalidate(resource: ResourceID) throws {
+    public func invalidate(resource: ResourceID, reason: String? = nil) throws {
         let correlationID = UUID().uuidString
         try queue.sync(flags: .barrier) {
             let bytes = try diskStore.fileLength(for: resource)
@@ -384,7 +412,8 @@ public final class CoreCache: @unchecked Sendable {
                     metadata: [
                         "cacheKey": resource.cacheKey.rawValue,
                         "kind": resource.kind.rawValue,
-                        "bytes": String(bytes)
+                        "bytes": String(bytes),
+                        "reason": reason ?? "unspecified"
                     ]
                 )
             )

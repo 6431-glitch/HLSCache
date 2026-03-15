@@ -32,6 +32,23 @@ private actor AsyncRequestRecorder {
     }
 }
 
+private final class ProxyCoordinatorTestLogger: StructuredLogger, @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [StructuredLogEvent] = []
+
+    func log(_ event: StructuredLogEvent) {
+        lock.lock()
+        events.append(event)
+        lock.unlock()
+    }
+
+    func snapshot() -> [StructuredLogEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return events
+    }
+}
+
 private struct StampPassThroughPlugin: ByteTransformer {
     let id: String
     let version: String
@@ -519,6 +536,64 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
         ProxyStreamChunk(source: .network, range: try #require(ByteRange(start: 0, endExclusive: 128)), byteCount: 128)
     ])
     #expect(payload == Data(originData[0..<128]))
+}
+
+@Test func proxyCacheCoordinator_pluginStampCompatibility_minorVersionUpgrade_reusesCacheAndLogsDecision() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-stamp-compatible-upgrade")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let totalLength: Int64 = 128
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 197) })
+    let resourceID = try makeCoordinatorResourceID()
+    let logger = ProxyCoordinatorTestLogger()
+    let cache = try CoreCache(baseDirectory: directory, logger: logger)
+
+    let coordinatorV100 = ProxyCacheCoordinator(
+        coreCache: cache,
+        transformPipeline: TransformPipeline(transformers: [StampPassThroughPlugin(id: "stamp-pass-through", version: "1.0.0")])
+    )
+    _ = try coordinatorV100.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-63",
+        totalLength: totalLength,
+        fetchNetworkRange: { range in
+            Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        },
+        emit: { _ in }
+    )
+
+    let coordinatorV110 = ProxyCacheCoordinator(
+        coreCache: cache,
+        transformPipeline: TransformPipeline(transformers: [StampPassThroughPlugin(id: "stamp-pass-through", version: "1.1.0")])
+    )
+
+    var networkFetches = 0
+    var payload = Data()
+    let result = try coordinatorV110.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-63",
+        totalLength: totalLength,
+        allowNetworkFallback: false,
+        fetchNetworkRange: { _ in
+            networkFetches += 1
+            return Data()
+        },
+        emit: { payload.append($0) }
+    )
+
+    #expect(networkFetches == 0)
+    #expect(result.chunks == [
+        ProxyStreamChunk(source: .cache, range: try #require(ByteRange(start: 0, endExclusive: 64)), byteCount: 64)
+    ])
+    #expect(payload == Data(originData[0..<64]))
+
+    let migrationEvents = logger.snapshot().filter { $0.operation == "pluginMigrationDecision" }
+    let compatibleEvent = migrationEvents.last
+    #expect(compatibleEvent?.metadata["decision"] == "compatibleReuse")
+    #expect(compatibleEvent?.metadata["reason"] == "pluginVersionUpgradeWithinMajor")
 }
 
 @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
