@@ -205,16 +205,29 @@ public final class HLSCacheFacade: @unchecked Sendable {
     }
 
     @discardableResult
+    /// Rotates alias metadata to a new remote URL while preserving asset identity (`AssetID`/`CacheKey`).
+    /// Resource-byte continuity remains strict URL-based, so cross-origin or otherwise different canonical
+    /// resource URLs are treated as cache misses and fetched under new resource keys.
     public func updateRemoteURL(alias: Alias, remoteURL: URL) throws -> AssetRecord {
         let correlationID = UUID().uuidString
+        let previous = aliasRegistry.resolve(alias: alias)
         let updated = try aliasRegistry.updateRemoteURL(alias: alias, remoteURL: remoteURL)
+        let previousHost = previous?.currentRemoteURL.host
+        let updatedHost = updated.currentRemoteURL.host
+        let hostChanged = previousHost != updatedHost
         logger.log(
             StructuredLogEvent(
                 subsystem: "HLSCache",
                 operation: "updateRemoteURL",
                 level: .info,
                 correlationID: correlationID,
-                metadata: ["alias": alias]
+                metadata: [
+                    "alias": alias,
+                    "oldHost": previousHost ?? "",
+                    "newHost": updatedHost ?? "",
+                    "hostChanged": String(hostChanged),
+                    "rotationPolicy": "cacheKey_stable_resourceKey_strict_url_match"
+                ]
             )
         )
         return updated
@@ -582,6 +595,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
         let coordinator: ProxyCacheCoordinator
         let totalLength: Int64
         let contentType: String?
+        let continuityDecision: String
         let requestHeaders = asset.headers ?? [:]
         do {
             let cache = try CoreCache(baseDirectory: baseDirectory, logger: logger)
@@ -590,6 +604,9 @@ public final class HLSCacheFacade: @unchecked Sendable {
                 transformPipeline: makeTransformPipeline()
             )
             let cachedRecord = try cache.record(resource: resourceID)
+            continuityDecision = cachedRecord == nil
+                ? "miss_new_resource_url"
+                : "reuse_existing_resource_url"
             let metadata = try await resolveRemoteMetadataIfNeeded(
                 cachedRecord: cachedRecord,
                 remoteURL: route.remoteURL,
@@ -634,15 +651,16 @@ public final class HLSCacheFacade: @unchecked Sendable {
                         level: .debug,
                         correlationID: correlationID,
                         metadata: [
-                            "alias": route.alias,
-                            "kind": route.kind.rawValue,
-                            "status": String(response.statusCode),
-                            "bytes": headers["Content-Length"] ?? "0"
-                        ]
-                    )
+                        "alias": route.alias,
+                        "kind": route.kind.rawValue,
+                        "status": String(response.statusCode),
+                        "bytes": headers["Content-Length"] ?? "0",
+                        "continuityDecision": continuityDecision
+                    ]
                 )
-                return ProxyServerHTTPResponse(
-                    statusCode: response.statusCode,
+            )
+            return ProxyServerHTTPResponse(
+                statusCode: response.statusCode,
                     reasonPhrase: reasonPhrase(for: response.statusCode),
                     headers: headers,
                     body: Data()
@@ -679,7 +697,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
                         "alias": route.alias,
                         "kind": route.kind.rawValue,
                         "status": String(result.response.statusCode),
-                        "bytes": String(payload.count)
+                        "bytes": String(payload.count),
+                        "continuityDecision": continuityDecision
                     ]
                 )
             )
