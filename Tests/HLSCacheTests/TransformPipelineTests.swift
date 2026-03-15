@@ -191,6 +191,19 @@ private func makeTransformContext(kind: ResourceKind = .segment) -> TransformCon
     #expect(integrity != tamperedIntegrity)
 }
 
+@Test func encryptAtRestPlugin_emptyKey_usesRecoverableValidationError() throws {
+    let plugin = EncryptAtRestPlugin(key: Data())
+    let pipeline = TransformPipeline(transformers: [plugin])
+    let processor = pipeline.makeProcessor(context: makeTransformContext(kind: .segment), direction: .writeToCache)
+
+    do {
+        _ = try processor.process(Data("payload".utf8), isFinal: true)
+        #expect(Bool(false))
+    } catch let error as EncryptAtRestPluginError {
+        #expect(error == .invalidKey(reason: "EncryptAtRestPlugin requires a non-empty key"))
+    }
+}
+
 @Test func encryptAtRestPlugin_usesByteOffsetForDeterministicRangeDecryption() throws {
     let key = Data("offset-aware-key".utf8)
     let plugin = EncryptAtRestPlugin(key: key)

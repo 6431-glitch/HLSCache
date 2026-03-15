@@ -186,6 +186,7 @@ Recommended for sensitive content. Stored bytes are encrypted on write and decry
 
 - `EncryptAtRestPlugin.Mode.xorInsecure` (default): legacy reversible XOR stream mode for backward compatibility only.
 - `EncryptAtRestPlugin.Mode.authenticatedV1`: authenticated mode with keyed stream encryption + HMAC integrity metadata persisted in cache manifests.
+- Invalid key configuration is recoverable: initialization no longer traps, and transform use throws `EncryptAtRestPluginError.invalidKey(...)`.
 
 When authenticated mode is enabled, cached-resource tampering is detected deterministically before serve. On mismatch, cache entries are invalidated and normal network fallback/offline policies apply.
 

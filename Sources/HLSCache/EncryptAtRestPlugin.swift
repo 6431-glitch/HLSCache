@@ -1,6 +1,10 @@
 import CoreCache
 import Foundation
 
+public enum EncryptAtRestPluginError: Error, Equatable, Hashable, Sendable {
+    case invalidKey(reason: String)
+}
+
 public struct EncryptAtRestPlugin: HLSCachePlugin, ReversibleByteTransformer, IntegrityMetadataTransformer, Hashable, Sendable {
     public enum Mode: String, Hashable, Sendable {
         case xorInsecure
@@ -29,13 +33,19 @@ public struct EncryptAtRestPlugin: HLSCachePlugin, ReversibleByteTransformer, In
     public let version: String
     public let mode: Mode
     private let keyData: Data
+    private let validationError: EncryptAtRestPluginError?
 
     public init(key: Data, mode: Mode = .xorInsecure, version: String? = nil) {
-        precondition(!key.isEmpty, "EncryptAtRestPlugin requires a non-empty key")
         self.mode = mode
         self.id = mode.pluginID
         self.version = version ?? mode.defaultVersion
-        self.keyData = key
+        if key.isEmpty {
+            self.keyData = Data([0])
+            self.validationError = .invalidKey(reason: "EncryptAtRestPlugin requires a non-empty key")
+        } else {
+            self.keyData = key
+            self.validationError = nil
+        }
     }
 
     public func makeStreamTransformer(context: TransformContext) -> any ByteStreamTransformer {
@@ -46,6 +56,10 @@ public struct EncryptAtRestPlugin: HLSCachePlugin, ReversibleByteTransformer, In
         context: TransformContext,
         direction: TransformDirection
     ) -> any ByteStreamTransformer {
+        if let validationError {
+            return InvalidEncryptAtRestConfigurationTransformer(error: validationError)
+        }
+
         switch mode {
         case .xorInsecure:
             return XORCipherStreamTransformer(
@@ -62,6 +76,10 @@ public struct EncryptAtRestPlugin: HLSCachePlugin, ReversibleByteTransformer, In
     }
 
     public func integrityMetadata(for cachedPayload: Data, context: TransformContext) throws -> ResourceIntegrity? {
+        if let validationError {
+            throw validationError
+        }
+
         guard mode == .authenticatedV1 else {
             return nil
         }
@@ -251,5 +269,13 @@ private final class AuthenticatedStreamCipherTransformer: ByteStreamTransformer,
         }
 
         return stream
+    }
+}
+
+private struct InvalidEncryptAtRestConfigurationTransformer: ByteStreamTransformer {
+    let error: EncryptAtRestPluginError
+
+    func transform(_ chunk: Data, isFinal: Bool) throws -> Data {
+        throw error
     }
 }
