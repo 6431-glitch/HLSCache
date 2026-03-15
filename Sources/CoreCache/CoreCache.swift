@@ -251,6 +251,8 @@ public final class CoreCache: @unchecked Sendable {
             if let pluginsApplied {
                 record.pluginsApplied = pluginsApplied
             }
+            // Cached bytes changed; integrity metadata must be recalculated from the new payload.
+            record.integrity = nil
 
             try record.validateInvariants()
             record.touch()
@@ -339,6 +341,31 @@ public final class CoreCache: @unchecked Sendable {
     public func resourceRecord(for resource: ResourceID) throws -> ResourceRecord? {
         try queue.sync {
             try manifestStore.load(resourceID: resource)
+        }
+    }
+
+    @discardableResult
+    public func setResourceIntegrity(resource: ResourceID, integrity: ResourceIntegrity?) throws -> ResourceRecord {
+        let correlationID = UUID().uuidString
+        return try queue.sync(flags: .barrier) {
+            var record = try manifestStore.load(resourceID: resource) ?? ResourceRecord(kind: resource.kind)
+            record.integrity = integrity
+            record.touch()
+            try manifestStore.save(resourceID: resource, record: record)
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "CoreCache",
+                    operation: "setResourceIntegrity",
+                    level: .info,
+                    correlationID: correlationID,
+                    metadata: [
+                        "cacheKey": resource.cacheKey.rawValue,
+                        "kind": resource.kind.rawValue,
+                        "algorithm": integrity?.algorithm ?? "none"
+                    ]
+                )
+            )
+            return record
         }
     }
 

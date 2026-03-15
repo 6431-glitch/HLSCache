@@ -154,6 +154,43 @@ private func makeTransformContext(kind: ResourceKind = .segment) -> TransformCon
     #expect(decrypted == plaintext)
 }
 
+@Test func encryptAtRestPlugin_authenticatedMode_roundTrip_andProducesDistinctPluginStamp() throws {
+    let key = Data("authenticated-mode-key".utf8)
+    let plugin = EncryptAtRestPlugin(key: key, mode: .authenticatedV1)
+    let pipeline = TransformPipeline(transformers: [plugin])
+    let context = makeTransformContext(kind: .segment)
+
+    let plaintext = Data("authenticated-roundtrip-payload".utf8)
+    let writeProcessor = pipeline.makeProcessor(context: context, direction: .writeToCache)
+    let encrypted = try writeProcessor.process(plaintext, isFinal: true)
+
+    #expect(encrypted != plaintext)
+    #expect(writeProcessor.pluginStamps == [PluginStamp(id: "encrypt-at-rest-authenticated", version: "2.0.0-auth-v1")])
+
+    let readProcessor = pipeline.makeProcessor(context: context, direction: .readFromCache)
+    let decrypted = try readProcessor.process(encrypted, isFinal: true)
+    #expect(decrypted == plaintext)
+}
+
+@Test func encryptAtRestPlugin_authenticatedMode_integrityMetadata_detectsTampering() throws {
+    let key = Data("authenticated-integrity-key".utf8)
+    let plugin = EncryptAtRestPlugin(key: key, mode: .authenticatedV1)
+    let pipeline = TransformPipeline(transformers: [plugin])
+    let context = makeTransformContext(kind: .other)
+
+    let plaintext = Data("tamper-detection-payload".utf8)
+    let writeProcessor = pipeline.makeProcessor(context: context, direction: .writeToCache)
+    let encrypted = try writeProcessor.process(plaintext, isFinal: true)
+    let integrity = try #require(try pipeline.integrityMetadata(for: encrypted, context: context))
+
+    var tampered = encrypted
+    tampered[0] ^= 0x5A
+    let tamperedIntegrity = try #require(try pipeline.integrityMetadata(for: tampered, context: context))
+
+    #expect(integrity.algorithm == "hmac-sha256-v1")
+    #expect(integrity != tamperedIntegrity)
+}
+
 @Test func encryptAtRestPlugin_usesByteOffsetForDeterministicRangeDecryption() throws {
     let key = Data("offset-aware-key".utf8)
     let plugin = EncryptAtRestPlugin(key: key)

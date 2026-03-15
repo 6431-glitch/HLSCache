@@ -19,6 +19,10 @@ public protocol ReversibleByteTransformer: ByteTransformer {
     func makeStreamTransformer(context: TransformContext, direction: TransformDirection) -> any ByteStreamTransformer
 }
 
+public protocol IntegrityMetadataTransformer: ByteTransformer {
+    func integrityMetadata(for cachedPayload: Data, context: TransformContext) throws -> ResourceIntegrity?
+}
+
 extension ByteTransformer {
     public func supports(kind: ResourceKind) -> Bool {
         true
@@ -59,6 +63,22 @@ public final class TransformPipeline: @unchecked Sendable {
         }
         let stamps = applicable.map { PluginStamp(id: $0.id, version: $0.version) }
         return TransformPipelineProcessor(streamTransformers: streamTransformers, pluginStamps: stamps)
+    }
+
+    public func integrityMetadata(
+        for cachedPayload: Data,
+        context: TransformContext
+    ) throws -> ResourceIntegrity? {
+        let applicable = transformers.filter { $0.supports(kind: context.resourceID.kind) }
+        for transformer in applicable {
+            guard let integrityTransformer = transformer as? any IntegrityMetadataTransformer else {
+                continue
+            }
+            if let metadata = try integrityTransformer.integrityMetadata(for: cachedPayload, context: context) {
+                return metadata
+            }
+        }
+        return nil
     }
 }
 
