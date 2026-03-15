@@ -36,6 +36,7 @@ struct CLIApp {
 
     @discardableResult
     func run(command: CLICommand) -> Int32 {
+        renderSettingsRecoveryDiagnosticsIfNeeded()
         switch command {
         case .interactive:
             runInteractive()
@@ -58,6 +59,7 @@ struct CLIApp {
     }
 
     func runInteractive() {
+        renderSettingsRecoveryDiagnosticsIfNeeded()
         io.writeLine("HLSCacheCLI")
         io.writeLine("Base directory: \(context.baseDirectory.path)")
         io.writeLine("Settings path: \(context.settingsFileURL.path)")
@@ -100,6 +102,22 @@ struct CLIApp {
         io.writeLine("4) Cache operations")
         io.writeLine("0) Exit")
         io.writeLine("Choose an option:")
+    }
+
+    private func renderSettingsRecoveryDiagnosticsIfNeeded() {
+        let diagnostics = context.settingsStore.consumeLoadDiagnostics()
+        guard !diagnostics.isEmpty else {
+            return
+        }
+
+        for diagnostic in diagnostics {
+            io.writeLine("Settings recovery warning (\(diagnostic.result))")
+            io.writeLine("Settings file: \(diagnostic.settingsPath)")
+            io.writeLine("Recovery file: \(diagnostic.recoveryPath)")
+            io.writeLine("Recovery action: \(diagnostic.recoveryAction)")
+            io.writeLine("Reason: \(diagnostic.errorDescription)")
+        }
+        io.writeLine("")
     }
 
     private func runAssetManagementSubflow() {

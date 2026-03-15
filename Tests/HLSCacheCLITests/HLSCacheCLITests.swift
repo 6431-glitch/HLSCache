@@ -682,6 +682,69 @@ private func loadRepositoryREADME() throws -> String {
     #expect(secondIO.outputLines.contains { $0.contains("defaultUserAgent: MyCLI/1.0") })
 }
 
+@Test func cliSettingsStore_corruptedJSON_isQuarantinedAndReported() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let settingsFileURL = directory.appendingPathComponent("cli_settings.json")
+    try Data("{invalid-json".utf8).write(to: settingsFileURL)
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let exitCode = app.run(command: .settingsGet)
+    #expect(exitCode == 0)
+
+    let corruptFileURL = settingsFileURL.appendingPathExtension("corrupt")
+    #expect(FileManager.default.fileExists(atPath: settingsFileURL.path))
+    #expect(FileManager.default.fileExists(atPath: corruptFileURL.path))
+    #expect(io.outputLines.contains { $0.contains("Settings recovery warning (recovered_decode_failure)") })
+    #expect(io.outputLines.contains { $0.contains("Recovery action: quarantine_and_reset") })
+    #expect(io.outputLines.contains { $0.contains("Settings file: \(settingsFileURL.path)") })
+    #expect(io.outputLines.contains { $0.contains("Recovery file: \(corruptFileURL.path)") })
+}
+
+@Test func cliSettingsStore_partialFile_isQuarantinedAndReported() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let settingsFileURL = directory.appendingPathComponent("cli_settings.json")
+    try Data("{\"defaultUserAgent\":\"partial".utf8).write(to: settingsFileURL)
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let exitCode = app.run(command: .settingsGet)
+    #expect(exitCode == 0)
+
+    let corruptFileURL = settingsFileURL.appendingPathExtension("corrupt")
+    #expect(FileManager.default.fileExists(atPath: corruptFileURL.path))
+    #expect(io.outputLines.contains { $0.contains("Settings recovery warning (recovered_decode_failure)") })
+    #expect(io.outputLines.contains { $0.contains("Recovery action: quarantine_and_reset") })
+}
+
+@Test func cliSettingsStore_recoveryStillAllowsFutureWrites() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let settingsFileURL = directory.appendingPathComponent("cli_settings.json")
+    try Data("{broken".utf8).write(to: settingsFileURL)
+
+    let firstContext = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let firstIO = FakeIO(inputs: [])
+    let firstApp = CLIApp(context: firstContext, io: firstIO)
+    #expect(firstApp.run(command: .settingsSetDefaultUserAgent("RecoveredUA/1.0")) == 0)
+    #expect(firstIO.outputLines.contains { $0.contains("Settings recovery warning (recovered_decode_failure)") })
+
+    let secondContext = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let secondIO = FakeIO(inputs: [])
+    let secondApp = CLIApp(context: secondContext, io: secondIO)
+    #expect(secondApp.run(command: .settingsGet) == 0)
+    #expect(secondIO.outputLines.contains { $0.contains("defaultUserAgent: RecoveredUA/1.0") })
+}
+
 @Test func cliSettingsSetCommand_emptyValue_printsValidationError() throws {
     let directory = try makeCLITempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
