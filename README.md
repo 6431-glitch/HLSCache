@@ -152,6 +152,7 @@ All HTTP responses follow correct Range semantics, including:
 5. On relaunch:
    - Active task mappings are restored from persistent task registry
    - Stale task mappings are pruned
+   - Startup reconciliation purges orphan manifests, orphan data files, and orphan `.downloading` staging files
 
 ProxyServer is not required to remain active during background downloading.
 
@@ -225,6 +226,15 @@ If a manifest is corrupted (for example after interruption), it is treated as a 
 - On decode corruption, the registry file is quarantined to `background_download_tasks.json.corrupt`, then reset to an empty JSON mapping so startup can continue deterministically.
 - Recovery emits structured telemetry with `operation=loadBackgroundDownloadTaskRegistry` and `recoveryAction=quarantine_and_reset`.
 - On non-decode read failures, startup resets in-memory state and emits structured error telemetry instead of failing silently.
+
+### Background Recovery Reconciliation Policy
+
+- On startup, recovery reconciles `cache` data files and manifests:
+  - Manifest without data file => purge manifest
+  - Data file without manifest => purge data file
+  - Stale `.downloading` staging file => purge staging file
+- Reconciliation emits structured telemetry with `operation=reconcileBackgroundStartup`.
+- Summary diagnostics include orphan counts and purged byte totals for deterministic operations visibility.
 
 ### Shared Directory Ownership Contract
 
