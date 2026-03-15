@@ -342,6 +342,28 @@ public final class CoreCache: @unchecked Sendable {
         }
     }
 
+    public func invalidate(resource: ResourceID) throws {
+        let correlationID = UUID().uuidString
+        try queue.sync(flags: .barrier) {
+            let bytes = try diskStore.fileLength(for: resource)
+            try diskStore.remove(resourceID: resource)
+            try manifestStore.delete(resourceID: resource)
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "CoreCache",
+                    operation: "invalidateResource",
+                    level: .warning,
+                    correlationID: correlationID,
+                    metadata: [
+                        "cacheKey": resource.cacheKey.rawValue,
+                        "kind": resource.kind.rawValue,
+                        "bytes": String(bytes)
+                    ]
+                )
+            )
+        }
+    }
+
     private func validatedPlanParts(requested: ByteRange, missingRanges: [ByteRange]) -> [ReadPlanPart] {
         let parts = planParts(requested: requested, missingRanges: missingRanges)
         if isValidPlan(parts, within: requested) {

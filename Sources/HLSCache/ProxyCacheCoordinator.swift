@@ -102,6 +102,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
             return ProxyCacheServeResult(response: response, chunks: [], totalBytesStreamed: 0)
         }
 
+        try invalidateResourceIfPluginStampsIncompatible(resourceID: resourceID)
         let plan = try coreCache.plan(resource: resourceID, requested: response.requestedRange)
         let normalizedChunkSize = max(Int64(1), chunkSizeBytes)
 
@@ -171,6 +172,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         if response.statusCode == 416 {
             return ProxyCacheServeResult(response: response, chunks: [], totalBytesStreamed: 0)
         }
+        try invalidateResourceIfPluginStampsIncompatible(resourceID: resourceID)
         let plan = try coreCache.plan(resource: resourceID, requested: response.requestedRange)
 
         var chunks: [ProxyStreamChunk] = []
@@ -275,6 +277,25 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
             )
         }
         return data
+    }
+
+    private func invalidateResourceIfPluginStampsIncompatible(resourceID: ResourceID) throws {
+        guard let record = try coreCache.resourceRecord(for: resourceID) else {
+            return
+        }
+        let activeStamps = activePluginStamps(for: resourceID)
+        guard record.pluginsApplied != activeStamps else {
+            return
+        }
+        try coreCache.invalidate(resource: resourceID)
+    }
+
+    private func activePluginStamps(for resourceID: ResourceID) -> [PluginStamp] {
+        transformPipeline.makeProcessor(
+            context: TransformContext(resourceID: resourceID, byteOffset: 0),
+            direction: .writeToCache
+        )
+        .pluginStamps
     }
 
     private func requireRange(start: Int64, endExclusive: Int64) throws -> ByteRange {
