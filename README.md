@@ -398,6 +398,13 @@ swift run HLSCacheCLI clear --all --yes
 swift run HLSCacheCLI clear --all --delete-alias --yes
 ```
 
+Clear verification output contract:
+- `clear` commands now emit deterministic `verify.*` fields for automation parsing.
+- Alias scope fields: `verify.scope`, `verify.alias`, `verify.metadata_removed`, `verify.alias_state`, `verify.cache_bytes`, `verify.cache_bytes_status`.
+- All scope fields: `verify.scope`, `verify.metadata_removed`, `verify.alias_count_before`, `verify.alias_count_after`, `verify.total_cache_bytes_after`, `verify.total_cache_bytes_status`.
+- When alias metadata is intentionally removed, byte fields are explicitly marked as `unavailable` with `*_status=unavailable_metadata_removed`.
+- Backward compatibility: existing human-readable summary lines remain, and parse-safe `verify.*` lines are additive.
+
 Export cached HLS media to MP4:
 
 ```bash

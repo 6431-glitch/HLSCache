@@ -907,6 +907,81 @@ private func loadRepositoryREADME() throws -> String {
     #expect(!context.facade.listAliases().contains { $0.alias == "MDCLR2" })
 }
 
+@Test func cliClearCommand_aliasVerificationOutput_contractIsDeterministicAcrossModes() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedCacheBytes(baseDirectory: directory, alias: "MDCLRKEEP", assetID: "asset-clr-keep")
+    try seedCacheBytes(baseDirectory: directory, alias: "MDCLRDEL", assetID: "asset-clr-del")
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let keepExitCode = app.run(
+        command: .clearData(
+            ClearDataCommand(scope: .alias("MDCLRKEEP"), removeAliasMetadata: false, bypassConfirmation: true)
+        )
+    )
+    #expect(keepExitCode == 0)
+    #expect(io.outputLines.contains { $0.contains("verify.scope=alias") })
+    #expect(io.outputLines.contains { $0.contains("verify.alias=MDCLRKEEP") })
+    #expect(io.outputLines.contains { $0.contains("verify.metadata_removed=false") })
+    #expect(io.outputLines.contains { $0.contains("verify.alias_state=present") })
+    #expect(io.outputLines.contains { $0.contains("verify.cache_bytes=0") })
+    #expect(io.outputLines.contains { $0.contains("verify.cache_bytes_status=ok") })
+
+    io.resetOutput()
+    let deleteExitCode = app.run(
+        command: .clearData(
+            ClearDataCommand(scope: .alias("MDCLRDEL"), removeAliasMetadata: true, bypassConfirmation: true)
+        )
+    )
+    #expect(deleteExitCode == 0)
+    #expect(io.outputLines.contains { $0.contains("verify.scope=alias") })
+    #expect(io.outputLines.contains { $0.contains("verify.alias=MDCLRDEL") })
+    #expect(io.outputLines.contains { $0.contains("verify.metadata_removed=true") })
+    #expect(io.outputLines.contains { $0.contains("verify.alias_state=removed") })
+    #expect(io.outputLines.contains { $0.contains("verify.cache_bytes=unavailable") })
+    #expect(io.outputLines.contains { $0.contains("verify.cache_bytes_status=unavailable_metadata_removed") })
+}
+
+@Test func cliClearCommand_allVerificationOutput_contractIsDeterministicAcrossModes() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedCacheBytes(baseDirectory: directory, alias: "MDALLA", assetID: "asset-all-a")
+    try seedCacheBytes(baseDirectory: directory, alias: "MDALLB", assetID: "asset-all-b")
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let keepExitCode = app.run(
+        command: .clearData(
+            ClearDataCommand(scope: .all, removeAliasMetadata: false, bypassConfirmation: true)
+        )
+    )
+    #expect(keepExitCode == 0)
+    #expect(io.outputLines.contains { $0.contains("verify.scope=all") })
+    #expect(io.outputLines.contains { $0.contains("verify.metadata_removed=false") })
+    #expect(io.outputLines.contains { $0.contains("verify.alias_count_before=2") })
+    #expect(io.outputLines.contains { $0.contains("verify.alias_count_after=2") })
+    #expect(io.outputLines.contains { $0.contains("verify.total_cache_bytes_after=0") })
+    #expect(io.outputLines.contains { $0.contains("verify.total_cache_bytes_status=ok") })
+
+    io.resetOutput()
+    try seedCacheBytes(baseDirectory: directory, alias: "MDALLC", assetID: "asset-all-c")
+    let deleteExitCode = app.run(
+        command: .clearData(
+            ClearDataCommand(scope: .all, removeAliasMetadata: true, bypassConfirmation: true)
+        )
+    )
+    #expect(deleteExitCode == 0)
+    #expect(io.outputLines.contains { $0.contains("verify.scope=all") })
+    #expect(io.outputLines.contains { $0.contains("verify.metadata_removed=true") })
+    #expect(io.outputLines.contains { $0.contains("verify.total_cache_bytes_after=unavailable") })
+    #expect(io.outputLines.contains { $0.contains("verify.total_cache_bytes_status=unavailable_metadata_removed") })
+}
+
 @Test func cliInteractiveCacheClear_promptsAndCanCancel() throws {
     let directory = try makeCLITempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
