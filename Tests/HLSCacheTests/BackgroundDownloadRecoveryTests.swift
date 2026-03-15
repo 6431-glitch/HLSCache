@@ -17,6 +17,24 @@ private func makeBackgroundDownloadResourceID(assetID: String, suffix: String) t
     return ResourceID(cacheKey: cacheKey, kind: .segment, resourceKey: ResourceID.makeResourceKey(from: url))
 }
 
+private final class RecordingStructuredLogger: StructuredLogger, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedEvents: [StructuredLogEvent] = []
+
+    func log(_ event: StructuredLogEvent) {
+        lock.lock()
+        storedEvents.append(event)
+        lock.unlock()
+    }
+
+    func events() -> [StructuredLogEvent] {
+        lock.lock()
+        let snapshot = storedEvents
+        lock.unlock()
+        return snapshot
+    }
+}
+
 @Test func backgroundDownloadTaskRegistry_persistsTaskMappingAcrossInstances() throws {
     let directory = try makeBackgroundDownloadTempDirectory(prefix: "bg-registry-persistence")
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -40,6 +58,58 @@ private func makeBackgroundDownloadResourceID(assetID: String, suffix: String) t
     #expect(restored.remoteURL == remoteURL)
     #expect(restored.contentType == "video/mp2t")
     #expect(restored.expectedLength == 1024)
+}
+
+@Test func backgroundDownloadTaskRegistry_decodeFailure_quarantinesCorruptFileAndEmitsTelemetry() throws {
+    let directory = try makeBackgroundDownloadTempDirectory(prefix: "bg-registry-decode-failure")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let registryFileURL = directory.appendingPathComponent("background_download_tasks.json")
+    let corruptData = Data("{invalid-json".utf8)
+    try corruptData.write(to: registryFileURL)
+
+    let logger = RecordingStructuredLogger()
+    let registry = BackgroundDownloadTaskRegistry(baseDirectory: directory, logger: logger)
+
+    #expect(registry.allRecords().isEmpty)
+
+    let corruptFileURL = directory.appendingPathComponent("background_download_tasks.json.corrupt")
+    #expect(FileManager.default.fileExists(atPath: registryFileURL.path))
+    #expect(FileManager.default.fileExists(atPath: corruptFileURL.path))
+    #expect(try Data(contentsOf: corruptFileURL) == corruptData)
+
+    let restoredData = try Data(contentsOf: registryFileURL)
+    let restoredRecords = try JSONDecoder.withISO8601.decode([Int: BackgroundDownloadTaskRecord].self, from: restoredData)
+    #expect(restoredRecords.isEmpty)
+
+    let event = try #require(
+        logger.events().first {
+            $0.operation == "loadBackgroundDownloadTaskRegistry"
+                && $0.metadata["result"] == "recovered_decode_failure"
+        }
+    )
+    #expect(event.level == .warning)
+    #expect(event.metadata["registryPath"] == registryFileURL.path)
+    #expect(event.metadata["recoveryPath"] == corruptFileURL.path)
+    #expect(event.metadata["recoveryAction"] == "quarantine_and_reset")
+    #expect(!(event.metadata["error"] ?? "").isEmpty)
+}
+
+@Test func backgroundDownloadTaskRegistry_decodeFailure_recoveryStillAllowsFutureWrites() throws {
+    let directory = try makeBackgroundDownloadTempDirectory(prefix: "bg-registry-decode-failure-writes")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let registryFileURL = directory.appendingPathComponent("background_download_tasks.json")
+    try Data("not-json".utf8).write(to: registryFileURL)
+
+    let registry = BackgroundDownloadTaskRegistry(baseDirectory: directory)
+    let resourceID = try makeBackgroundDownloadResourceID(assetID: "asset-bg-recovered", suffix: "seg-recovered.ts")
+    let remoteURL = try #require(URL(string: "https://origin.example.com/seg-recovered.ts"))
+
+    _ = try registry.upsert(taskIdentifier: 9901, resourceID: resourceID, remoteURL: remoteURL)
+    let restored = try #require(registry.record(taskIdentifier: 9901))
+    #expect(restored.resourceID == resourceID)
+    #expect(restored.remoteURL == remoteURL)
 }
 
 @Test func backgroundDownloadRecovery_recoverPendingTasks_prunesStaleMappings() throws {
@@ -189,4 +259,12 @@ private func makeBackgroundDownloadResourceID(assetID: String, suffix: String) t
     #expect(manifest.originalURL == remoteURL)
     #expect(manifest.contentType == "video/mp2t")
     #expect(manifest.expectedLength == Int64(payload.count))
+}
+
+private extension JSONDecoder {
+    static var withISO8601: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
 }

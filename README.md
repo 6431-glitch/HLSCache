@@ -218,6 +218,14 @@ If a manifest is corrupted (for example after interruption), it is treated as a 
 - Rotation policy is explicit: cache identity stays stable at asset level, while resource-byte reuse remains strict canonical-URL match for playlist/segment/key/raw requests.
 - Registry access is synchronized for safe concurrent reads and mutations.
 
+### Background Download Task Registry Persistence
+
+- Background task mappings are persisted at `BaseDirectory/background_download_tasks.json`.
+- Writes are atomic (`background_download_tasks.json.tmp` + replace).
+- On decode corruption, the registry file is quarantined to `background_download_tasks.json.corrupt`, then reset to an empty JSON mapping so startup can continue deterministically.
+- Recovery emits structured telemetry with `operation=loadBackgroundDownloadTaskRegistry` and `recoveryAction=quarantine_and_reset`.
+- On non-decode read failures, startup resets in-memory state and emits structured error telemetry instead of failing silently.
+
 ### Shared Directory Ownership Contract
 
 - `CoreCache` acquires an exclusive advisory lock at `BaseDirectory/.corecache.lock` during initialization.

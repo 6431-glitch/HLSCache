@@ -57,15 +57,23 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
     private let baseDirectory: URL
     private let fileURL: URL
     private let temporaryFileURL: URL
+    private let corruptFileURL: URL
+    private let logger: any StructuredLogger
     private let queue = DispatchQueue(label: "HLSCache.BackgroundDownloadTaskRegistry", attributes: .concurrent)
 
     private var records: [Int: BackgroundDownloadTaskRecord] = [:]
 
-    public init(baseDirectory: URL, fileName: String = "background_download_tasks.json") {
+    public init(
+        baseDirectory: URL,
+        fileName: String = "background_download_tasks.json",
+        logger: any StructuredLogger = NoopStructuredLogger()
+    ) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
         self.fileURL = baseDirectory.appendingPathComponent(fileName)
         self.temporaryFileURL = baseDirectory.appendingPathComponent("\(fileName).tmp")
+        self.corruptFileURL = baseDirectory.appendingPathComponent("\(fileName).corrupt")
+        self.logger = logger
         loadFromDisk()
     }
 
@@ -144,8 +152,68 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             records = try decoder.decode([Int: BackgroundDownloadTaskRecord].self, from: data)
+        } catch let decodeError as DecodingError {
+            recoverFromDecodeFailure(decodeError)
         } catch {
             records = [:]
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "loadBackgroundDownloadTaskRegistry",
+                    level: .error,
+                    metadata: [
+                        "result": "load_failed",
+                        "registryPath": fileURL.path,
+                        "recoveryAction": "in_memory_reset",
+                        "error": String(describing: error)
+                    ]
+                )
+            )
+        }
+    }
+
+    private func recoverFromDecodeFailure(_ decodeError: DecodingError) {
+        records = [:]
+
+        do {
+            if fileManager.fileExists(atPath: corruptFileURL.path) {
+                try fileManager.removeItem(at: corruptFileURL)
+            }
+
+            if fileManager.fileExists(atPath: fileURL.path) {
+                try fileManager.moveItem(at: fileURL, to: corruptFileURL)
+            }
+
+            try saveToDiskAtomic()
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "loadBackgroundDownloadTaskRegistry",
+                    level: .warning,
+                    metadata: [
+                        "result": "recovered_decode_failure",
+                        "registryPath": fileURL.path,
+                        "recoveryPath": corruptFileURL.path,
+                        "recoveryAction": "quarantine_and_reset",
+                        "error": String(describing: decodeError)
+                    ]
+                )
+            )
+        } catch {
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "HLSCache",
+                    operation: "loadBackgroundDownloadTaskRegistry",
+                    level: .error,
+                    metadata: [
+                        "result": "recovery_failed",
+                        "registryPath": fileURL.path,
+                        "recoveryPath": corruptFileURL.path,
+                        "error": String(describing: decodeError),
+                        "recoveryError": String(describing: error)
+                    ]
+                )
+            )
         }
     }
 
@@ -191,10 +259,11 @@ public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable {
         baseDirectory: URL,
         registry: BackgroundDownloadTaskRegistry? = nil,
         diskStore: DiskStore? = nil,
-        manifestStore: ManifestStore? = nil
+        manifestStore: ManifestStore? = nil,
+        logger: any StructuredLogger = NoopStructuredLogger()
     ) {
         self.fileManager = .default
-        self.registry = registry ?? BackgroundDownloadTaskRegistry(baseDirectory: baseDirectory)
+        self.registry = registry ?? BackgroundDownloadTaskRegistry(baseDirectory: baseDirectory, logger: logger)
         self.diskStore = diskStore ?? DiskStore(baseDirectory: baseDirectory)
         self.manifestStore = manifestStore ?? ManifestStore(baseDirectory: baseDirectory)
     }
