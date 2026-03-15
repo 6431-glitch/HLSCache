@@ -198,14 +198,14 @@ struct CLIApp {
             }
 
             switch selection.lowercased() {
-            case "0", "b", "back":
+            case "0", "q", "b", "back":
                 shouldReturn = true
             case "1":
                 runInteractiveRegisterAssetFlow()
             case "2":
                 runAliasListMonitor()
             default:
-                io.writeLine("Invalid selection '\(selection)'. Enter 0 to go back.")
+                io.writeLine("Invalid selection '\(selection)'. Enter 0, q, b, or back to go back.")
             }
         }
     }
@@ -242,7 +242,7 @@ struct CLIApp {
             case "2":
                 runProxyRestartAction()
             default:
-                io.writeLine("Invalid selection '\(selection)'. Enter 0, q, or back to go back.")
+                io.writeLine("Invalid selection '\(selection)'. Enter 0, q, b, or back to go back.")
             }
         }
     }
@@ -377,7 +377,7 @@ struct CLIApp {
             }
 
             switch selection.lowercased() {
-            case "0", "b", "back":
+            case "0", "q", "b", "back":
                 shouldReturn = true
             case "1":
                 _ = runSettingsGetCommand()
@@ -389,7 +389,7 @@ struct CLIApp {
                 }
                 _ = runSettingsSetDefaultUserAgentCommand(value)
             default:
-                io.writeLine("Invalid selection '\(selection)'. Enter 0 to go back.")
+                io.writeLine("Invalid selection '\(selection)'. Enter 0, q, b, or back to go back.")
             }
         }
     }
@@ -410,14 +410,14 @@ struct CLIApp {
             }
 
             switch selection.lowercased() {
-            case "0", "b", "back":
+            case "0", "q", "b", "back":
                 shouldReturn = true
             case "1":
                 runInteractiveClearDataFlow(scope: .alias(""))
             case "2":
                 runInteractiveClearDataFlow(scope: .all)
             default:
-                io.writeLine("Invalid selection '\(selection)'. Enter 0 to go back.")
+                io.writeLine("Invalid selection '\(selection)'. Enter 0, q, b, or back to go back.")
             }
         }
     }

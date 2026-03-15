@@ -754,6 +754,89 @@ private func parseJSONObject(_ line: String) throws -> [String: Any] {
     #expect(io.outputLines.contains { $0.contains("Goodbye.") })
 }
 
+@Test func cliAssetMenu_returnBehavior_supportsAllBackShortcuts() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [
+        "1", "q",
+        "1", "b",
+        "1", "back",
+        "1", "0",
+        "0"
+    ])
+    let app = CLIApp(context: context, io: io)
+    app.runInteractive()
+
+    let submenuCount = io.outputLines.filter { $0 == "[Asset Management]" }.count
+    #expect(submenuCount == 4)
+    #expect(io.outputLines.contains { $0.contains("Main Menu") })
+    #expect(io.outputLines.contains { $0.contains("Goodbye.") })
+}
+
+@Test func cliSettingsMenu_returnBehavior_supportsAllBackShortcuts() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [
+        "3", "q",
+        "3", "b",
+        "3", "back",
+        "3", "0",
+        "0"
+    ])
+    let app = CLIApp(context: context, io: io)
+    app.runInteractive()
+
+    let submenuCount = io.outputLines.filter { $0 == "[Settings]" }.count
+    #expect(submenuCount == 4)
+    #expect(io.outputLines.contains { $0.contains("Main Menu") })
+    #expect(io.outputLines.contains { $0.contains("Goodbye.") })
+}
+
+@Test func cliCacheMenu_returnBehavior_supportsAllBackShortcuts() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [
+        "4", "q",
+        "4", "b",
+        "4", "back",
+        "4", "0",
+        "0"
+    ])
+    let app = CLIApp(context: context, io: io)
+    app.runInteractive()
+
+    let submenuCount = io.outputLines.filter { $0 == "[Cache Operations]" }.count
+    #expect(submenuCount == 4)
+    #expect(io.outputLines.contains { $0.contains("Main Menu") })
+    #expect(io.outputLines.contains { $0.contains("Goodbye.") })
+}
+
+@Test func cliMenus_invalidGuidance_isConsistentAcrossSubmenus() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let io = FakeIO(inputs: [
+        "1", "invalid", "0",
+        "2", "invalid", "0",
+        "3", "invalid", "0",
+        "4", "invalid", "0",
+        "0"
+    ])
+    let app = CLIApp(context: context, io: io)
+    app.runInteractive()
+
+    let guidance = "Enter 0, q, b, or back to go back."
+    let guidanceLines = io.outputLines.filter { $0.contains(guidance) }
+    #expect(guidanceLines.count == 4)
+}
+
 @Test func cliProxyMenu_integration_flow_validatesPromptsAndNoPlaceholderRegression() throws {
     let directory = try makeCLITempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
