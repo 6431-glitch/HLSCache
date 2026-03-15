@@ -147,6 +147,81 @@ private func seedCachedMediaPlaylist(
     }
 }
 
+private func seedCachedExporterPlaylistFixture(
+    baseDirectory: URL,
+    alias: String,
+    playlistURL: URL,
+    playlistBody: String,
+    segmentPayloadsByURL: [URL: Data],
+    keyPayloadsByURL: [URL: Data] = [:]
+) throws {
+    let facade = HLSCacheFacade(baseDirectory: baseDirectory)
+    let registered = try facade.register(
+        alias: alias,
+        assetID: "asset-\(alias.lowercased())",
+        remoteURL: playlistURL
+    )
+
+    let manifestStore = ManifestStore(baseDirectory: baseDirectory)
+    let diskStore = DiskStore(baseDirectory: baseDirectory)
+
+    let playlistResourceID = ResourceID(
+        cacheKey: registered.cacheKey,
+        kind: .playlistM3U8,
+        resourceKey: ResourceID.makeResourceKey(from: playlistURL)
+    )
+    let playlistData = Data(playlistBody.utf8)
+    _ = try diskStore.write(playlistData, for: playlistResourceID, at: 0)
+    try manifestStore.save(
+        resourceID: playlistResourceID,
+        record: ResourceRecord(
+            kind: .playlistM3U8,
+            originalURL: playlistURL,
+            contentType: "application/vnd.apple.mpegurl",
+            expectedLength: Int64(playlistData.count),
+            completedRanges: makeCompletedRanges(Int64(playlistData.count))
+        )
+    )
+
+    for (url, payload) in segmentPayloadsByURL {
+        let resourceID = ResourceID(
+            cacheKey: registered.cacheKey,
+            kind: .segment,
+            resourceKey: ResourceID.makeResourceKey(from: url)
+        )
+        _ = try diskStore.write(payload, for: resourceID, at: 0)
+        try manifestStore.save(
+            resourceID: resourceID,
+            record: ResourceRecord(
+                kind: .segment,
+                originalURL: url,
+                contentType: "video/mp2t",
+                expectedLength: Int64(payload.count),
+                completedRanges: makeCompletedRanges(Int64(payload.count))
+            )
+        )
+    }
+
+    for (url, payload) in keyPayloadsByURL {
+        let resourceID = ResourceID(
+            cacheKey: registered.cacheKey,
+            kind: .key,
+            resourceKey: ResourceID.makeResourceKey(from: url)
+        )
+        _ = try diskStore.write(payload, for: resourceID, at: 0)
+        try manifestStore.save(
+            resourceID: resourceID,
+            record: ResourceRecord(
+                kind: .key,
+                originalURL: url,
+                contentType: "application/octet-stream",
+                expectedLength: Int64(payload.count),
+                completedRanges: makeCompletedRanges(Int64(payload.count))
+            )
+        )
+    }
+}
+
 @Test func exporter_exportCompleteCache_invokesRemuxAndReturnsOutputSize() throws {
     let directory = try makeExporterTempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -176,6 +251,107 @@ private func seedCachedMediaPlaylist(
     #expect(remuxInvoked)
     #expect(result.outputURL == outputURL)
     #expect(result.outputBytes == 8)
+}
+
+@Test func exporter_rewritePlaylist_duplicateSegmentURI_usesStablePerOccurrenceStagingNames() throws {
+    let directory = try makeExporterTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let playlistURL = try #require(URL(string: "https://cdn.example.com/dup/media.m3u8"))
+    let duplicateSegmentURL = try #require(URL(string: "https://cdn.example.com/dup/seg.ts"))
+    let playlistBody = """
+    #EXTM3U
+    #EXT-X-VERSION:3
+    #EXT-X-TARGETDURATION:4
+    #EXTINF:4.0,
+    seg.ts
+    #EXTINF:4.0,
+    seg.ts
+    #EXT-X-ENDLIST
+    """
+
+    try seedCachedExporterPlaylistFixture(
+        baseDirectory: directory,
+        alias: "MDEXPORT_DUP",
+        playlistURL: playlistURL,
+        playlistBody: playlistBody,
+        segmentPayloadsByURL: [duplicateSegmentURL: Data(repeating: 0x7A, count: 512)]
+    )
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    let outputURL = directory.appendingPathComponent("out/dup.mp4")
+    var exportInvoked = false
+    let exporter = CLIExporter(
+        baseDirectory: directory,
+        facade: facade,
+        exportRunner: { rewrittenPlaylistURL, outputURL, _ in
+            exportInvoked = true
+            let rewritten = try String(contentsOf: rewrittenPlaylistURL, encoding: .utf8)
+            #expect(rewritten.contains("segment-00000.ts"))
+            #expect(rewritten.contains("segment-00001.ts"))
+            #expect(!rewritten.contains("\nseg.ts\n"))
+            try FileManager.default.createDirectory(
+                at: outputURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data("fake-mp4".utf8).write(to: outputURL)
+        }
+    )
+
+    _ = try exporter.export(alias: "MDEXPORT_DUP", outputURL: outputURL)
+    #expect(exportInvoked)
+}
+
+@Test func exporter_rewritePlaylist_byterangePlaylist_preservesByterangeSemantics() throws {
+    let directory = try makeExporterTempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let playlistURL = try #require(URL(string: "https://cdn.example.com/byte/media.m3u8"))
+    let segmentURL = try #require(URL(string: "https://cdn.example.com/byte/seg.mp4"))
+    let playlistBody = """
+    #EXTM3U
+    #EXT-X-VERSION:7
+    #EXT-X-TARGETDURATION:4
+    #EXTINF:4.0,
+    #EXT-X-BYTERANGE:400@0
+    seg.mp4
+    #EXTINF:4.0,
+    #EXT-X-BYTERANGE:400@400
+    seg.mp4
+    #EXT-X-ENDLIST
+    """
+
+    try seedCachedExporterPlaylistFixture(
+        baseDirectory: directory,
+        alias: "MDEXPORT_BYTE",
+        playlistURL: playlistURL,
+        playlistBody: playlistBody,
+        segmentPayloadsByURL: [segmentURL: Data(repeating: 0x31, count: 1600)]
+    )
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    let outputURL = directory.appendingPathComponent("out/byte.mp4")
+    var exportInvoked = false
+    let exporter = CLIExporter(
+        baseDirectory: directory,
+        facade: facade,
+        exportRunner: { rewrittenPlaylistURL, outputURL, _ in
+            exportInvoked = true
+            let rewritten = try String(contentsOf: rewrittenPlaylistURL, encoding: .utf8)
+            #expect(rewritten.contains("#EXT-X-BYTERANGE:400@0"))
+            #expect(rewritten.contains("#EXT-X-BYTERANGE:400@400"))
+            #expect(rewritten.contains("segment-00000.mp4"))
+            #expect(rewritten.contains("segment-00001.mp4"))
+            try FileManager.default.createDirectory(
+                at: outputURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data("fake-mp4".utf8).write(to: outputURL)
+        }
+    )
+
+    _ = try exporter.export(alias: "MDEXPORT_BYTE", outputURL: outputURL)
+    #expect(exportInvoked)
 }
 
 @Test func exporter_exportIncompleteCache_throwsActionableError() throws {
