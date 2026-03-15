@@ -164,6 +164,40 @@ import Testing
     #expect(plan.segmentURLs.count == 1)
 }
 
+@Test func hlsDownloadPlanner_canonicalizationPolicy_preservesRepeatedQueryOrderException() throws {
+    let rootURL = try #require(URL(string: "https://cdn.example.com/master.m3u8"))
+    let mediaURL = try #require(URL(string: "https://cdn.example.com/v1/media.m3u8"))
+
+    let playlists: [URL: String] = [
+        rootURL: """
+        #EXTM3U
+        #EXT-X-STREAM-INF:BANDWIDTH=1000000
+        v1/media.m3u8
+        """,
+        mediaURL: """
+        #EXTM3U
+        #EXTINF:4.0,
+        https://cdn.example.com/content/seg.ts?token=a&token=b
+        #EXTINF:4.0,
+        https://cdn.example.com/content/seg.ts?token=b&token=a
+        """
+    ]
+
+    let plan = try HLSDownloadPlanner.plan(
+        rootPlaylistURL: rootURL,
+        alias: "MDCANONEX",
+        loadPlaylist: { url in
+            try #require(playlists[url])
+        },
+        proxyURLBuilder: { alias, kind, remoteURL in
+            let encoded = ResourceID.makeResourceKey(from: remoteURL)
+            return try #require(URL(string: "http://127.0.0.1:9091/\(alias)/\(kind.rawValue)/\(encoded)"))
+        }
+    )
+
+    #expect(plan.segmentURLs.count == 2)
+}
+
 @Test func hlsDownloadPlanner_resolvesURIAttributes_withSpacingVariantsForMediaAndMap() throws {
     let rootURL = try #require(URL(string: "https://cdn.example.com/root/master.m3u8"))
     let videoURL = try #require(URL(string: "https://cdn.example.com/root/video/main.m3u8"))

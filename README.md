@@ -110,6 +110,13 @@ Remote URLs are not used as identity because HLS URLs frequently change due to s
 - Cross-origin/domain URL rotation is treated as a resource miss (new URL => new resource key => fresh fetch), while previously cached bytes remain available for their original URLs until explicit cache clear/eviction.
 - `updateRemoteURL` and proxy request logs expose continuity metadata (`rotationPolicy`, host-change signal, and per-request continuity decision) for debugging.
 
+### Planner URL Canonicalization Policy
+
+- Download-planner dedup uses canonical resource identity keys (same policy as `ResourceID.makeResourceKey(from:)`).
+- Canonicalization normalizes scheme/host case, default ports, path dot-segments, and query-key ordering.
+- Equivalent URL variants dedupe to one planned resource when canonical forms match.
+- Policy exception: repeated query-key value order is preserved, so URLs like `?token=a&token=b` and `?token=b&token=a` remain distinct identities.
+
 ---
 
 ## Playback Flow

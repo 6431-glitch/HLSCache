@@ -317,6 +317,10 @@ public enum HLSDownloadPlanner {
         return output
     }
 
+    // Planner dedup identity follows the same canonicalization policy as ResourceID:
+    // - normalize scheme/host case, default ports, path normalization, and query key ordering
+    // - preserve repeated query key value order as a deliberate identity exception
+    // This keeps planner output deterministic while avoiding over-collapsing semantically distinct URLs.
     private static func canonicalURLKey(for url: URL) -> String {
         ResourceID.makeResourceKey(from: url)
     }
