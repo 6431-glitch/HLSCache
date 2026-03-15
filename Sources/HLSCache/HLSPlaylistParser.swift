@@ -142,7 +142,12 @@ public enum HLSPlaylistParser {
             }
 
             var value = normalizeToken(String(rawValue))
-            if value.hasPrefix("\""), value.hasSuffix("\""), value.count >= 2 {
+            let startsQuoted = value.hasPrefix("\"")
+            let endsQuoted = value.hasSuffix("\"")
+            if startsQuoted != endsQuoted {
+                continue
+            }
+            if startsQuoted, value.count >= 2 {
                 value = String(value.dropFirst().dropLast())
             }
             value = normalizeToken(value)

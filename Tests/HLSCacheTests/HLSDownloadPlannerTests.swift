@@ -245,3 +245,98 @@ import Testing
     #expect(plan.segmentURLs.count == 1)
     #expect(plan.segmentURLs[0].absoluteString == "https://cdn.example.com/root/video/seg-1.ts")
 }
+
+@Test func hlsDownloadPlanner_uriAttributeVariants_stayConsistentAcrossPlannerAndRewriter() throws {
+    let rootURL = try #require(URL(string: "https://cdn.example.com/root/master.m3u8"))
+    let mediaURL = try #require(URL(string: "https://cdn.example.com/root/video/main.m3u8"))
+    let audioURL = try #require(URL(string: "https://cdn.example.com/audio/en.m3u8"))
+
+    let playlists: [URL: String] = [
+        rootURL: """
+        #EXTM3U
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="en",URI\t=\t" ../audio/en.m3u8 "
+        #EXT-X-STREAM-INF:BANDWIDTH=1200000
+        video/main.m3u8
+        """,
+        mediaURL: """
+        #EXTM3U
+        #EXT-X-KEY:METHOD=AES-128,\tURI\t=\t" ../keys/media.key "
+        #EXT-X-MAP:BYTERANGE="900@0", URI\t=\t" ./init/video-init.mp4 "
+        #EXTINF:4.0,
+        seg-1.ts
+        """,
+        audioURL: """
+        #EXTM3U
+        #EXTINF:4.0,
+        audio-1.ts
+        """
+    ]
+
+    var rewriteInvocations: [(kind: ProxyResourceKind, remoteURL: URL)] = []
+    let plan = try HLSDownloadPlanner.plan(
+        rootPlaylistURL: rootURL,
+        alias: "MDURIVAR",
+        loadPlaylist: { url in
+            try #require(playlists[url])
+        },
+        proxyURLBuilder: { alias, kind, remoteURL in
+            rewriteInvocations.append((kind: kind, remoteURL: remoteURL))
+            let encoded = ResourceID.makeResourceKey(from: remoteURL)
+            return try #require(URL(string: "http://127.0.0.1:8083/\(alias)/\(kind.rawValue)/\(encoded)"))
+        }
+    )
+
+    let expectedMapURL = try #require(URL(string: "https://cdn.example.com/root/video/init/video-init.mp4"))
+    let expectedKeyURL = try #require(URL(string: "https://cdn.example.com/root/keys/media.key"))
+
+    #expect(plan.playlistURLs.count == 3)
+    #expect(plan.playlistURLs.contains(audioURL))
+    #expect(plan.mapURLs == [expectedMapURL])
+    #expect(plan.keyURLs == [expectedKeyURL])
+
+    let mediaPlan = try #require(plan.playlists.first { $0.remoteURL == mediaURL })
+    #expect(mediaPlan.mapURLs == [expectedMapURL])
+    #expect(mediaPlan.keyURLs == [expectedKeyURL])
+    #expect(mediaPlan.rewrittenPlaylist.contains("/MDURIVAR/key/"))
+    #expect(mediaPlan.rewrittenPlaylist.contains("/MDURIVAR/seg/"))
+    #expect(rewriteInvocations.contains { $0.kind == .key && $0.remoteURL == expectedKeyURL })
+    #expect(rewriteInvocations.contains { $0.kind == .segment && $0.remoteURL == expectedMapURL })
+}
+
+@Test func hlsDownloadPlanner_malformedURIAttributeTokens_areIgnoredSafely() throws {
+    let rootURL = try #require(URL(string: "https://cdn.example.com/root/master.m3u8"))
+    let mediaURL = try #require(URL(string: "https://cdn.example.com/root/video/main.m3u8"))
+
+    let playlists: [URL: String] = [
+        rootURL: """
+        #EXTM3U
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="en",URI
+        #EXT-X-STREAM-INF:BANDWIDTH=1000000
+        video/main.m3u8
+        """,
+        mediaURL: """
+        #EXTM3U
+        #EXT-X-MAP:URI = "unterminated
+        #EXTINF:4.0,
+        seg-1.ts
+        """
+    ]
+
+    let plan = try HLSDownloadPlanner.plan(
+        rootPlaylistURL: rootURL,
+        alias: "MDURIMAL",
+        loadPlaylist: { url in
+            try #require(playlists[url])
+        },
+        proxyURLBuilder: { alias, kind, remoteURL in
+            let encoded = ResourceID.makeResourceKey(from: remoteURL)
+            return try #require(URL(string: "http://127.0.0.1:8084/\(alias)/\(kind.rawValue)/\(encoded)"))
+        }
+    )
+
+    #expect(plan.playlistURLs.count == 2)
+    #expect(plan.playlistURLs.contains(mediaURL))
+    #expect(plan.mapURLs.isEmpty)
+    #expect(plan.segmentURLs.count == 1)
+    #expect(plan.segmentURLs[0].absoluteString == "https://cdn.example.com/root/video/seg-1.ts")
+}
