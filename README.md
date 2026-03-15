@@ -190,6 +190,16 @@ Recommended for sensitive content. Stored bytes are encrypted on write and decry
 
 When authenticated mode is enabled, cached-resource tampering is detected deterministically before serve. On mismatch, cache entries are invalidated and normal network fallback/offline policies apply.
 
+### Plugin Stamp Migration Policy
+
+Runtime compatibility is evaluated per plugin stamp (`id` + `version`) with this decision matrix:
+
+- Exact same stamp set/order: reuse cached transformed bytes (`exactReuse`).
+- Same plugin IDs/order, semantic version upgrade within same major (`1.0.0 -> 1.1.0`): reuse cached bytes (`compatibleReuse`).
+- Any plugin count/order/ID change, semantic major change, semantic downgrade, or non-semver version change: invalidate and recache (`forcedRecache`).
+
+Each decision is emitted as a structured log event with `operation=pluginMigrationDecision` for observability.
+
 ### AES-128 HLS Caution
 
 If HLS uses `#EXT-X-KEY METHOD=AES-128`, segment data is already encrypted. Arbitrary byte-level transformations on ciphertext will break playback. Prefer wrapping ciphertext with an additional encrypt-at-rest layer rather than modifying HLS-level encryption.
