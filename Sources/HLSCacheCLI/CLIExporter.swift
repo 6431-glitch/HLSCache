@@ -60,6 +60,11 @@ struct CLIExporter {
         let keyRemoteURLs: [URL]
     }
 
+    private struct CopiedResource {
+        let remoteURL: URL
+        let fileName: String
+    }
+
     private let baseDirectory: URL
     private let facade: HLSCacheFacade
     private let fileManager: FileManager
@@ -132,7 +137,7 @@ struct CLIExporter {
         try fileManager.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
         defer { try? fileManager.removeItem(at: stagingDirectory) }
 
-        let mapFileNames = try copyResources(
+        let copiedMaps = try copyResources(
             urls: candidate.mapRemoteURLs,
             prefix: "map",
             kind: .segment,
@@ -151,7 +156,7 @@ struct CLIExporter {
                 )
             }
         )
-        let segmentFileNames = try copyResources(
+        let copiedSegments = try copyResources(
             urls: candidate.segmentRemoteURLs,
             prefix: "segment",
             kind: .segment,
@@ -170,7 +175,7 @@ struct CLIExporter {
                 )
             }
         )
-        let keyFileNames = try copyResources(
+        let copiedKeys = try copyResources(
             urls: candidate.keyRemoteURLs,
             prefix: "key",
             kind: .key,
@@ -193,9 +198,9 @@ struct CLIExporter {
         let rewrittenPlaylist = try rewritePlaylist(
             candidate.playlistText,
             playlistURL: candidate.playlistURL,
-            mapFileNames: mapFileNames,
-            keyFileNames: keyFileNames,
-            segmentFileNames: segmentFileNames
+            mapFileNames: firstFileNamesByURL(copiedMaps),
+            keyFileNames: firstFileNamesByURL(copiedKeys),
+            segmentFileNames: copiedSegments.map(\.fileName)
         )
         let localPlaylistURL = stagingDirectory.appendingPathComponent("input.m3u8")
         try rewrittenPlaylist.write(to: localPlaylistURL, atomically: true, encoding: .utf8)
@@ -336,8 +341,9 @@ struct CLIExporter {
         diskStore: DiskStore,
         destinationDirectory: URL,
         onCopy: ((String) -> Void)? = nil
-    ) throws -> [URL: String] {
-        var output: [URL: String] = [:]
+    ) throws -> [CopiedResource] {
+        var output: [CopiedResource] = []
+        output.reserveCapacity(urls.count)
         for (index, remoteURL) in urls.enumerated() {
             let resourceID = ResourceID(
                 cacheKey: cacheKey,
@@ -356,7 +362,7 @@ struct CLIExporter {
                 try fileManager.removeItem(at: destinationURL)
             }
             try fileManager.copyItem(at: sourceURL, to: destinationURL)
-            output[remoteURL] = fileName
+            output.append(CopiedResource(remoteURL: remoteURL, fileName: fileName))
             onCopy?(fileName)
         }
         return output
@@ -367,7 +373,7 @@ struct CLIExporter {
         playlistURL: URL,
         mapFileNames: [URL: String],
         keyFileNames: [URL: String],
-        segmentFileNames: [URL: String]
+        segmentFileNames: [String]
     ) throws -> String {
         let lines = playlist.components(separatedBy: .newlines)
         var rewritten: [String] = []
@@ -396,18 +402,23 @@ struct CLIExporter {
             }
 
             if segmentIndex < segmentFileNames.count {
-                let remoteURL = try resolveNonCommentLine(line, playlistURL: playlistURL)
-                if let localName = segmentFileNames[remoteURL] {
-                    rewritten.append(localName)
-                    segmentIndex += 1
-                    continue
-                }
+                rewritten.append(segmentFileNames[segmentIndex])
+                segmentIndex += 1
+                continue
             }
 
             rewritten.append(line)
         }
 
         return rewritten.joined(separator: "\n")
+    }
+
+    private func firstFileNamesByURL(_ copiedResources: [CopiedResource]) -> [URL: String] {
+        var output: [URL: String] = [:]
+        for copied in copiedResources where output[copied.remoteURL] == nil {
+            output[copied.remoteURL] = copied.fileName
+        }
+        return output
     }
 
     private func isComplete(record: ResourceRecord, resourceID: ResourceID, diskStore: DiskStore) -> Bool {
@@ -461,14 +472,6 @@ struct CLIExporter {
         var rewritten = line
         rewritten.replaceSubrange(start..<end, with: value)
         return rewritten
-    }
-
-    private func resolveNonCommentLine(_ line: String, playlistURL: URL) throws -> URL {
-        let raw = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: raw, relativeTo: playlistURL)?.absoluteURL else {
-            throw CLIExportError.incompleteCache("Invalid segment URI in playlist: \(raw)")
-        }
-        return url
     }
 
     static func defaultEncoderAvailabilityChecker(encoderName: String) throws {

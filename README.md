@@ -491,6 +491,7 @@ Export prerequisites:
 - Alias must exist and point to a cached media playlist.
 - Required segment data must be fully cached (incomplete cache fails fast).
 - AES-128 encrypted playlists are exportable when the referenced key material is already cached.
+- Playlists with duplicate segment URIs and `#EXT-X-BYTERANGE` entries are supported; staged segment filenames are generated per occurrence to preserve playback ordering semantics.
 - AV1 mode requires an ffmpeg build with `libsvtav1` encoder support.
 
 Export troubleshooting:
