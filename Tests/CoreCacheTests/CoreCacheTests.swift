@@ -263,6 +263,64 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(try cache.resourceRecord(for: second) != nil)
 }
 
+@Test func coreCache_quotaEviction_defaultPolicy_ignoresReadRecency() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-quota-default-recency")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let cache = try CoreCache(baseDirectory: directory, diskQuotaBytes: 12)
+    let first = try makeCoreCacheResourceID(assetID: "asset-default-first", suffix: "default-first.ts")
+    let second = try makeCoreCacheResourceID(assetID: "asset-default-second", suffix: "default-second.ts")
+    let third = try makeCoreCacheResourceID(assetID: "asset-default-third", suffix: "default-third.ts")
+
+    _ = try cache.write(Data(repeating: 1, count: 4), resource: first, at: 0, expectedLength: 4)
+    _ = try cache.finalizeWrite(resource: first, expectedLength: 4)
+    Thread.sleep(forTimeInterval: 1.1)
+
+    _ = try cache.write(Data(repeating: 2, count: 4), resource: second, at: 0, expectedLength: 4)
+    _ = try cache.finalizeWrite(resource: second, expectedLength: 4)
+
+    _ = try cache.plan(resource: first, requested: try br(0, 4))
+    Thread.sleep(forTimeInterval: 1.1)
+
+    _ = try cache.write(Data(repeating: 3, count: 6), resource: third, at: 0, expectedLength: 6)
+    _ = try cache.finalizeWrite(resource: third, expectedLength: 6)
+
+    #expect(try cache.resourceRecord(for: first) == nil)
+    #expect(try cache.resourceRecord(for: second) != nil)
+    #expect(try cache.resourceRecord(for: third) != nil)
+}
+
+@Test func coreCache_quotaEviction_accessAwarePolicy_prefersLeastRecentlyAccessedAsset() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-quota-access-recency")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let cache = try CoreCache(
+        baseDirectory: directory,
+        diskQuotaBytes: 12,
+        evictionRecencyPolicy: .leastRecentlyAccessed
+    )
+    let first = try makeCoreCacheResourceID(assetID: "asset-access-first", suffix: "access-first.ts")
+    let second = try makeCoreCacheResourceID(assetID: "asset-access-second", suffix: "access-second.ts")
+    let third = try makeCoreCacheResourceID(assetID: "asset-access-third", suffix: "access-third.ts")
+
+    _ = try cache.write(Data(repeating: 1, count: 4), resource: first, at: 0, expectedLength: 4)
+    _ = try cache.finalizeWrite(resource: first, expectedLength: 4)
+    Thread.sleep(forTimeInterval: 1.1)
+
+    _ = try cache.write(Data(repeating: 2, count: 4), resource: second, at: 0, expectedLength: 4)
+    _ = try cache.finalizeWrite(resource: second, expectedLength: 4)
+
+    _ = try cache.plan(resource: first, requested: try br(0, 4))
+    Thread.sleep(forTimeInterval: 1.1)
+
+    _ = try cache.write(Data(repeating: 3, count: 6), resource: third, at: 0, expectedLength: 6)
+    _ = try cache.finalizeWrite(resource: third, expectedLength: 6)
+
+    #expect(try cache.resourceRecord(for: first) != nil)
+    #expect(try cache.resourceRecord(for: second) == nil)
+    #expect(try cache.resourceRecord(for: third) != nil)
+}
+
 @Test func coreCache_structuredLogging_emitsWritePlanAndFinalizeEvents() throws {
     let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-logging")
     defer { try? FileManager.default.removeItem(at: directory) }

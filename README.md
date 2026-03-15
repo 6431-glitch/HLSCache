@@ -10,7 +10,7 @@ The architecture cleanly separates playback proxying, storage, and background do
 
 - Local HTTP proxy server built with SwiftNIO
 - Range-aware disk caching with partial content support (206)
-- Optional disk quota with per-asset LRU eviction in `CoreCache`
+- Optional disk quota with explicit per-asset eviction recency policy in `CoreCache`
 - Stable alias-based routing (`/MD0534`) and typed proxy resource routes (`/MD0534/seg|key|raw/<encoded-url>`)
 - Structured logging hooks across `CoreCache` and `HLSCacheFacade` with log levels and correlation IDs
 - Core cache metrics snapshot (hit/miss, bytes served from disk/network, disk/network ratios, disk usage, per-asset completion)
@@ -34,6 +34,13 @@ The architecture cleanly separates playback proxying, storage, and background do
 - Metrics counters are synchronized on CoreCache's single queue; mutations (`plan`, `recordServedBytes`, write/finalize paths) use barrier writes to avoid lock-order inversions.
 
 This separation highlights divergence cases (for example, planned cache bytes falling back to network due to corrupted/truncated disk payload).
+
+### Eviction Recency Policy
+
+`CoreCache` quota eviction supports explicit recency semantics:
+
+- Default: `leastRecentlyUpdated` (backward compatible). Read traffic does not affect eviction recency.
+- Optional: `leastRecentlyAccessed`. Cache-hit reads update recency in `plan(...)`, so read-hot assets are less likely to be evicted.
 
 ---
 
