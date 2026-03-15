@@ -521,14 +521,14 @@ struct CLIApp {
     }
 
     private func writeProxyStatusContext(_ status: ProxyServerStatus) {
-        io.writeLine("State: \(status.isRunning ? "running" : "stopped")")
+        io.writeLine("State: \(status.state.rawValue)")
         io.writeLine("Host: \(status.host ?? "(unavailable)")")
         io.writeLine("Port: \(status.port.map(String.init) ?? "(unavailable)")")
         io.writeLine("Base URL: \(status.baseURL?.absoluteString ?? "(unavailable)")")
     }
 
     private func writeProxyStatusContract(_ status: ProxyServerStatus) {
-        io.writeLine("proxy.state=\(status.isRunning ? "running" : "stopped")")
+        io.writeLine("proxy.state=\(status.state.rawValue)")
         io.writeLine("proxy.host=\(status.host ?? "unavailable")")
         io.writeLine("proxy.port=\(status.port.map(String.init) ?? "unavailable")")
         io.writeLine("proxy.base_url=\(status.baseURL?.absoluteString ?? "unavailable")")
@@ -548,7 +548,7 @@ struct CLIApp {
         CLIProxyStatusJSONPayload(
             schemaVersion: "1",
             command: command,
-            state: status.isRunning ? "running" : "stopped",
+            state: status.state.rawValue,
             host: status.host ?? "unavailable",
             port: status.port.map(String.init) ?? "unavailable",
             baseURL: status.baseURL?.absoluteString ?? "unavailable"

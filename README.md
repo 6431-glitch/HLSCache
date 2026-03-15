@@ -401,6 +401,7 @@ swift run HLSCacheCLI --output-format json proxy status
 Proxy command output contract:
 - `proxy status` emits deterministic `proxy.*` fields for automation parsing:
   `proxy.state`, `proxy.host`, `proxy.port`, `proxy.base_url`.
+- `proxy.state` reports lifecycle values directly: `starting`, `running`, `stopping`, `stopped`.
 - Unavailable runtime fields are explicitly rendered as `unavailable`.
 - Exit codes:
   - `0`: success

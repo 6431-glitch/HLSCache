@@ -265,7 +265,7 @@ struct CLIArguments: Equatable {
           list                      Print registered aliases and cache metadata.
           download                  Cache entire HLS content for an alias.
                                    Required: --alias
-          proxy status              Print non-interactive proxy runtime status.
+          proxy status              Print non-interactive proxy runtime status (starting/running/stopping/stopped).
           proxy restart             Restart proxy runtime non-interactively.
           clear                     Clear cache bytes by alias or all aliases.
                                    Required: one of --alias <alias> or --all
