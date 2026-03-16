@@ -485,14 +485,28 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
             return
         }
 
-        guard storedIntegrity == computedIntegrity else {
-            try coreCache.invalidate(
+        if storedIntegrity == computedIntegrity {
+            return
+        }
+
+        if try transformPipeline.storedIntegrityMatches(
+            storedIntegrity,
+            cachedPayload: cachedPayload,
+            context: context
+        ) == true {
+            _ = try coreCache.setResourceIntegrity(
                 resource: resourceID,
-                reason: "integrityMismatch",
+                integrity: computedIntegrity,
                 correlationID: correlationID
             )
             return
         }
+
+        try coreCache.invalidate(
+            resource: resourceID,
+            reason: "integrityMismatch",
+            correlationID: correlationID
+        )
     }
 
     private func refreshResourceIntegrity(

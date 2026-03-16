@@ -9,6 +9,19 @@ private func makeCoordinatorResourceID() throws -> ResourceID {
     return ResourceID(cacheKey: cacheKey, kind: .other, resourceKey: ResourceID.makeResourceKey(from: remoteURL))
 }
 
+private func legacyAuthenticatedIntegrityDigestHex(
+    keyData: Data,
+    resourceKeyData: Data,
+    cachedPayload: Data
+) -> String {
+    var message = Data("hlscache-auth-integrity-v1".utf8)
+    message.append(keyData)
+    message.append(resourceKeyData)
+    message.append(cachedPayload)
+    message.append(keyData)
+    return SHA256Hex.digest(message)
+}
+
 private enum AsyncProxyCoordinatorTestError: Error, Equatable {
     case emitFailed
     case missingRangeHeader
@@ -401,6 +414,79 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
 
     #expect(networkFetches == 0)
     #expect(try cache.resourceRecord(for: resourceID) == nil)
+}
+
+@Test func proxyCacheCoordinator_authenticatedEncryptAtRest_legacyIntegrityMetadata_isAcceptedAndMigratedToRfcHMAC() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hlscache-proxy-coordinator-encrypt-auth-legacy-metadata")
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let keyData = Data("authenticated-encrypt-key".utf8)
+    let totalLength: Int64 = 256
+    let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 173) })
+    let resourceID = try makeCoordinatorResourceID()
+
+    let cache = try CoreCache(baseDirectory: directory)
+    let pipeline = TransformPipeline(
+        transformers: [
+            EncryptAtRestPlugin(key: keyData, mode: .authenticatedV1)
+        ]
+    )
+    let coordinator = ProxyCacheCoordinator(coreCache: cache, transformPipeline: pipeline)
+
+    _ = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-255",
+        totalLength: totalLength,
+        fetchNetworkRange: { range in
+            Data(originData[Int(range.start)..<Int(range.endExclusive)])
+        },
+        emit: { _ in }
+    )
+
+    let fullRange = try #require(ByteRange(start: 0, endExclusive: totalLength))
+    let cachedPayload = try cache.read(resource: resourceID, range: fullRange, correlationID: "legacyIntegritySetup")
+    let legacyIntegrity = ResourceIntegrity(
+        algorithm: "hmac-sha256-v1",
+        digestHex: legacyAuthenticatedIntegrityDigestHex(
+            keyData: keyData,
+            resourceKeyData: Data(resourceID.resourceKey.utf8),
+            cachedPayload: cachedPayload
+        )
+    )
+    _ = try cache.setResourceIntegrity(
+        resource: resourceID,
+        integrity: legacyIntegrity,
+        correlationID: "legacyIntegritySetup"
+    )
+
+    let initialRfcIntegrity = try #require(
+        try pipeline.integrityMetadata(
+            for: cachedPayload,
+            context: TransformContext(resourceID: resourceID, byteOffset: 0)
+        )
+    )
+
+    var networkFetches = 0
+    var payload = Data()
+    _ = try coordinator.serve(
+        resourceID: resourceID,
+        rangeHeader: "bytes=0-255",
+        totalLength: totalLength,
+        allowNetworkFallback: false,
+        fetchNetworkRange: { _ in
+            networkFetches += 1
+            return Data()
+        },
+        emit: { payload.append($0) }
+    )
+
+    #expect(networkFetches == 0)
+    #expect(payload == originData)
+    let migratedRecord = try #require(try cache.resourceRecord(for: resourceID))
+    #expect(migratedRecord.integrity == initialRfcIntegrity)
 }
 
 @Test func proxyCacheCoordinator_pluginStampCompatibility_match_keepsCacheHitBehavior() throws {

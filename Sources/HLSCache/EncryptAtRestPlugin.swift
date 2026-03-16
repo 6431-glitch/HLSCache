@@ -5,7 +5,10 @@ public enum EncryptAtRestPluginError: Error, Equatable, Hashable, Sendable {
     case invalidKey(reason: String)
 }
 
-public struct EncryptAtRestPlugin: HLSCachePlugin, ReversibleByteTransformer, IntegrityMetadataTransformer, Hashable, Sendable {
+public struct EncryptAtRestPlugin: HLSCachePlugin, ReversibleByteTransformer, IntegrityMetadataTransformer, IntegrityMetadataCompatibilityTransformer, Hashable, Sendable {
+    private static let authenticatedIntegrityAlgorithm = "hmac-sha256-rfc2104-v1"
+    private static let legacyAuthenticatedIntegrityAlgorithm = "hmac-sha256-v1"
+
     public enum Mode: String, Hashable, Sendable {
         case xorInsecure
         case authenticatedV1
@@ -85,13 +88,45 @@ public struct EncryptAtRestPlugin: HLSCachePlugin, ReversibleByteTransformer, In
         }
 
         return ResourceIntegrity(
-            algorithm: "hmac-sha256-v1",
+            algorithm: Self.authenticatedIntegrityAlgorithm,
             digestHex: Self.integrityDigestHex(
                 keyData: keyData,
                 resourceKeyData: Data(context.resourceID.resourceKey.utf8),
                 cachedPayload: cachedPayload
             )
         )
+    }
+
+    public func isStoredIntegrityCompatible(
+        _ storedIntegrity: ResourceIntegrity,
+        cachedPayload: Data,
+        context: TransformContext
+    ) throws -> Bool {
+        if let validationError {
+            throw validationError
+        }
+
+        guard mode == .authenticatedV1 else {
+            return false
+        }
+
+        let resourceKeyData = Data(context.resourceID.resourceKey.utf8)
+        switch storedIntegrity.algorithm {
+        case Self.authenticatedIntegrityAlgorithm:
+            return storedIntegrity.digestHex == Self.integrityDigestHex(
+                keyData: keyData,
+                resourceKeyData: resourceKeyData,
+                cachedPayload: cachedPayload
+            )
+        case Self.legacyAuthenticatedIntegrityAlgorithm:
+            return storedIntegrity.digestHex == Self.legacyIntegrityDigestHex(
+                keyData: keyData,
+                resourceKeyData: resourceKeyData,
+                cachedPayload: cachedPayload
+            )
+        default:
+            return false
+        }
     }
 
     fileprivate static func keystreamBlock(
@@ -113,12 +148,53 @@ public struct EncryptAtRestPlugin: HLSCachePlugin, ReversibleByteTransformer, In
         resourceKeyData: Data,
         cachedPayload: Data
     ) -> String {
+        var message = Data("hlscache-auth-integrity-v2".utf8)
+        message.append(resourceKeyData)
+        message.append(cachedPayload)
+        return hmacSHA256DigestHex(keyData: keyData, message: message)
+    }
+
+    private static func legacyIntegrityDigestHex(
+        keyData: Data,
+        resourceKeyData: Data,
+        cachedPayload: Data
+    ) -> String {
         var message = Data("hlscache-auth-integrity-v1".utf8)
         message.append(keyData)
         message.append(resourceKeyData)
         message.append(cachedPayload)
         message.append(keyData)
-        let digest = sha256Bytes(message)
+        return hexString(sha256Bytes(message))
+    }
+
+    private static func hmacSHA256DigestHex(
+        keyData: Data,
+        message: Data
+    ) -> String {
+        let blockSize = 64
+        var normalizedKey = [UInt8](keyData)
+
+        if normalizedKey.count > blockSize {
+            normalizedKey = sha256Bytes(Data(normalizedKey))
+        }
+        if normalizedKey.count < blockSize {
+            normalizedKey.append(contentsOf: repeatElement(0, count: blockSize - normalizedKey.count))
+        }
+
+        var innerPad = normalizedKey
+        var outerPad = normalizedKey
+        for index in 0..<blockSize {
+            innerPad[index] ^= 0x36
+            outerPad[index] ^= 0x5c
+        }
+
+        var innerMessage = Data(innerPad)
+        innerMessage.append(message)
+        let innerDigest = sha256Bytes(innerMessage)
+
+        var outerMessage = Data(outerPad)
+        outerMessage.append(contentsOf: innerDigest)
+        let digest = sha256Bytes(outerMessage)
         return hexString(digest)
     }
 
