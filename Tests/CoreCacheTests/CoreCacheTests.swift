@@ -39,6 +39,35 @@ private func makeCoreCacheResourceID(assetID: String = "asset-corecache", suffix
     return ResourceID(cacheKey: cacheKey, kind: .segment, resourceKey: ResourceID.makeResourceKey(from: url))
 }
 
+private func seedStartupReconciliationOrphans(
+    baseDirectory: URL,
+    orphanManifestCount: Int,
+    orphanDataCount: Int
+) throws {
+    let manifestStore = ManifestStore(baseDirectory: baseDirectory)
+    let diskStore = DiskStore(baseDirectory: baseDirectory)
+
+    for index in 0..<orphanManifestCount {
+        let resource = try makeCoreCacheResourceID(
+            assetID: "asset-startup-orphan-manifest-\(index / 8)",
+            suffix: "startup-orphan-manifest-\(index).ts"
+        )
+        try manifestStore.save(
+            resourceID: resource,
+            record: ResourceRecord(kind: .segment, expectedLength: Int64(128 + (index % 31)))
+        )
+    }
+
+    for index in 0..<orphanDataCount {
+        let resource = try makeCoreCacheResourceID(
+            assetID: "asset-startup-orphan-data-\(index / 8)",
+            suffix: "startup-orphan-data-\(index).ts"
+        )
+        let payload = Data(repeating: UInt8((index % 200) + 1), count: 64 + (index % 17))
+        _ = try diskStore.write(payload, for: resource, at: 0)
+    }
+}
+
 private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     try #require(ByteRange(start: start, endExclusive: endExclusive))
 }
@@ -598,6 +627,134 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
         $0.operation == "reconcileStartup" && $0.metadata["action"] == "summary"
     })
     #expect(summaryEvent.metadata["orphanManifestCount"] == "1")
+}
+
+@Test func coreCache_startupReconciliation_synchronousMode_completesBeforeInitReturns() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-startup-sync")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    try seedStartupReconciliationOrphans(
+        baseDirectory: directory,
+        orphanManifestCount: 24,
+        orphanDataCount: 24
+    )
+
+    let logger = RecordingStructuredLogger()
+    let cache = try CoreCache(
+        baseDirectory: directory,
+        startupReconciliationMode: .synchronous,
+        startupReconciliationProgressInterval: 8,
+        logger: logger
+    )
+
+    let status = cache.startupReconciliationStatus()
+    #expect(status.mode == .synchronous)
+    #expect(status.state == .completed)
+    #expect(status.totalUnits == 48)
+    #expect(status.processedUnits == 48)
+    #expect(status.orphanManifestCount == 24)
+    #expect(status.orphanDataCount == 24)
+    #expect(status.durationMilliseconds != nil)
+    #expect(status.errorDescription == nil)
+
+    #expect(cache.waitForStartupReconciliation(timeout: 0))
+    #expect(try cache.metrics().totalBytesOnDisk == 0)
+    #expect(try cache.metrics().assets.isEmpty)
+
+    let summaryEvent = try #require(logger.events().first {
+        $0.operation == "reconcileStartup" && $0.metadata["action"] == "summary"
+    })
+    #expect(summaryEvent.metadata["mode"] == "synchronous")
+    #expect(summaryEvent.metadata["state"] == "completed")
+    #expect(summaryEvent.metadata["totalUnits"] == "48")
+    #expect(summaryEvent.metadata["processedUnits"] == "48")
+    #expect((summaryEvent.metadata["durationMilliseconds"] ?? "").isEmpty == false)
+}
+
+@Test func coreCache_startupReconciliation_asyncMode_emitsLifecycleAndProgressTelemetry() throws {
+    let directory = try makeCoreCacheTempDirectory(prefix: "core-cache-startup-async")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    try seedStartupReconciliationOrphans(
+        baseDirectory: directory,
+        orphanManifestCount: 180,
+        orphanDataCount: 180
+    )
+
+    let logger = RecordingStructuredLogger()
+    let cache = try CoreCache(
+        baseDirectory: directory,
+        startupReconciliationMode: .asynchronous,
+        startupReconciliationProgressInterval: 32,
+        logger: logger
+    )
+
+    let immediateStatus = cache.startupReconciliationStatus()
+    #expect(immediateStatus.mode == .asynchronous)
+    #expect(immediateStatus.state != .failed)
+
+    #expect(cache.waitForStartupReconciliation(timeout: 10))
+
+    let finalStatus = cache.startupReconciliationStatus()
+    #expect(finalStatus.mode == .asynchronous)
+    #expect(finalStatus.state == .completed)
+    #expect(finalStatus.totalUnits == 360)
+    #expect(finalStatus.processedUnits == 360)
+    #expect(finalStatus.orphanManifestCount == 180)
+    #expect(finalStatus.orphanDataCount == 180)
+    #expect(finalStatus.durationMilliseconds != nil)
+    #expect(finalStatus.errorDescription == nil)
+
+    #expect(try cache.metrics().totalBytesOnDisk == 0)
+    #expect(try cache.metrics().assets.isEmpty)
+
+    let events = logger.events().filter { $0.operation == "reconcileStartup" }
+    #expect(events.contains { $0.metadata["action"] == "start" && $0.metadata["mode"] == "asynchronous" })
+    #expect(events.contains { $0.metadata["action"] == "progress" && $0.metadata["mode"] == "asynchronous" })
+    let summaryEvent = try #require(events.first {
+        $0.metadata["action"] == "summary" && $0.metadata["mode"] == "asynchronous"
+    })
+    #expect(summaryEvent.metadata["state"] == "completed")
+    #expect(summaryEvent.metadata["totalUnits"] == "360")
+    #expect(summaryEvent.metadata["processedUnits"] == "360")
+    #expect((summaryEvent.metadata["durationMilliseconds"] ?? "").isEmpty == false)
+}
+
+@Test func coreCache_startupReconciliation_asyncMode_largeDataset_hasLowerInitLatencyThanSynchronous() throws {
+    let syncDirectory = try makeCoreCacheTempDirectory(prefix: "core-cache-startup-latency-sync")
+    let asyncDirectory = try makeCoreCacheTempDirectory(prefix: "core-cache-startup-latency-async")
+    defer {
+        try? FileManager.default.removeItem(at: syncDirectory)
+        try? FileManager.default.removeItem(at: asyncDirectory)
+    }
+
+    try seedStartupReconciliationOrphans(
+        baseDirectory: syncDirectory,
+        orphanManifestCount: 1200,
+        orphanDataCount: 1200
+    )
+    try seedStartupReconciliationOrphans(
+        baseDirectory: asyncDirectory,
+        orphanManifestCount: 1200,
+        orphanDataCount: 1200
+    )
+
+    let syncStart = Date()
+    let syncCache = try CoreCache(baseDirectory: syncDirectory, startupReconciliationMode: .synchronous)
+    let syncElapsed = Date().timeIntervalSince(syncStart)
+    #expect(syncCache.startupReconciliationStatus().state == .completed)
+
+    let asyncStart = Date()
+    let asyncCache = try CoreCache(baseDirectory: asyncDirectory, startupReconciliationMode: .asynchronous)
+    let asyncElapsed = Date().timeIntervalSince(asyncStart)
+
+    #expect(asyncElapsed < syncElapsed)
+    #expect(asyncCache.waitForStartupReconciliation(timeout: 15))
+    let asyncStatus = asyncCache.startupReconciliationStatus()
+    #expect(asyncStatus.state == .completed)
+    #expect(asyncStatus.totalUnits == 2400)
+    #expect(asyncStatus.processedUnits == 2400)
+    #expect(try asyncCache.metrics().totalBytesOnDisk == 0)
 }
 
 @Test func coreCache_concurrencySmoke_planAndWriteAreThreadSafe() async throws {
