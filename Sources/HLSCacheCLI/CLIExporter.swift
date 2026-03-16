@@ -51,7 +51,12 @@ struct CLIExportProgress: Equatable {
 }
 
 struct CLIExporter {
-    typealias ExportRunner = (_ playlistURL: URL, _ outputURL: URL, _ videoCodec: ExportVideoCodec) throws -> Void
+    typealias ExportRunner = (
+        _ playlistURL: URL,
+        _ outputURL: URL,
+        _ videoCodec: ExportVideoCodec,
+        _ onProgress: ((String) -> Void)?
+    ) throws -> Void
     typealias EncoderAvailabilityChecker = (_ encoderName: String) throws -> Void
     typealias ProgressHandler = (_ progress: CLIExportProgress) -> Void
 
@@ -226,15 +231,25 @@ struct CLIExporter {
             try encoderAvailabilityChecker("libsvtav1")
         }
 
+        let encodingDetail = effectiveVideoCodec == .copy ? "Running ffmpeg remux" : "Running ffmpeg AV1 transcode"
         progressHandler?(
             CLIExportProgress(
                 phase: .encoding,
                 processedUnits: processedUnits,
                 totalUnits: totalUnits,
-                detail: effectiveVideoCodec == .copy ? "Running ffmpeg remux" : "Running ffmpeg AV1 transcode"
+                detail: encodingDetail
             )
         )
-        try exportRunner(localPlaylistURL, outputURL, effectiveVideoCodec)
+        try exportRunner(localPlaylistURL, outputURL, effectiveVideoCodec) { ffmpegDetail in
+            progressHandler?(
+                CLIExportProgress(
+                    phase: .encoding,
+                    processedUnits: processedUnits,
+                    totalUnits: totalUnits,
+                    detail: "\(encodingDetail) | \(ffmpegDetail)"
+                )
+            )
+        }
         processedUnits = totalUnits
         progressHandler?(
             CLIExportProgress(
@@ -511,7 +526,12 @@ struct CLIExporter {
         }
     }
 
-    static func defaultExportRunner(playlistURL: URL, outputURL: URL, videoCodec: ExportVideoCodec) throws {
+    static func defaultExportRunner(
+        playlistURL: URL,
+        outputURL: URL,
+        videoCodec: ExportVideoCodec,
+        onProgress: ((String) -> Void)? = nil
+    ) throws {
         var arguments = commonFFmpegInputArguments(playlistURL: playlistURL)
 
         switch videoCodec {
@@ -530,7 +550,7 @@ struct CLIExporter {
         }
 
         arguments.append(outputURL.path)
-        let (status, stderrOutput) = try runFFmpeg(arguments: arguments)
+        let (status, stderrOutput) = try runFFmpeg(arguments: arguments, onProgress: onProgress)
 
         guard status == 0 else {
             if isFFmpegUnavailable(stderrOutput) {
@@ -547,14 +567,19 @@ struct CLIExporter {
         [
             "-hide_banner",
             "-loglevel", "error",
+            "-nostats",
             "-y",
+            "-progress", "pipe:2",
             "-allowed_extensions", "ALL",
             "-protocol_whitelist", "file,crypto,data",
             "-i", playlistURL.path
         ]
     }
 
-    private static func runFFmpeg(arguments: [String]) throws -> (status: Int32, stderr: String) {
+    private static func runFFmpeg(
+        arguments: [String],
+        onProgress: ((String) -> Void)? = nil
+    ) throws -> (status: Int32, stderr: String) {
         let stderrPipe = Pipe()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -568,8 +593,59 @@ struct CLIExporter {
             throw CLIExportError.ffmpegUnavailable(error.localizedDescription)
         }
 
+        let stderrHandle = stderrPipe.fileHandleForReading
+        var stderrData = Data()
+        var lineBuffer = Data()
+        var outTime: String?
+        var speed: String?
+
+        while true {
+            let chunk = stderrHandle.availableData
+            guard !chunk.isEmpty else {
+                break
+            }
+            stderrData.append(chunk)
+
+            guard onProgress != nil else {
+                continue
+            }
+
+            lineBuffer.append(chunk)
+            while let newline = lineBuffer.firstIndex(of: 0x0A) {
+                let lineData = lineBuffer[..<newline]
+                lineBuffer.removeSubrange(...newline)
+                guard let rawLine = String(data: lineData, encoding: .utf8) else {
+                    continue
+                }
+                let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !line.isEmpty else {
+                    continue
+                }
+
+                if line.hasPrefix("out_time=") {
+                    outTime = String(line.dropFirst("out_time=".count))
+                    continue
+                }
+                if line.hasPrefix("speed=") {
+                    speed = String(line.dropFirst("speed=".count))
+                    continue
+                }
+                if line == "progress=continue" || line == "progress=end" {
+                    var parts: [String] = []
+                    if let outTime, !outTime.isEmpty, outTime != "N/A" {
+                        parts.append("ffmpeg \(outTime)")
+                    }
+                    if let speed, !speed.isEmpty {
+                        parts.append("speed \(speed)")
+                    }
+                    if !parts.isEmpty {
+                        onProgress?(parts.joined(separator: " | "))
+                    }
+                }
+            }
+        }
+
         process.waitUntilExit()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
         let stderrOutput = String(data: stderrData, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
