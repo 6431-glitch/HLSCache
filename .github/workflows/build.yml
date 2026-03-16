@@ -5,27 +5,43 @@ name: Quality Assurance
 
 on:
   pull_request:
-    branches: [ "release/*" ]
+    branches: ["release/*"]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 1"
 
 jobs:
-  build:
-
+  targeted-validation:
+    if: github.event_name != 'schedule'
     runs-on: MBP-2
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: swift build -v
-    - name: Run tests
-      run: swift test -v
-    - name: HLS-84 readiness gate (minimum)
-      env:
-        JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-        JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
-        JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-      run: |
-        if [ -z "$JIRA_BASE_URL" ] || [ -z "$JIRA_USER_EMAIL" ] || [ -z "$JIRA_API_TOKEN" ]; then
-          echo "Skipping HLS-84 readiness gate: Jira credentials are not configured."
-          exit 0
-        fi
-        swift Scripts/check_hls84_readiness_gate.swift --mode minimum --format text
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build -v
+      - name: Targeted regression filters
+        run: |
+          swift test --filter readinessGate_fixtureMode
+          swift test --filter proxyCacheCoordinator_pluginMigration_forcedRecacheReasons_logTelemetryAndInvalidate
+          swift test --filter proxyCacheCoordinator_streamingServe_authenticatedEncryptAtRest_tamperedCache_offlineFallbackDisabled_throwsWithoutNetwork
+      - name: HLS-84 readiness gate (fixture minimum)
+        run: |
+          swift Scripts/check_hls84_readiness_gate.swift \
+            --mode minimum \
+            --format text \
+            --fixture-file Scripts/fixtures/hls84_readiness_gate.minimum.json
+
+  periodic-full-suite:
+    if: github.event_name == 'schedule'
+    runs-on: MBP-2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build -v
+      - name: Full Swift test suite
+        run: swift test -v
+      - name: HLS-84 readiness gate (fixture final)
+        run: |
+          swift Scripts/check_hls84_readiness_gate.swift \
+            --mode final \
+            --format text \
+            --fixture-file Scripts/fixtures/hls84_readiness_gate.final.json
