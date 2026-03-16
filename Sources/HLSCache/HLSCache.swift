@@ -25,19 +25,22 @@ public struct ProxyServerStatus: Sendable, Equatable {
     public let host: String?
     public let port: Int?
     public let baseURL: URL?
+    public let offlineModeEnabled: Bool
 
     public init(
         isRunning: Bool,
         host: String?,
         port: Int?,
         baseURL: URL?,
-        state: ProxyRuntimeState? = nil
+        state: ProxyRuntimeState? = nil,
+        offlineModeEnabled: Bool = false
     ) {
         self.isRunning = isRunning
         self.state = state ?? (isRunning ? .running : .stopped)
         self.host = host
         self.port = port
         self.baseURL = baseURL
+        self.offlineModeEnabled = offlineModeEnabled
     }
 }
 
@@ -147,13 +150,16 @@ public final class HLSCacheFacade: @unchecked Sendable {
     public func proxyStatus() -> ProxyServerStatus {
         let correlationID = UUID().uuidString
         let status = queue.sync {
-            if let serverBaseURL, runtimeState == .running {
+            let state = runtimeState
+            let offlineModeEnabled = offlinePlaybackModeEnabled
+            if let serverBaseURL, state == .running {
                 return ProxyServerStatus(
                     isRunning: true,
                     host: serverBaseURL.host,
                     port: serverBaseURL.port,
                     baseURL: serverBaseURL,
-                    state: runtimeState
+                    state: state,
+                    offlineModeEnabled: offlineModeEnabled
                 )
             }
 
@@ -162,7 +168,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
                 host: nil,
                 port: nil,
                 baseURL: nil,
-                state: runtimeState
+                state: state,
+                offlineModeEnabled: offlineModeEnabled
             )
         }
 
@@ -176,7 +183,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
                     "running": String(status.isRunning),
                     "state": status.state.rawValue,
                     "host": status.host ?? "",
-                    "port": status.port.map(String.init) ?? ""
+                    "port": status.port.map(String.init) ?? "",
+                    "offlineMode": String(status.offlineModeEnabled)
                 ]
             )
         )
@@ -698,12 +706,19 @@ public final class HLSCacheFacade: @unchecked Sendable {
                             "method": request.method,
                             "status": "503",
                             "offlineMode": "true",
+                            "diagnosticSchema": "1",
+                            "errorCode": "offline_cache_miss",
                             "missingStart": String(range.start),
                             "missingEndExclusive": String(range.endExclusive)
                         ]
                     )
                 )
-                return .text(statusCode: 503, reasonPhrase: "Service Unavailable", body: "offline cache miss\n")
+                return ProxyServerHTTPResponse(
+                    statusCode: 503,
+                    reasonPhrase: "Service Unavailable",
+                    headers: Self.offlineCacheMissHeaders(range: range),
+                    body: Data("offline cache miss\n".utf8)
+                )
             }
 
             logger.log(
@@ -906,14 +921,17 @@ public final class HLSCacheFacade: @unchecked Sendable {
                                 "method": requestMethod,
                                 "status": "503",
                                 "offlineMode": "true",
+                                "diagnosticSchema": "1",
+                                "errorCode": "offline_cache_miss",
                                 "missingStart": String(range.start),
                                 "missingEndExclusive": String(range.endExclusive)
                             ]
                         )
                     )
-                    throw ProxyServerHTTPBodyStreamError.fallbackResponse(
+                    throw ProxyServerHTTPBodyStreamError.fallbackResponseWithHeaders(
                         statusCode: 503,
                         reasonPhrase: "Service Unavailable",
+                        headers: Self.offlineCacheMissHeaders(range: range),
                         body: "offline cache miss\n"
                     )
                 }
@@ -1068,6 +1086,17 @@ public final class HLSCacheFacade: @unchecked Sendable {
         default:
             return "Internal Server Error"
         }
+    }
+
+    private static func offlineCacheMissHeaders(range: ByteRange) -> [String: String] {
+        [
+            "Content-Type": "text/plain; charset=utf-8",
+            "X-HLSCache-Diagnostic-Schema": "1",
+            "X-HLSCache-Error-Code": "offline_cache_miss",
+            "X-HLSCache-Offline-Mode": "true",
+            "X-HLSCache-Missing-Start": String(range.start),
+            "X-HLSCache-Missing-End-Exclusive": String(range.endExclusive)
+        ]
     }
 
     private func headerValue(_ name: String, in response: HTTPURLResponse) -> String? {
