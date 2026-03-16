@@ -1818,7 +1818,7 @@ private func canonicalJSONString(
             CLIExporter(
                 baseDirectory: appContext.baseDirectory,
                 facade: appContext.facade,
-                exportRunner: { _, outputURL, _ in
+                exportRunner: { _, outputURL, _, _ in
                     try FileManager.default.createDirectory(
                         at: outputURL.deletingLastPathComponent(),
                         withIntermediateDirectories: true
@@ -1886,7 +1886,7 @@ private func canonicalJSONString(
             CLIExporter(
                 baseDirectory: appContext.baseDirectory,
                 facade: appContext.facade,
-                exportRunner: { _, _, _ in
+                exportRunner: { _, _, _, _ in
                     throw CLIExportError.remuxFailed("export should not run when encoder probe fails")
                 },
                 encoderAvailabilityChecker: { _ in

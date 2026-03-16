@@ -234,7 +234,7 @@ private func seedCachedExporterPlaylistFixture(
     let exporter = CLIExporter(
         baseDirectory: directory,
         facade: facade,
-        exportRunner: { playlistURL, outputURL, videoCodec in
+        exportRunner: { playlistURL, outputURL, videoCodec, _ in
             remuxInvoked = true
             let playlistText = try String(contentsOf: playlistURL, encoding: .utf8)
             #expect(playlistText.contains("segment-00000"))
@@ -284,7 +284,7 @@ private func seedCachedExporterPlaylistFixture(
     let exporter = CLIExporter(
         baseDirectory: directory,
         facade: facade,
-        exportRunner: { rewrittenPlaylistURL, outputURL, _ in
+        exportRunner: { rewrittenPlaylistURL, outputURL, _, _ in
             exportInvoked = true
             let rewritten = try String(contentsOf: rewrittenPlaylistURL, encoding: .utf8)
             #expect(rewritten.contains("segment-00000.ts"))
@@ -335,7 +335,7 @@ private func seedCachedExporterPlaylistFixture(
     let exporter = CLIExporter(
         baseDirectory: directory,
         facade: facade,
-        exportRunner: { rewrittenPlaylistURL, outputURL, _ in
+        exportRunner: { rewrittenPlaylistURL, outputURL, _, _ in
             exportInvoked = true
             let rewritten = try String(contentsOf: rewrittenPlaylistURL, encoding: .utf8)
             #expect(rewritten.contains("#EXT-X-BYTERANGE:400@0"))
@@ -364,7 +364,7 @@ private func seedCachedExporterPlaylistFixture(
     let exporter = CLIExporter(
         baseDirectory: directory,
         facade: facade,
-        exportRunner: { _, _, _ in
+        exportRunner: { _, _, _, _ in
             throw CLIExportError.remuxFailed("should not be invoked for incomplete cache")
         }
     )
@@ -392,7 +392,7 @@ private func seedCachedExporterPlaylistFixture(
     let exporter = CLIExporter(
         baseDirectory: directory,
         facade: facade,
-        exportRunner: { _, _, _ in
+        exportRunner: { _, _, _, _ in
             throw CLIExportError.remuxFailed("should not be invoked for encrypted playlist")
         }
     )
@@ -428,7 +428,7 @@ private func seedCachedExporterPlaylistFixture(
     let exporter = CLIExporter(
         baseDirectory: directory,
         facade: facade,
-        exportRunner: { playlistURL, outputURL, videoCodec in
+        exportRunner: { playlistURL, outputURL, videoCodec, _ in
             remuxInvoked = true
             let playlistText = try String(contentsOf: playlistURL, encoding: .utf8)
             #expect(playlistText.contains("key-00000"))
@@ -462,7 +462,7 @@ private func seedCachedExporterPlaylistFixture(
     let exporter = CLIExporter(
         baseDirectory: directory,
         facade: facade,
-        exportRunner: { playlistURL, outputURL, videoCodec in
+        exportRunner: { playlistURL, outputURL, videoCodec, _ in
             exportInvoked = true
             let playlistText = try String(contentsOf: playlistURL, encoding: .utf8)
             #expect(playlistText.contains("segment-00000"))
@@ -498,7 +498,7 @@ private func seedCachedExporterPlaylistFixture(
     let exporter = CLIExporter(
         baseDirectory: directory,
         facade: facade,
-        exportRunner: { _, _, _ in
+        exportRunner: { _, _, _, _ in
             exportInvoked = true
             throw CLIExportError.remuxFailed("export should not run when AV1 encoder is unavailable")
         },
@@ -538,7 +538,7 @@ private func seedCachedExporterPlaylistFixture(
     let exporter = CLIExporter(
         baseDirectory: directory,
         facade: facade,
-        exportRunner: { _, _, _ in
+        exportRunner: { _, _, _, _ in
             exportInvoked = true
             throw CLIExportError.remuxFailed("export should not run when bitrate is invalid")
         },
@@ -573,7 +573,7 @@ private func seedCachedExporterPlaylistFixture(
     let exporter = CLIExporter(
         baseDirectory: directory,
         facade: facade,
-        exportRunner: { _, outputURL, _ in
+        exportRunner: { _, outputURL, _, _ in
             try FileManager.default.createDirectory(
                 at: outputURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true
