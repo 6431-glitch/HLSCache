@@ -882,6 +882,9 @@ struct CLIApp {
 
         do {
             let exporter = makeExporter(context)
+            let ffmpegInfo = try exporter.ffmpegInfo()
+            io.writeLine("Using ffmpeg: \(ffmpegInfo.executablePath)")
+            io.writeLine("ffmpeg version: \(ffmpegInfo.versionLine)")
             let result = try exporter.export(
                 alias: command.alias,
                 outputURL: command.outputURL,

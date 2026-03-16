@@ -50,6 +50,11 @@ struct CLIExportProgress: Equatable {
     let detail: String?
 }
 
+struct CLIFFmpegInfo: Equatable {
+    let executablePath: String
+    let versionLine: String
+}
+
 struct CLIExporter {
     typealias ExportRunner = (
         _ playlistURL: URL,
@@ -58,6 +63,7 @@ struct CLIExporter {
         _ onProgress: ((String) -> Void)?
     ) throws -> Void
     typealias EncoderAvailabilityChecker = (_ encoderName: String) throws -> Void
+    typealias FFmpegInfoResolver = () throws -> CLIFFmpegInfo
     typealias ProgressHandler = (_ progress: CLIExportProgress) -> Void
 
     private struct PlaylistCandidate {
@@ -78,19 +84,26 @@ struct CLIExporter {
     private let fileManager: FileManager
     private let exportRunner: ExportRunner
     private let encoderAvailabilityChecker: EncoderAvailabilityChecker
+    private let ffmpegInfoResolver: FFmpegInfoResolver
 
     init(
         baseDirectory: URL,
         facade: HLSCacheFacade,
         fileManager: FileManager = .default,
         exportRunner: @escaping ExportRunner = CLIExporter.defaultExportRunner,
-        encoderAvailabilityChecker: @escaping EncoderAvailabilityChecker = CLIExporter.defaultEncoderAvailabilityChecker
+        encoderAvailabilityChecker: @escaping EncoderAvailabilityChecker = CLIExporter.defaultEncoderAvailabilityChecker,
+        ffmpegInfoResolver: @escaping FFmpegInfoResolver = CLIExporter.defaultFFmpegInfoResolver
     ) {
         self.baseDirectory = baseDirectory
         self.facade = facade
         self.fileManager = fileManager
         self.exportRunner = exportRunner
         self.encoderAvailabilityChecker = encoderAvailabilityChecker
+        self.ffmpegInfoResolver = ffmpegInfoResolver
+    }
+
+    func ffmpegInfo() throws -> CLIFFmpegInfo {
+        try ffmpegInfoResolver()
     }
 
     func export(
@@ -526,6 +539,27 @@ struct CLIExporter {
         }
     }
 
+    static func defaultFFmpegInfoResolver() throws -> CLIFFmpegInfo {
+        let executablePath = try resolveFFmpegExecutablePath()
+        let (status, stdout, stderr) = try runCommand(
+            executablePath: executablePath,
+            arguments: ["-version"]
+        )
+        guard status == 0 else {
+            let detail = [stdout, stderr]
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { !$0.isEmpty } ?? "unable to run '\(executablePath) -version'"
+            throw CLIExportError.ffmpegUnavailable(detail)
+        }
+
+        let versionLine = (stdout + "\n" + stderr)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map(String.init)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown version"
+        return CLIFFmpegInfo(executablePath: executablePath, versionLine: versionLine)
+    }
+
     static func defaultExportRunner(
         playlistURL: URL,
         outputURL: URL,
@@ -580,10 +614,11 @@ struct CLIExporter {
         arguments: [String],
         onProgress: ((String) -> Void)? = nil
     ) throws -> (status: Int32, stderr: String) {
+        let executablePath = try resolveFFmpegExecutablePath()
         let stderrPipe = Pipe()
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["ffmpeg"] + arguments
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
         process.standardOutput = Pipe()
         process.standardError = stderrPipe
 
@@ -650,6 +685,69 @@ struct CLIExporter {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         return (process.terminationStatus, stderrOutput)
+    }
+
+    private static func resolveFFmpegExecutablePath() throws -> String {
+        let (status, stdout, stderr) = try runCommand(
+            executablePath: "/usr/bin/which",
+            arguments: ["ffmpeg"]
+        )
+        guard status == 0 else {
+            let pathValue = ProcessInfo.processInfo.environment["PATH"] ?? "(unset)"
+            let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            if detail.isEmpty {
+                throw CLIExportError.ffmpegUnavailable(
+                    "ffmpeg was not found in PATH. PATH=\(pathValue)"
+                )
+            }
+            throw CLIExportError.ffmpegUnavailable(
+                "\(detail). PATH=\(pathValue)"
+            )
+        }
+
+        guard let path = stdout
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map(String.init)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !path.isEmpty else {
+            let pathValue = ProcessInfo.processInfo.environment["PATH"] ?? "(unset)"
+            throw CLIExportError.ffmpegUnavailable(
+                "ffmpeg was not found in PATH. PATH=\(pathValue)"
+            )
+        }
+        guard FileManager.default.isExecutableFile(atPath: path) else {
+            throw CLIExportError.ffmpegUnavailable(
+                "Resolved ffmpeg at '\(path)' is not executable."
+            )
+        }
+        return path
+    }
+
+    private static func runCommand(
+        executablePath: String,
+        arguments: [String]
+    ) throws -> (status: Int32, stdout: String, stderr: String) {
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        do {
+            try process.run()
+        } catch {
+            throw CLIExportError.ffmpegUnavailable(error.localizedDescription)
+        }
+        process.waitUntilExit()
+
+        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+        return (process.terminationStatus, stdout, stderr)
     }
 
     private static func isFFmpegUnavailable(_ stderrOutput: String) -> Bool {

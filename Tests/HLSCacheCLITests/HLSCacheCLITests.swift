@@ -1824,6 +1824,12 @@ private func canonicalJSONString(
                         withIntermediateDirectories: true
                     )
                     try Data("mp4bytes".utf8).write(to: outputURL)
+                },
+                ffmpegInfoResolver: {
+                    CLIFFmpegInfo(
+                        executablePath: "/opt/homebrew/bin/ffmpeg",
+                        versionLine: "ffmpeg version test-build"
+                    )
                 }
             )
         }
@@ -1836,6 +1842,8 @@ private func canonicalJSONString(
     )
 
     #expect(exitCode == 0)
+    #expect(io.outputLines.contains { $0.contains("Using ffmpeg: /opt/homebrew/bin/ffmpeg") })
+    #expect(io.outputLines.contains { $0.contains("ffmpeg version: ffmpeg version test-build") })
     #expect(io.outputLines.contains { $0.contains("Export progress:") })
     #expect(io.outputLines.contains { $0.contains("phase encoding") })
     #expect(io.outputLines.contains { $0.contains("Export completed successfully.") })
@@ -1892,6 +1900,12 @@ private func canonicalJSONString(
                 encoderAvailabilityChecker: { _ in
                     throw CLIExportError.ffmpegUnavailable(
                         "ffmpeg encoder 'libsvtav1' is not available. Install ffmpeg with libsvtav1 support, or rerun export without --av1."
+                    )
+                },
+                ffmpegInfoResolver: {
+                    CLIFFmpegInfo(
+                        executablePath: "/opt/homebrew/bin/ffmpeg",
+                        versionLine: "ffmpeg version test-build"
                     )
                 }
             )
