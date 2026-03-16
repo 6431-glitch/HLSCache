@@ -48,6 +48,21 @@ struct CLIExportProgress: Equatable {
     let processedUnits: Int
     let totalUnits: Int
     let detail: String?
+    let encodingProgress: Double?
+
+    init(
+        phase: Phase,
+        processedUnits: Int,
+        totalUnits: Int,
+        detail: String?,
+        encodingProgress: Double? = nil
+    ) {
+        self.phase = phase
+        self.processedUnits = processedUnits
+        self.totalUnits = totalUnits
+        self.detail = detail
+        self.encodingProgress = encodingProgress
+    }
 }
 
 struct CLIFFmpegInfo: Equatable {
@@ -56,11 +71,17 @@ struct CLIFFmpegInfo: Equatable {
 }
 
 struct CLIExporter {
+    struct FFmpegProgressUpdate: Equatable {
+        let detail: String
+        let outTimeSeconds: Double?
+    }
+
+    typealias FFmpegProgressHandler = (_ update: FFmpegProgressUpdate) -> Void
     typealias ExportRunner = (
         _ playlistURL: URL,
         _ outputURL: URL,
         _ videoCodec: ExportVideoCodec,
-        _ onProgress: ((String) -> Void)?
+        _ onProgress: FFmpegProgressHandler?
     ) throws -> Void
     typealias EncoderAvailabilityChecker = (_ encoderName: String) throws -> Void
     typealias FFmpegInfoResolver = () throws -> CLIFFmpegInfo
@@ -90,7 +111,14 @@ struct CLIExporter {
         baseDirectory: URL,
         facade: HLSCacheFacade,
         fileManager: FileManager = .default,
-        exportRunner: @escaping ExportRunner = CLIExporter.defaultExportRunner,
+        exportRunner: @escaping ExportRunner = {
+            try CLIExporter.defaultExportRunner(
+                playlistURL: $0,
+                outputURL: $1,
+                videoCodec: $2,
+                onProgress: $3
+            )
+        },
         encoderAvailabilityChecker: @escaping EncoderAvailabilityChecker = CLIExporter.defaultEncoderAvailabilityChecker,
         ffmpegInfoResolver: @escaping FFmpegInfoResolver = CLIExporter.defaultFFmpegInfoResolver
     ) {
@@ -136,6 +164,7 @@ struct CLIExporter {
             recordsByResource: recordsByResource,
             diskStore: diskStore
         )
+        let estimatedEncodingDurationSeconds = estimatedMediaDurationSeconds(from: candidate.playlistText)
 
         let totalCopyUnits = candidate.mapRemoteURLs.count + candidate.segmentRemoteURLs.count + candidate.keyRemoteURLs.count
         let totalUnits = max(totalCopyUnits + 1, 1)
@@ -250,16 +279,25 @@ struct CLIExporter {
                 phase: .encoding,
                 processedUnits: processedUnits,
                 totalUnits: totalUnits,
-                detail: encodingDetail
+                detail: encodingDetail,
+                encodingProgress: estimatedEncodingDurationSeconds > 0 ? 0 : nil
             )
         )
-        try exportRunner(localPlaylistURL, outputURL, effectiveVideoCodec) { ffmpegDetail in
+        try exportRunner(localPlaylistURL, outputURL, effectiveVideoCodec) { update in
+            let encodingProgress: Double? = {
+                guard estimatedEncodingDurationSeconds > 0, let outTime = update.outTimeSeconds else {
+                    return nil
+                }
+                let ratio = outTime / estimatedEncodingDurationSeconds
+                return min(max(ratio, 0), 0.999)
+            }()
             progressHandler?(
                 CLIExportProgress(
                     phase: .encoding,
                     processedUnits: processedUnits,
                     totalUnits: totalUnits,
-                    detail: "\(encodingDetail) | \(ffmpegDetail)"
+                    detail: "\(encodingDetail) | \(update.detail)",
+                    encodingProgress: encodingProgress
                 )
             )
         }
@@ -269,7 +307,8 @@ struct CLIExporter {
                 phase: .completed,
                 processedUnits: processedUnits,
                 totalUnits: totalUnits,
-                detail: "Export output generated"
+                detail: "Export output generated",
+                encodingProgress: 1
             )
         )
 
@@ -552,19 +591,23 @@ struct CLIExporter {
             throw CLIExportError.ffmpegUnavailable(detail)
         }
 
-        let versionLine = (stdout + "\n" + stderr)
+        let fullVersionLine = (stdout + "\n" + stderr)
             .split(separator: "\n", omittingEmptySubsequences: true)
             .map(String.init)
             .first?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown version"
-        return CLIFFmpegInfo(executablePath: executablePath, versionLine: versionLine)
+        let conciseVersionLine = fullVersionLine
+            .components(separatedBy: " Copyright")
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? fullVersionLine
+        return CLIFFmpegInfo(executablePath: executablePath, versionLine: conciseVersionLine)
     }
 
     static func defaultExportRunner(
         playlistURL: URL,
         outputURL: URL,
         videoCodec: ExportVideoCodec,
-        onProgress: ((String) -> Void)? = nil
+        onProgress: FFmpegProgressHandler? = nil
     ) throws {
         var arguments = commonFFmpegInputArguments(playlistURL: playlistURL)
 
@@ -612,7 +655,7 @@ struct CLIExporter {
 
     private static func runFFmpeg(
         arguments: [String],
-        onProgress: ((String) -> Void)? = nil
+        onProgress: FFmpegProgressHandler? = nil
     ) throws -> (status: Int32, stderr: String) {
         let executablePath = try resolveFFmpegExecutablePath()
         let stderrPipe = Pipe()
@@ -667,14 +710,21 @@ struct CLIExporter {
                 }
                 if line == "progress=continue" || line == "progress=end" {
                     var parts: [String] = []
+                    var outTimeSeconds: Double?
                     if let outTime, !outTime.isEmpty, outTime != "N/A" {
                         parts.append("ffmpeg \(outTime)")
+                        outTimeSeconds = parseFFmpegOutTimeToSeconds(outTime)
                     }
                     if let speed, !speed.isEmpty {
                         parts.append("speed \(speed)")
                     }
                     if !parts.isEmpty {
-                        onProgress?(parts.joined(separator: " | "))
+                        onProgress?(
+                            FFmpegProgressUpdate(
+                                detail: parts.joined(separator: " | "),
+                                outTimeSeconds: outTimeSeconds
+                            )
+                        )
                     }
                 }
             }
@@ -748,6 +798,36 @@ struct CLIExporter {
         let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
         let stderr = String(data: stderrData, encoding: .utf8) ?? ""
         return (process.terminationStatus, stdout, stderr)
+    }
+
+    private static func parseFFmpegOutTimeToSeconds(_ raw: String) -> Double? {
+        let components = raw.split(separator: ":")
+        guard components.count == 3,
+              let hours = Double(components[0]),
+              let minutes = Double(components[1]),
+              let seconds = Double(components[2]) else {
+            return nil
+        }
+        return hours * 3600 + minutes * 60 + seconds
+    }
+
+    private func estimatedMediaDurationSeconds(from playlist: String) -> Double {
+        playlist
+            .components(separatedBy: .newlines)
+            .reduce(0) { partial, line in
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard trimmed.hasPrefix("#EXTINF:") else {
+                    return partial
+                }
+                let payload = String(trimmed.dropFirst("#EXTINF:".count))
+                let rawDuration = payload.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false).first
+                    .map(String.init)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard let seconds = Double(rawDuration), seconds > 0 else {
+                    return partial
+                }
+                return partial + seconds
+            }
     }
 
     private static func isFFmpegUnavailable(_ stderrOutput: String) -> Bool {

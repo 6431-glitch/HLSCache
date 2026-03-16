@@ -840,6 +840,7 @@ struct CLIApp {
         var lastProgress: CLIExportProgress?
         var lastRenderAt = Date.distantPast
         var lastRenderedProgress: CLIExportProgress?
+        var encodingStartedAt: Date?
 
         func renderProgress(_ progress: CLIExportProgress, force: Bool = false) {
             let now = Date()
@@ -855,6 +856,13 @@ struct CLIApp {
             lastRenderedProgress = progress
 
             let percent: Int = {
+                if progress.phase == .encoding, let encodingProgress = progress.encodingProgress {
+                    let bounded = min(max(encodingProgress, 0), 1)
+                    if bounded >= 1 {
+                        return 100
+                    }
+                    return Int((bounded * 100).rounded(.down))
+                }
                 guard progress.totalUnits > 0 else { return 0 }
                 if progress.processedUnits >= progress.totalUnits {
                     return 100
@@ -864,14 +872,28 @@ struct CLIApp {
             let elapsed = now.timeIntervalSince(startedAt)
             let elapsedText = formatDuration(elapsed)
 
+            if phaseChanged {
+                encodingStartedAt = progress.phase == .encoding ? now : nil
+            }
+
             var etaText = "n/a"
-            let remaining = max(progress.totalUnits - progress.processedUnits, 0)
-            if progress.processedUnits > 0, remaining > 0 {
-                let rate = Double(progress.processedUnits) / max(elapsed, 0.001)
-                let etaSeconds = Double(remaining) / max(rate, 0.001)
-                etaText = etaSeconds < 1 ? "<1s" : formatDuration(etaSeconds)
-            } else if remaining == 0 {
-                etaText = "0s"
+            if progress.phase == .encoding, let encodingProgress = progress.encodingProgress {
+                if encodingProgress >= 1 {
+                    etaText = "0s"
+                } else if encodingProgress > 0, let encodingStartedAt {
+                    let encodingElapsed = now.timeIntervalSince(encodingStartedAt)
+                    let etaSeconds = encodingElapsed * (1 - encodingProgress) / max(encodingProgress, 0.001)
+                    etaText = etaSeconds < 1 ? "<1s" : formatDuration(etaSeconds)
+                }
+            } else {
+                let remaining = max(progress.totalUnits - progress.processedUnits, 0)
+                if progress.processedUnits > 0, remaining > 0 {
+                    let rate = Double(progress.processedUnits) / max(elapsed, 0.001)
+                    let etaSeconds = Double(remaining) / max(rate, 0.001)
+                    etaText = etaSeconds < 1 ? "<1s" : formatDuration(etaSeconds)
+                } else if remaining == 0 {
+                    etaText = "0s"
+                }
             }
 
             let detailSuffix = progress.detail.map { " | \($0)" } ?? ""
