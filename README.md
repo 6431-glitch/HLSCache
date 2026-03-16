@@ -225,6 +225,7 @@ Integrity metadata migration behavior:
 
 - Legacy manifests that store `algorithm: hmac-sha256-v1` are treated as a backward-compatible legacy keyed-SHA256 digest format.
 - On successful validation of a complete cached resource, integrity metadata is rewritten to `hmac-sha256-rfc2104-v1` to converge manifests onto the RFC HMAC contract.
+- Digest validation uses constant-time comparison for equal-length digests in both RFC and legacy compatibility validation paths.
 
 ### Plugin Stamp Migration Policy
 

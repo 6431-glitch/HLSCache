@@ -113,16 +113,22 @@ public struct EncryptAtRestPlugin: HLSCachePlugin, ReversibleByteTransformer, In
         let resourceKeyData = Data(context.resourceID.resourceKey.utf8)
         switch storedIntegrity.algorithm {
         case Self.authenticatedIntegrityAlgorithm:
-            return storedIntegrity.digestHex == Self.integrityDigestHex(
+            return constantTimeCompareHexDigest(
+                storedIntegrity.digestHex,
+                Self.integrityDigestHex(
                 keyData: keyData,
                 resourceKeyData: resourceKeyData,
                 cachedPayload: cachedPayload
             )
+            )
         case Self.legacyAuthenticatedIntegrityAlgorithm:
-            return storedIntegrity.digestHex == Self.legacyIntegrityDigestHex(
+            return constantTimeCompareHexDigest(
+                storedIntegrity.digestHex,
+                Self.legacyIntegrityDigestHex(
                 keyData: keyData,
                 resourceKeyData: resourceKeyData,
                 cachedPayload: cachedPayload
+            )
             )
         default:
             return false

@@ -115,7 +115,7 @@ public final class TransformPipeline: @unchecked Sendable {
                 )
             }
 
-            return computedMetadata == storedIntegrity
+            return constantTimeIntegrityEquals(computedMetadata, storedIntegrity)
         }
 
         return nil
