@@ -38,12 +38,22 @@ struct GateReport: Codable {
     let dependencies: [DependencySnapshot]
 }
 
+struct FixtureIssueStatus: Codable {
+    let statusName: String
+    let statusCategory: String
+}
+
+struct GateFixture: Codable {
+    let statuses: [String: FixtureIssueStatus]
+}
+
 enum GateScriptError: LocalizedError {
     case invalidArguments(String)
     case missingEnvironment(String)
     case invalidBaseURL(String)
     case requestFailed(String)
     case responseDecodeFailed(String)
+    case fixtureLoadFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -57,6 +67,8 @@ enum GateScriptError: LocalizedError {
             return "Jira request failed: \(message)"
         case let .responseDecodeFailed(message):
             return "Jira response decode failed: \(message)"
+        case let .fixtureLoadFailed(message):
+            return "Fixture load failed: \(message)"
         }
     }
 }
@@ -65,6 +77,7 @@ struct ScriptConfiguration {
     let mode: GateMode
     let format: GateOutputFormat
     let timeoutSeconds: TimeInterval
+    let fixtureFilePath: String?
 }
 
 private let dependencies: [Dependency] = [
@@ -78,7 +91,7 @@ private let dependencies: [Dependency] = [
 
 private let usage = """
 Usage:
-  swift Scripts/check_hls84_readiness_gate.swift [--mode <minimum|final>] [--format <text|json>] [--timeout-seconds <seconds>]
+  swift Scripts/check_hls84_readiness_gate.swift [--mode <minimum|final>] [--format <text|json>] [--timeout-seconds <seconds>] [--fixture-file <path>]
 
 Environment:
   JIRA_BASE_URL     Jira base URL (for example: https://your-org.atlassian.net)
@@ -90,6 +103,7 @@ private func parseConfiguration(arguments: [String]) throws -> ScriptConfigurati
     var mode: GateMode = .minimum
     var format: GateOutputFormat = .text
     var timeoutSeconds: TimeInterval = 20
+    var fixtureFilePath: String?
 
     var index = 0
     while index < arguments.count {
@@ -113,6 +127,12 @@ private func parseConfiguration(arguments: [String]) throws -> ScriptConfigurati
                 throw GateScriptError.invalidArguments("--timeout-seconds expects a positive number")
             }
             timeoutSeconds = parsed
+        case "--fixture-file":
+            index += 1
+            guard index < arguments.count, !arguments[index].isEmpty else {
+                throw GateScriptError.invalidArguments("--fixture-file expects a path")
+            }
+            fixtureFilePath = arguments[index]
         case "--help", "-h":
             print(usage)
             exit(EXIT_SUCCESS)
@@ -122,7 +142,12 @@ private func parseConfiguration(arguments: [String]) throws -> ScriptConfigurati
         index += 1
     }
 
-    return ScriptConfiguration(mode: mode, format: format, timeoutSeconds: timeoutSeconds)
+    return ScriptConfiguration(
+        mode: mode,
+        format: format,
+        timeoutSeconds: timeoutSeconds,
+        fixtureFilePath: fixtureFilePath
+    )
 }
 
 private func requiredEnvironmentValue(_ key: String) throws -> String {
@@ -188,6 +213,43 @@ private func performRequest(_ request: URLRequest, timeoutSeconds: TimeInterval)
         throw GateScriptError.requestFailed("missing response body")
     }
     return (data, response)
+}
+
+private func loadFixtureStatuses(path: String) throws -> [String: FixtureIssueStatus] {
+    let fileURL = URL(fileURLWithPath: path)
+    let data: Data
+    do {
+        data = try Data(contentsOf: fileURL)
+    } catch {
+        throw GateScriptError.fixtureLoadFailed("unable to read '\(path)': \(error.localizedDescription)")
+    }
+
+    do {
+        let fixture = try JSONDecoder().decode(GateFixture.self, from: data)
+        return fixture.statuses
+    } catch {
+        throw GateScriptError.fixtureLoadFailed("unable to decode '\(path)': \(error.localizedDescription)")
+    }
+}
+
+private func snapshotFromFixture(
+    dependency: Dependency,
+    mode: GateMode,
+    statuses: [String: FixtureIssueStatus]
+) throws -> DependencySnapshot {
+    guard let status = statuses[dependency.key] else {
+        throw GateScriptError.fixtureLoadFailed("missing status fixture for \(dependency.key)")
+    }
+    let (expected, pass) = expectation(for: dependency.key, mode: mode)
+    return DependencySnapshot(
+        key: dependency.key,
+        name: dependency.name,
+        statusName: status.statusName,
+        statusCategory: status.statusCategory,
+        expected: expected,
+        passed: pass(status.statusCategory),
+        error: nil
+    )
 }
 
 private func fetchDependencySnapshot(
@@ -296,12 +358,23 @@ private func emitJSON(report: GateReport) {
 
 do {
     let config = try parseConfiguration(arguments: Array(CommandLine.arguments.dropFirst()))
-    let baseURLRaw = try requiredEnvironmentValue("JIRA_BASE_URL")
-    let userEmail = try requiredEnvironmentValue("JIRA_USER_EMAIL")
-    let apiToken = try requiredEnvironmentValue("JIRA_API_TOKEN")
+    let fixtureStatuses = try config.fixtureFilePath.map(loadFixtureStatuses(path:))
 
-    guard let baseURL = URL(string: baseURLRaw) else {
-        throw GateScriptError.invalidBaseURL(baseURLRaw)
+    let baseURL: URL?
+    let userEmail: String?
+    let apiToken: String?
+    if fixtureStatuses == nil {
+        let baseURLRaw = try requiredEnvironmentValue("JIRA_BASE_URL")
+        userEmail = try requiredEnvironmentValue("JIRA_USER_EMAIL")
+        apiToken = try requiredEnvironmentValue("JIRA_API_TOKEN")
+        guard let parsedBaseURL = URL(string: baseURLRaw) else {
+            throw GateScriptError.invalidBaseURL(baseURLRaw)
+        }
+        baseURL = parsedBaseURL
+    } else {
+        baseURL = nil
+        userEmail = nil
+        apiToken = nil
     }
 
     var snapshots: [DependencySnapshot] = []
@@ -309,14 +382,26 @@ do {
 
     for dependency in dependencies {
         do {
-            let snapshot = try fetchDependencySnapshot(
-                baseURL: baseURL,
-                userEmail: userEmail,
-                apiToken: apiToken,
-                dependency: dependency,
-                mode: config.mode,
-                timeoutSeconds: config.timeoutSeconds
-            )
+            let snapshot: DependencySnapshot
+            if let fixtureStatuses {
+                snapshot = try snapshotFromFixture(
+                    dependency: dependency,
+                    mode: config.mode,
+                    statuses: fixtureStatuses
+                )
+            } else {
+                guard let baseURL, let userEmail, let apiToken else {
+                    throw GateScriptError.missingEnvironment("Jira credentials are required when --fixture-file is not provided")
+                }
+                snapshot = try fetchDependencySnapshot(
+                    baseURL: baseURL,
+                    userEmail: userEmail,
+                    apiToken: apiToken,
+                    dependency: dependency,
+                    mode: config.mode,
+                    timeoutSeconds: config.timeoutSeconds
+                )
+            }
             snapshots.append(snapshot)
         } catch {
             snapshots.append(makeErrorSnapshot(dependency: dependency, mode: config.mode, error: error))
