@@ -22,7 +22,7 @@ enum CLIExportError: Error, LocalizedError, Equatable {
         case let .incompleteCache(reason):
             return "Cache is incomplete: \(reason)"
         case let .invalidAV1Bitrate(value):
-            return "Invalid AV1 bitrate '\(value)'. Use a positive integer plus unit suffix k or M (examples: 1200k, 2M)."
+            return "Invalid AV1 bitrate '\(value)'. \(CLIAV1BitrateValidator.guidance)"
         case let .ffmpegUnavailable(reason):
             return "ffmpeg is unavailable: \(reason)"
         case let .remuxFailed(reason):
@@ -208,11 +208,20 @@ struct CLIExporter {
         let localPlaylistURL = stagingDirectory.appendingPathComponent("input.m3u8")
         try rewrittenPlaylist.write(to: localPlaylistURL, atomically: true, encoding: .utf8)
 
+        var effectiveVideoCodec = videoCodec
         if case let .av1(options) = videoCodec {
             if let bitrate = options.bitrate {
-                guard Self.isValidAV1Bitrate(bitrate.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                let normalizedBitrate = CLIAV1BitrateValidator.normalized(bitrate)
+                guard CLIAV1BitrateValidator.isValid(normalizedBitrate) else {
                     throw CLIExportError.invalidAV1Bitrate(bitrate)
                 }
+                effectiveVideoCodec = .av1(
+                    AV1TranscodeOptions(
+                        preset: options.preset,
+                        crf: options.crf,
+                        bitrate: normalizedBitrate
+                    )
+                )
             }
             try encoderAvailabilityChecker("libsvtav1")
         }
@@ -222,10 +231,10 @@ struct CLIExporter {
                 phase: .encoding,
                 processedUnits: processedUnits,
                 totalUnits: totalUnits,
-                detail: videoCodec == .copy ? "Running ffmpeg remux" : "Running ffmpeg AV1 transcode"
+                detail: effectiveVideoCodec == .copy ? "Running ffmpeg remux" : "Running ffmpeg AV1 transcode"
             )
         )
-        try exportRunner(localPlaylistURL, outputURL, videoCodec)
+        try exportRunner(localPlaylistURL, outputURL, effectiveVideoCodec)
         processedUnits = totalUnits
         progressHandler?(
             CLIExportProgress(
@@ -573,7 +582,4 @@ struct CLIExporter {
             || (lower.contains("no such file or directory") && lower.contains("ffmpeg"))
     }
 
-    private static func isValidAV1Bitrate(_ value: String) -> Bool {
-        value.range(of: "^[1-9][0-9]*[kKmM]$", options: .regularExpression) != nil
-    }
 }

@@ -143,6 +143,25 @@ private func parseJSONObject(_ line: String) throws -> [String: Any] {
     return try #require(object as? [String: Any])
 }
 
+private func canonicalJSONString(_ object: Any) throws -> String {
+    let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    return try #require(String(data: data, encoding: .utf8))
+}
+
+private func canonicalJSONString(fromLine line: String) throws -> String {
+    let object = try JSONSerialization.jsonObject(with: Data(line.utf8))
+    return try canonicalJSONString(object)
+}
+
+private func canonicalJSONString(
+    fromLine line: String,
+    mutating mutation: (inout [String: Any]) throws -> Void
+) throws -> String {
+    var payload = try parseJSONObject(line)
+    try mutation(&payload)
+    return try canonicalJSONString(payload)
+}
+
 @Test func docs_readmeAndUsageStayAlignedWithImplementedCLI() throws {
     let readme = try loadRepositoryREADME()
     #expect(readme.contains("swift run HLSCacheCLI download --alias MD0534"))
@@ -555,6 +574,33 @@ private func parseJSONObject(_ line: String) throws -> [String: Any] {
     #expect((aliases.first?["cacheBytes"] as? Int ?? 0) > 0)
 }
 
+@Test func cliListCommand_jsonOutput_matchesGoldenSnapshot() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try seedCacheBytes(baseDirectory: directory, alias: "MDJSONSNAP", assetID: "asset-json-snap")
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory, outputFormat: .json))
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(context: context, io: io)
+
+    let exitCode = app.run(command: .listAliases)
+    #expect(exitCode == 0)
+
+    let line = try #require(io.outputLines.last)
+    let snapshot = try canonicalJSONString(fromLine: line) { payload in
+        var aliases = try #require(payload["aliases"] as? [[String: Any]])
+        for index in aliases.indices {
+            aliases[index]["updated"] = "<redacted-date>"
+            aliases[index]["cacheBytes"] = 0
+        }
+        payload["aliases"] = aliases
+    }
+    #expect(
+        snapshot
+            == #"{"aliases":[{"alias":"MDJSONSNAP","assetID":"asset-json-snap","cacheBytes":0,"remoteURL":"https:\/\/cdn.example.com\/MDJSONSNAP.m3u8","updated":"<redacted-date>"}],"command":"list","schemaVersion":"1"}"#
+    )
+}
+
 @Test func cliProxyCommand_status_jsonOutput_emitsVersionedSchemaAndFields() throws {
     let directory = try makeCLITempDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -575,6 +621,32 @@ private func parseJSONObject(_ line: String) throws -> [String: Any] {
     #expect((payload["port"] as? String)?.isEmpty == false)
     #expect((payload["baseURL"] as? String)?.hasPrefix("http://127.0.0.1:") == true)
     #expect(payload["offlineMode"] as? Bool == false)
+}
+
+@Test func cliProxyCommand_status_jsonOutput_matchesGoldenSnapshot() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory, outputFormat: .json))
+    let io = FakeIO(inputs: [])
+    let fixedURL = try #require(URL(string: "http://127.0.0.1:9090"))
+    let status = ProxyServerStatus(
+        isRunning: true,
+        host: "127.0.0.1",
+        port: 9090,
+        baseURL: fixedURL
+    )
+    let app = CLIApp(context: context, io: io, proxyStatusProvider: { status })
+
+    let exitCode = app.run(command: .proxy(ProxyCommand(action: .status)))
+    #expect(exitCode == 0)
+
+    let line = try #require(io.outputLines.last)
+    let snapshot = try canonicalJSONString(fromLine: line)
+    #expect(
+        snapshot
+            == #"{"baseURL":"http:\/\/127.0.0.1:9090","command":"proxy.status","host":"127.0.0.1","offlineMode":false,"port":"9090","schemaVersion":"1","state":"running"}"#
+    )
 }
 
 @Test func cliProxyCommand_status_jsonOutput_whenUnavailable_returnsRuntimeUnavailable() throws {
@@ -701,6 +773,112 @@ private func parseJSONObject(_ line: String) throws -> [String: Any] {
     let line = try #require(jsonIO.outputLines.last)
     let payload = try parseJSONObject(line)
     #expect(payload["offlineMode"] as? Bool == true)
+}
+
+@Test func cliProxyCommand_restartSuccess_textOutput_hasDeterministicContract() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let runningURL = try #require(URL(string: "http://127.0.0.1:8080"))
+    var status = ProxyServerStatus(
+        isRunning: true,
+        host: "127.0.0.1",
+        port: 8080,
+        baseURL: runningURL
+    )
+
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(
+        context: context,
+        io: io,
+        proxyStatusProvider: { status },
+        stopProxyServer: {
+            status = ProxyServerStatus(isRunning: false, host: nil, port: nil, baseURL: nil)
+        },
+        startProxyServer: { host, port in
+            let resolved = URL(string: "http://\(host):\(port)")!
+            status = ProxyServerStatus(
+                isRunning: true,
+                host: host,
+                port: port,
+                baseURL: resolved
+            )
+            return resolved
+        }
+    )
+
+    let exitCode = app.run(command: .proxy(ProxyCommand(action: .restart)))
+    #expect(exitCode == 0)
+    #expect(io.outputLines.contains { $0.contains("Restarting proxy server...") })
+    #expect(io.outputLines.contains { $0.contains("Before restart:") })
+    #expect(io.outputLines.contains { $0.contains("After restart:") })
+    #expect(io.outputLines.contains { $0.contains("Proxy server restarted.") })
+    #expect(io.outputLines.contains { $0.contains("Proxy status (post-restart):") })
+    #expect(io.outputLines.contains { $0 == "proxy.state=running" })
+    #expect(io.outputLines.contains { $0 == "proxy.host=127.0.0.1" })
+    #expect(io.outputLines.contains { $0 == "proxy.port=8080" })
+    #expect(io.outputLines.contains { $0 == "proxy.base_url=http://127.0.0.1:8080" })
+    #expect(io.outputLines.contains { $0 == "proxy.offline_mode=false" })
+}
+
+@Test func cliProxyCommand_restartSuccess_jsonOutput_hasDeterministicSchemaAndSnapshot() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let context = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory, outputFormat: .json))
+    let runningURL = try #require(URL(string: "http://127.0.0.1:8080"))
+    var status = ProxyServerStatus(
+        isRunning: true,
+        host: "127.0.0.1",
+        port: 8080,
+        baseURL: runningURL
+    )
+
+    let io = FakeIO(inputs: [])
+    let app = CLIApp(
+        context: context,
+        io: io,
+        proxyStatusProvider: { status },
+        stopProxyServer: {
+            status = ProxyServerStatus(isRunning: false, host: nil, port: nil, baseURL: nil)
+        },
+        startProxyServer: { host, port in
+            let resolved = URL(string: "http://\(host):\(port)")!
+            status = ProxyServerStatus(
+                isRunning: true,
+                host: host,
+                port: port,
+                baseURL: resolved
+            )
+            return resolved
+        }
+    )
+
+    let exitCode = app.run(command: .proxy(ProxyCommand(action: .restart)))
+    #expect(exitCode == 0)
+
+    let line = try #require(io.outputLines.last)
+    let payload = try parseJSONObject(line)
+    #expect(payload["schemaVersion"] as? String == "1")
+    #expect(payload["command"] as? String == "proxy.restart")
+    #expect(payload["result"] as? String == "success")
+    #expect(payload["attemptedHost"] as? String == "127.0.0.1")
+    #expect(payload["attemptedPort"] as? Int == 8080)
+    let statusPayload = try #require(payload["status"] as? [String: Any])
+    #expect(statusPayload["schemaVersion"] as? String == "1")
+    #expect(statusPayload["command"] as? String == "proxy.restart.status")
+    #expect(statusPayload["state"] as? String == "running")
+    #expect(statusPayload["host"] as? String == "127.0.0.1")
+    #expect(statusPayload["port"] as? String == "8080")
+    #expect(statusPayload["baseURL"] as? String == "http://127.0.0.1:8080")
+    #expect(statusPayload["offlineMode"] as? Bool == false)
+
+    let snapshot = try canonicalJSONString(fromLine: line)
+    #expect(
+        snapshot
+            == #"{"attemptedHost":"127.0.0.1","attemptedPort":8080,"command":"proxy.restart","result":"success","schemaVersion":"1","status":{"baseURL":"http:\/\/127.0.0.1:8080","command":"proxy.restart.status","host":"127.0.0.1","offlineMode":false,"port":"8080","schemaVersion":"1","state":"running"}}"#
+    )
 }
 
 @Test func cliProxyCommand_restartFailure_returnsDeterministicExitCode() throws {

@@ -593,20 +593,16 @@ struct CLIArguments: Equatable {
     }
 
     private static func parseAV1Bitrate(_ raw: String) throws -> String {
-        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = CLIAV1BitrateValidator.normalized(raw)
         guard !value.isEmpty else {
             throw CLIArgumentParseError.invalidArgument("AV1 bitrate must not be empty")
         }
-        guard isValidAV1Bitrate(value) else {
+        guard CLIAV1BitrateValidator.isValid(value) else {
             throw CLIArgumentParseError.invalidArgument(
-                "Invalid AV1 bitrate '\(raw)'. Use a positive integer plus unit suffix k or M (examples: 1200k, 2M)."
+                "Invalid AV1 bitrate '\(raw)'. \(CLIAV1BitrateValidator.guidance)"
             )
         }
         return value
-    }
-
-    private static func isValidAV1Bitrate(_ value: String) -> Bool {
-        value.range(of: "^[1-9][0-9]*[kKmM]$", options: .regularExpression) != nil
     }
 
     private static func parseSettingsCommand(_ args: [String]) throws -> CLICommand {
