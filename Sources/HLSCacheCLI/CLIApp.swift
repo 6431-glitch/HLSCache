@@ -845,7 +845,9 @@ struct CLIApp {
         func renderProgress(_ progress: CLIExportProgress, force: Bool = false) {
             let now = Date()
             let phaseChanged = lastRenderedProgress?.phase != progress.phase
-            let shouldRender = force || phaseChanged || now.timeIntervalSince(lastRenderAt) >= 0.5
+            let unitsChanged = lastRenderedProgress?.processedUnits != progress.processedUnits
+            let unthrottledStagingUpdate = progress.phase == .staging && unitsChanged
+            let shouldRender = force || phaseChanged || unthrottledStagingUpdate || now.timeIntervalSince(lastRenderAt) >= 0.5
             guard shouldRender else {
                 return
             }
@@ -876,6 +878,16 @@ struct CLIApp {
                 encodingStartedAt = progress.phase == .encoding ? now : nil
             }
 
+            let processedLabel: String = {
+                if progress.phase == .encoding, let encodingProgress = progress.encodingProgress {
+                    let bounded = min(max(encodingProgress, 0), 1)
+                    let baseProcessed = Double(max(progress.processedUnits - 1, 0))
+                    let resolved = min(baseProcessed + bounded, Double(progress.totalUnits))
+                    return String(format: "%.2f", resolved)
+                }
+                return "\(progress.processedUnits)"
+            }()
+
             var etaText = "n/a"
             if progress.phase == .encoding, let encodingProgress = progress.encodingProgress {
                 if encodingProgress >= 1 {
@@ -898,7 +910,7 @@ struct CLIApp {
 
             let detailSuffix = progress.detail.map { " | \($0)" } ?? ""
             io.writeLine(
-                "Export progress: \(progress.processedUnits)/\(progress.totalUnits) (\(percent)%) | elapsed \(elapsedText) | eta \(etaText) | phase \(progress.phase.rawValue)\(detailSuffix)"
+                "Export progress: \(processedLabel)/\(progress.totalUnits) (\(percent)%) | elapsed \(elapsedText) | eta \(etaText) | phase \(progress.phase.rawValue)\(detailSuffix)"
             )
         }
 
