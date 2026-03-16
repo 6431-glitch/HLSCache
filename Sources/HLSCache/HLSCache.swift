@@ -742,15 +742,16 @@ public final class HLSCacheFacade: @unchecked Sendable {
 
         let rangeHeader = request.headers["range"]
         do {
-            if request.method == "HEAD" {
-                let response = try ProxyRangeResponse.make(
-                    rangeHeader: rangeHeader,
-                    totalLength: totalLength
-                )
-                var headers = response.headers
-                if let contentType {
-                    headers["Content-Type"] = contentType
-                }
+            let response = try ProxyRangeResponse.make(
+                rangeHeader: rangeHeader,
+                totalLength: totalLength
+            )
+            var headers = response.headers
+            if let contentType {
+                headers["Content-Type"] = contentType
+            }
+
+            if request.method == "HEAD" || response.statusCode == 416 {
                 logger.log(
                     StructuredLogEvent(
                         subsystem: "HLSCache",
@@ -758,42 +759,22 @@ public final class HLSCacheFacade: @unchecked Sendable {
                         level: .debug,
                         correlationID: correlationID,
                         metadata: [
-                        "alias": route.alias,
-                        "kind": route.kind.rawValue,
-                        "status": String(response.statusCode),
-                        "bytes": headers["Content-Length"] ?? "0",
-                        "continuityDecision": continuityDecision,
-                        "offlineMode": String(offlineModeEnabled)
-                    ]
+                            "alias": route.alias,
+                            "kind": route.kind.rawValue,
+                            "status": String(response.statusCode),
+                            "bytes": headers["Content-Length"] ?? "0",
+                            "continuityDecision": continuityDecision,
+                            "offlineMode": String(offlineModeEnabled)
+                        ]
+                    )
                 )
-            )
-            return ProxyServerHTTPResponse(
-                statusCode: response.statusCode,
+
+                return ProxyServerHTTPResponse(
+                    statusCode: response.statusCode,
                     reasonPhrase: reasonPhrase(for: response.statusCode),
                     headers: headers,
                     body: Data()
                 )
-            }
-
-            let networkClient = URLSessionNetworkClient(session: networkSession)
-            var payload = Data()
-            let result = try await coordinator.serveStreaming(
-                resourceID: resourceID,
-                remoteURL: route.remoteURL,
-                headers: requestHeaders,
-                rangeHeader: rangeHeader,
-                totalLength: totalLength,
-                contentType: contentType,
-                allowNetworkFallback: !offlineModeEnabled,
-                networkClient: networkClient,
-                correlationID: correlationID
-            ) { _, chunk in
-                payload.append(chunk)
-            }
-
-            var headers = result.response.headers
-            if let contentType {
-                headers["Content-Type"] = contentType
             }
 
             logger.log(
@@ -805,8 +786,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
                     metadata: [
                         "alias": route.alias,
                         "kind": route.kind.rawValue,
-                        "status": String(result.response.statusCode),
-                        "bytes": String(payload.count),
+                        "status": String(response.statusCode),
+                        "bytes": headers["Content-Length"] ?? "0",
                         "continuityDecision": continuityDecision,
                         "offlineMode": String(offlineModeEnabled)
                     ]
@@ -814,52 +795,27 @@ public final class HLSCacheFacade: @unchecked Sendable {
             )
 
             return ProxyServerHTTPResponse(
-                statusCode: result.response.statusCode,
-                reasonPhrase: reasonPhrase(for: result.response.statusCode),
+                statusCode: response.statusCode,
+                reasonPhrase: reasonPhrase(for: response.statusCode),
                 headers: headers,
-                body: payload
-            )
-        } catch let error as ProxyCacheCoordinatorError {
-            if case let .offlineCacheMiss(range) = error {
-                logger.log(
-                    StructuredLogEvent(
-                        subsystem: "HLSCache",
-                        operation: "proxyRequest",
-                        level: .warning,
-                        correlationID: correlationID,
-                        metadata: [
-                            "alias": route.alias,
-                            "kind": route.kind.rawValue,
-                            "path": request.path,
-                            "method": request.method,
-                            "status": "503",
-                            "offlineMode": "true",
-                            "missingStart": String(range.start),
-                            "missingEndExclusive": String(range.endExclusive)
-                        ]
-                    )
-                )
-                return .text(statusCode: 503, reasonPhrase: "Service Unavailable", body: "offline cache miss\n")
-            }
-
-            logger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "proxyRequest",
-                    level: .error,
+                bodyStream: makeProxyResponseBodyStream(
+                    coordinator: coordinator,
+                    resourceID: resourceID,
+                    remoteURL: route.remoteURL,
+                    headers: requestHeaders,
+                    rangeHeader: rangeHeader,
+                    totalLength: totalLength,
+                    contentType: contentType,
+                    allowNetworkFallback: !offlineModeEnabled,
                     correlationID: correlationID,
-                    metadata: [
-                        "alias": route.alias,
-                        "kind": route.kind.rawValue,
-                        "path": request.path,
-                        "method": request.method,
-                        "status": "502",
-                        "offlineMode": String(offlineModeEnabled),
-                        "error": String(describing: error)
-                    ]
+                    alias: route.alias,
+                    kind: route.kind.rawValue,
+                    continuityDecision: continuityDecision,
+                    offlineModeEnabled: offlineModeEnabled,
+                    requestPath: request.path,
+                    requestMethod: request.method
                 )
             )
-            return .text(statusCode: 502, reasonPhrase: "Bad Gateway", body: "proxy upstream error\n")
         } catch {
             logger.log(
                 StructuredLogEvent(
@@ -879,6 +835,135 @@ public final class HLSCacheFacade: @unchecked Sendable {
                 )
             )
             return .text(statusCode: 502, reasonPhrase: "Bad Gateway", body: "proxy upstream error\n")
+        }
+    }
+
+    @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+    private func makeProxyResponseBodyStream(
+        coordinator: ProxyCacheCoordinator,
+        resourceID: ResourceID,
+        remoteURL: URL,
+        headers: [String: String],
+        rangeHeader: String?,
+        totalLength: Int64,
+        contentType: String?,
+        allowNetworkFallback: Bool,
+        correlationID: String,
+        alias: String,
+        kind: String,
+        continuityDecision: String,
+        offlineModeEnabled: Bool,
+        requestPath: String,
+        requestMethod: String
+    ) -> @Sendable (_ emitChunk: @escaping (Data) async throws -> Void) async throws -> Void {
+        { [logger, networkSession] emitChunk in
+            do {
+                let networkClient = URLSessionNetworkClient(session: networkSession)
+                let result = try await coordinator.serveStreaming(
+                    resourceID: resourceID,
+                    remoteURL: remoteURL,
+                    headers: headers,
+                    rangeHeader: rangeHeader,
+                    totalLength: totalLength,
+                    contentType: contentType,
+                    allowNetworkFallback: allowNetworkFallback,
+                    networkClient: networkClient,
+                    correlationID: correlationID
+                ) { _, chunk in
+                    try await emitChunk(chunk)
+                }
+
+                logger.log(
+                    StructuredLogEvent(
+                        subsystem: "HLSCache",
+                        operation: "proxyRequest",
+                        level: .debug,
+                        correlationID: correlationID,
+                        metadata: [
+                            "alias": alias,
+                            "kind": kind,
+                            "status": String(result.response.statusCode),
+                            "bytes": String(result.totalBytesStreamed),
+                            "continuityDecision": continuityDecision,
+                            "offlineMode": String(offlineModeEnabled)
+                        ]
+                    )
+                )
+            } catch let error as ProxyServerHTTPBodyStreamError {
+                throw error
+            } catch let error as ProxyCacheCoordinatorError {
+                if case let .offlineCacheMiss(range) = error {
+                    logger.log(
+                        StructuredLogEvent(
+                            subsystem: "HLSCache",
+                            operation: "proxyRequest",
+                            level: .warning,
+                            correlationID: correlationID,
+                            metadata: [
+                                "alias": alias,
+                                "kind": kind,
+                                "path": requestPath,
+                                "method": requestMethod,
+                                "status": "503",
+                                "offlineMode": "true",
+                                "missingStart": String(range.start),
+                                "missingEndExclusive": String(range.endExclusive)
+                            ]
+                        )
+                    )
+                    throw ProxyServerHTTPBodyStreamError.fallbackResponse(
+                        statusCode: 503,
+                        reasonPhrase: "Service Unavailable",
+                        body: "offline cache miss\n"
+                    )
+                }
+
+                logger.log(
+                    StructuredLogEvent(
+                        subsystem: "HLSCache",
+                        operation: "proxyRequest",
+                        level: .error,
+                        correlationID: correlationID,
+                        metadata: [
+                            "alias": alias,
+                            "kind": kind,
+                            "path": requestPath,
+                            "method": requestMethod,
+                            "status": "502",
+                            "offlineMode": String(offlineModeEnabled),
+                            "error": String(describing: error)
+                        ]
+                    )
+                )
+                throw ProxyServerHTTPBodyStreamError.fallbackResponse(
+                    statusCode: 502,
+                    reasonPhrase: "Bad Gateway",
+                    body: "proxy upstream error\n"
+                )
+            } catch {
+                logger.log(
+                    StructuredLogEvent(
+                        subsystem: "HLSCache",
+                        operation: "proxyRequest",
+                        level: .error,
+                        correlationID: correlationID,
+                        metadata: [
+                            "alias": alias,
+                            "kind": kind,
+                            "path": requestPath,
+                            "method": requestMethod,
+                            "status": "502",
+                            "offlineMode": String(offlineModeEnabled),
+                            "error": String(describing: error)
+                        ]
+                    )
+                )
+                throw ProxyServerHTTPBodyStreamError.fallbackResponse(
+                    statusCode: 502,
+                    reasonPhrase: "Bad Gateway",
+                    body: "proxy upstream error\n"
+                )
+            }
         }
     }
 
