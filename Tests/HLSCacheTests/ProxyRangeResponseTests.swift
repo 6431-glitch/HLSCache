@@ -56,6 +56,26 @@ import Testing
     #expect(response.headers["Content-Range"] == nil)
 }
 
+@Test func proxyRangeResponse_malformedMultiRangeHeader_fallsBackTo200FullContent() throws {
+    let response = try ProxyRangeResponse.make(rangeHeader: "bytes=0-10,20-30", totalLength: 350)
+
+    #expect(response.statusCode == 200)
+    #expect(response.requestedRange == ByteRange(start: 0, endExclusive: 350))
+    #expect(response.headers["Accept-Ranges"] == "bytes")
+    #expect(response.headers["Content-Length"] == "350")
+    #expect(response.headers["Content-Range"] == nil)
+}
+
+@Test func proxyRangeResponse_whitespaceOnlyRangeHeader_fallsBackTo200FullContent() throws {
+    let response = try ProxyRangeResponse.make(rangeHeader: "   ", totalLength: 350)
+
+    #expect(response.statusCode == 200)
+    #expect(response.requestedRange == ByteRange(start: 0, endExclusive: 350))
+    #expect(response.headers["Accept-Ranges"] == "bytes")
+    #expect(response.headers["Content-Length"] == "350")
+    #expect(response.headers["Content-Range"] == nil)
+}
+
 @Test func proxyRangeResponse_unsatisfiableRange_returns416WithRequiredHeaders() throws {
     let response = try ProxyRangeResponse.make(rangeHeader: "bytes=400-500", totalLength: 350)
 

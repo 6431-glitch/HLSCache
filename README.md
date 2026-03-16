@@ -160,7 +160,9 @@ Remote URLs are not used as identity because HLS URLs frequently change due to s
 
 All HTTP responses follow correct Range semantics, including:
 
+- `200 OK` full-content fallback for missing/empty/malformed `Range` headers
 - `206 Partial Content`
+- `416 Range Not Satisfiable` with `Content-Range: bytes */<totalLength>`
 - `Content-Range`
 - `Accept-Ranges`
 - Accurate `Content-Length`
@@ -353,7 +355,7 @@ Playlist rewrite helper available:
   Rewrites segment URIs, `EXT-X-MAP` `URI`, and `EXT-X-KEY` `URI` (except `METHOD=NONE`).
 - `HLSPlaylistParser.parse(_:playlistURL:)` to extract media segment and `EXT-X-KEY` remote URLs
 - `HLSDownloadPlanner.plan(...)` to build full playlist/segment/key/map download plans and produce proxy-rewritten media playlists
-- `ProxyRangeResponse.make(rangeHeader:totalLength:)` for AVPlayer-compatible 200/206 range response metadata
+- `ProxyRangeResponse.make(rangeHeader:totalLength:)` for AVPlayer-compatible `200`/`206`/`416` range response metadata (`200` fallback on malformed range syntax, `416` on unsatisfiable ranges)
 - `ProxyCacheCoordinator.serve(...)` for mixed cache/network streaming over `CoreCache` read plans
   Set `allowNetworkFallback: false` to enforce disk-only serving (offline playback mode).
 - Proxy route parsing accepts optional leading path prefixes and resolves routes from the trailing

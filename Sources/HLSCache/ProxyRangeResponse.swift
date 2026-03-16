@@ -3,7 +3,6 @@ import Foundation
 
 public enum ProxyRangeResponseError: Error, Equatable, Sendable {
     case invalidTotalLength(Int64)
-    case invalidRangeHeader(String)
 }
 
 public struct ProxyRangeResponse: Equatable, Sendable {
@@ -26,6 +25,7 @@ public struct ProxyRangeResponse: Equatable, Sendable {
     /// - Valid satisfiable `Range` header -> `206` with `Content-Range`.
     /// - Malformed/invalid `Range` header -> treated as no range (`200` full-content).
     /// - Unsatisfiable `Range` header -> `416` with `Content-Range: bytes */<totalLength>`.
+    /// Throws only when `totalLength` is negative (`ProxyRangeResponseError.invalidTotalLength`).
     public static func make(rangeHeader: String?, totalLength: Int64) throws -> ProxyRangeResponse {
         guard totalLength >= 0 else {
             throw ProxyRangeResponseError.invalidTotalLength(totalLength)
