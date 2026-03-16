@@ -81,6 +81,64 @@ public enum EvictionRecencyPolicy: String, Equatable, Sendable {
     case leastRecentlyAccessed
 }
 
+public enum StartupReconciliationMode: String, Equatable, Sendable {
+    case synchronous
+    case asynchronous
+}
+
+public enum StartupReconciliationState: String, Equatable, Sendable {
+    case pending
+    case running
+    case completed
+    case failed
+}
+
+public struct StartupReconciliationStatus: Equatable, Sendable {
+    public let mode: StartupReconciliationMode
+    public let state: StartupReconciliationState
+    public let startedAt: Date?
+    public let completedAt: Date?
+    public let durationMilliseconds: Int64?
+    public let totalUnits: Int
+    public let processedUnits: Int
+    public let orphanManifestCount: Int
+    public let orphanDataCount: Int
+    public let purgedOrphanDataBytes: Int64
+    public let recoveredCorruptedManifestCount: Int
+    public let purgedCorruptedManifestDataBytes: Int64
+    public let errorDescription: String?
+
+    public init(
+        mode: StartupReconciliationMode,
+        state: StartupReconciliationState,
+        startedAt: Date? = nil,
+        completedAt: Date? = nil,
+        durationMilliseconds: Int64? = nil,
+        totalUnits: Int = 0,
+        processedUnits: Int = 0,
+        orphanManifestCount: Int = 0,
+        orphanDataCount: Int = 0,
+        purgedOrphanDataBytes: Int64 = 0,
+        recoveredCorruptedManifestCount: Int = 0,
+        purgedCorruptedManifestDataBytes: Int64 = 0,
+        errorDescription: String? = nil
+    ) {
+        self.mode = mode
+        self.state = state
+        self.startedAt = startedAt
+        self.completedAt = completedAt
+        self.durationMilliseconds = durationMilliseconds
+        self.totalUnits = totalUnits
+        self.processedUnits = processedUnits
+        self.orphanManifestCount = orphanManifestCount
+        self.orphanDataCount = orphanDataCount
+        self.purgedOrphanDataBytes = purgedOrphanDataBytes
+        self.recoveredCorruptedManifestCount = recoveredCorruptedManifestCount
+        self.purgedCorruptedManifestDataBytes = purgedCorruptedManifestDataBytes
+        self.errorDescription = errorDescription
+    }
+}
+
 public final class CoreCache: @unchecked Sendable {
     private struct PlanMetricsAccumulator {
         var totalRequests: Int64 = 0
@@ -103,12 +161,18 @@ public final class CoreCache: @unchecked Sendable {
     private let diskQuotaBytes: Int64?
     private let evictionRecencyPolicy: EvictionRecencyPolicy
     private let logger: any StructuredLogger
+    private let startupReconciliationMode: StartupReconciliationMode
+    private let startupReconciliationProgressInterval: Int
+    private let startupReconciliationCompletionGroup = DispatchGroup()
+    private var startupReconciliationStatusValue: StartupReconciliationStatus
     private var planMetrics = PlanMetricsAccumulator()
 
     public init(
         baseDirectory: URL,
         diskQuotaBytes: Int64? = nil,
         evictionRecencyPolicy: EvictionRecencyPolicy = .leastRecentlyUpdated,
+        startupReconciliationMode: StartupReconciliationMode = .synchronous,
+        startupReconciliationProgressInterval: Int = 128,
         logger: any StructuredLogger = NoopStructuredLogger()
     ) throws {
         self.directoryLock = try DirectoryLock(baseDirectory: baseDirectory)
@@ -117,10 +181,35 @@ public final class CoreCache: @unchecked Sendable {
         self.manifestStore = ManifestStore(baseDirectory: baseDirectory, logger: logger)
         self.diskQuotaBytes = diskQuotaBytes.map { max($0, 0) }
         self.evictionRecencyPolicy = evictionRecencyPolicy
+        self.startupReconciliationMode = startupReconciliationMode
+        self.startupReconciliationProgressInterval = max(1, startupReconciliationProgressInterval)
+        self.startupReconciliationStatusValue = StartupReconciliationStatus(
+            mode: startupReconciliationMode,
+            state: .pending
+        )
 
-        queue.sync(flags: .barrier) {
-            reconcileStorageOnStartup()
+        startupReconciliationCompletionGroup.enter()
+        switch startupReconciliationMode {
+        case .synchronous:
+            queue.sync(flags: .barrier) {
+                runStartupReconciliation()
+            }
+        case .asynchronous:
+            queue.async(flags: .barrier) {
+                self.runStartupReconciliation()
+            }
         }
+    }
+
+    public func startupReconciliationStatus() -> StartupReconciliationStatus {
+        queue.sync {
+            startupReconciliationStatusValue
+        }
+    }
+
+    @discardableResult
+    public func waitForStartupReconciliation(timeout: TimeInterval = 30) -> Bool {
+        startupReconciliationCompletionGroup.wait(timeout: .now() + max(timeout, 0)) == .success
     }
 
     public func plan(
@@ -510,8 +599,20 @@ public final class CoreCache: @unchecked Sendable {
         }
     }
 
-    private func reconcileStorageOnStartup() {
+    private func runStartupReconciliation() {
         let correlationID = UUID().uuidString
+        let startedAt = Date()
+
+        // Initialization enters the completion group once; every path must leave exactly once.
+        defer {
+            startupReconciliationCompletionGroup.leave()
+        }
+
+        startupReconciliationStatusValue = StartupReconciliationStatus(
+            mode: startupReconciliationMode,
+            state: .running,
+            startedAt: startedAt
+        )
 
         do {
             let manifestScan = manifestStore.scanManifestResourceIDs()
@@ -520,11 +621,85 @@ public final class CoreCache: @unchecked Sendable {
 
             let orphanManifestIDs = manifestIDs.subtracting(dataIDs).sorted(by: Self.resourceIDSort)
             let orphanDataIDs = dataIDs.subtracting(manifestIDs).sorted(by: Self.resourceIDSort)
+            let totalUnits = orphanManifestIDs.count + orphanDataIDs.count
 
             var purgedOrphanDataBytes: Int64 = 0
+            var processedUnits = 0
+
+            logger.log(
+                StructuredLogEvent(
+                    subsystem: "CoreCache",
+                    operation: "reconcileStartup",
+                    level: .info,
+                    correlationID: correlationID,
+                    metadata: [
+                        "action": "start",
+                        "mode": startupReconciliationMode.rawValue,
+                        "state": StartupReconciliationState.running.rawValue,
+                        "totalUnits": String(totalUnits),
+                        "orphanManifestCount": String(orphanManifestIDs.count),
+                        "orphanDataCount": String(orphanDataIDs.count)
+                    ]
+                )
+            )
+
+            startupReconciliationStatusValue = StartupReconciliationStatus(
+                mode: startupReconciliationMode,
+                state: .running,
+                startedAt: startedAt,
+                totalUnits: totalUnits,
+                processedUnits: processedUnits,
+                orphanManifestCount: orphanManifestIDs.count,
+                orphanDataCount: orphanDataIDs.count,
+                purgedOrphanDataBytes: purgedOrphanDataBytes,
+                recoveredCorruptedManifestCount: manifestScan.recoveredCorruptedManifestCount,
+                purgedCorruptedManifestDataBytes: manifestScan.purgedCorruptedManifestDataBytes
+            )
+
+            func emitProgressIfNeeded(force: Bool = false) {
+                guard totalUnits > 0 else {
+                    return
+                }
+                let shouldEmit = force || (processedUnits % startupReconciliationProgressInterval == 0)
+                guard shouldEmit else {
+                    return
+                }
+
+                let elapsedMillis = Int64(Date().timeIntervalSince(startedAt) * 1_000)
+                logger.log(
+                    StructuredLogEvent(
+                        subsystem: "CoreCache",
+                        operation: "reconcileStartup",
+                        level: .info,
+                        correlationID: correlationID,
+                        metadata: [
+                            "action": "progress",
+                            "mode": startupReconciliationMode.rawValue,
+                            "state": StartupReconciliationState.running.rawValue,
+                            "processedUnits": String(processedUnits),
+                            "totalUnits": String(totalUnits),
+                            "elapsedMilliseconds": String(elapsedMillis)
+                        ]
+                    )
+                )
+            }
 
             for resourceID in orphanManifestIDs {
                 try manifestStore.delete(resourceID: resourceID)
+                processedUnits += 1
+                startupReconciliationStatusValue = StartupReconciliationStatus(
+                    mode: startupReconciliationMode,
+                    state: .running,
+                    startedAt: startedAt,
+                    totalUnits: totalUnits,
+                    processedUnits: processedUnits,
+                    orphanManifestCount: orphanManifestIDs.count,
+                    orphanDataCount: orphanDataIDs.count,
+                    purgedOrphanDataBytes: purgedOrphanDataBytes,
+                    recoveredCorruptedManifestCount: manifestScan.recoveredCorruptedManifestCount,
+                    purgedCorruptedManifestDataBytes: manifestScan.purgedCorruptedManifestDataBytes
+                )
+                emitProgressIfNeeded()
                 logger.log(
                     StructuredLogEvent(
                         subsystem: "CoreCache",
@@ -544,6 +719,20 @@ public final class CoreCache: @unchecked Sendable {
                 let bytes = try diskStore.fileLength(for: resourceID)
                 try diskStore.remove(resourceID: resourceID)
                 purgedOrphanDataBytes += bytes
+                processedUnits += 1
+                startupReconciliationStatusValue = StartupReconciliationStatus(
+                    mode: startupReconciliationMode,
+                    state: .running,
+                    startedAt: startedAt,
+                    totalUnits: totalUnits,
+                    processedUnits: processedUnits,
+                    orphanManifestCount: orphanManifestIDs.count,
+                    orphanDataCount: orphanDataIDs.count,
+                    purgedOrphanDataBytes: purgedOrphanDataBytes,
+                    recoveredCorruptedManifestCount: manifestScan.recoveredCorruptedManifestCount,
+                    purgedCorruptedManifestDataBytes: manifestScan.purgedCorruptedManifestDataBytes
+                )
+                emitProgressIfNeeded()
                 logger.log(
                     StructuredLogEvent(
                         subsystem: "CoreCache",
@@ -560,6 +749,25 @@ public final class CoreCache: @unchecked Sendable {
                 )
             }
 
+            emitProgressIfNeeded(force: true)
+            let completedAt = Date()
+            let durationMillis = Int64(completedAt.timeIntervalSince(startedAt) * 1_000)
+
+            startupReconciliationStatusValue = StartupReconciliationStatus(
+                mode: startupReconciliationMode,
+                state: .completed,
+                startedAt: startedAt,
+                completedAt: completedAt,
+                durationMilliseconds: durationMillis,
+                totalUnits: totalUnits,
+                processedUnits: processedUnits,
+                orphanManifestCount: orphanManifestIDs.count,
+                orphanDataCount: orphanDataIDs.count,
+                purgedOrphanDataBytes: purgedOrphanDataBytes,
+                recoveredCorruptedManifestCount: manifestScan.recoveredCorruptedManifestCount,
+                purgedCorruptedManifestDataBytes: manifestScan.purgedCorruptedManifestDataBytes
+            )
+
             logger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
@@ -568,6 +776,11 @@ public final class CoreCache: @unchecked Sendable {
                     correlationID: correlationID,
                     metadata: [
                         "action": "summary",
+                        "mode": startupReconciliationMode.rawValue,
+                        "state": StartupReconciliationState.completed.rawValue,
+                        "durationMilliseconds": String(durationMillis),
+                        "processedUnits": String(processedUnits),
+                        "totalUnits": String(totalUnits),
                         "orphanManifestCount": String(orphanManifestIDs.count),
                         "orphanDataCount": String(orphanDataIDs.count),
                         "purgedOrphanDataBytes": String(purgedOrphanDataBytes),
@@ -577,6 +790,24 @@ public final class CoreCache: @unchecked Sendable {
                 )
             )
         } catch {
+            let completedAt = Date()
+            let durationMillis = Int64(completedAt.timeIntervalSince(startedAt) * 1_000)
+            let previous = startupReconciliationStatusValue
+            startupReconciliationStatusValue = StartupReconciliationStatus(
+                mode: startupReconciliationMode,
+                state: .failed,
+                startedAt: previous.startedAt ?? startedAt,
+                completedAt: completedAt,
+                durationMilliseconds: durationMillis,
+                totalUnits: previous.totalUnits,
+                processedUnits: previous.processedUnits,
+                orphanManifestCount: previous.orphanManifestCount,
+                orphanDataCount: previous.orphanDataCount,
+                purgedOrphanDataBytes: previous.purgedOrphanDataBytes,
+                recoveredCorruptedManifestCount: previous.recoveredCorruptedManifestCount,
+                purgedCorruptedManifestDataBytes: previous.purgedCorruptedManifestDataBytes,
+                errorDescription: String(describing: error)
+            )
             logger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
@@ -585,6 +816,11 @@ public final class CoreCache: @unchecked Sendable {
                     correlationID: correlationID,
                     metadata: [
                         "action": "failed",
+                        "mode": startupReconciliationMode.rawValue,
+                        "state": StartupReconciliationState.failed.rawValue,
+                        "durationMilliseconds": String(durationMillis),
+                        "processedUnits": String(previous.processedUnits),
+                        "totalUnits": String(previous.totalUnits),
                         "error": String(describing: error)
                     ]
                 )

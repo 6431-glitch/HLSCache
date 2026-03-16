@@ -55,6 +55,8 @@ public final class HLSCacheFacade: @unchecked Sendable {
     private let aliasRegistry: AliasRegistry
     private let logger: any StructuredLogger
     private let networkSession: URLSession
+    private let coreCacheStartupReconciliationMode: StartupReconciliationMode
+    private let coreCacheStartupReconciliationProgressInterval: Int
     private let queue = DispatchQueue(label: "HLSCache.Facade", attributes: .concurrent)
     private let proxyRuntime = ProxyServerRuntime()
 
@@ -66,12 +68,16 @@ public final class HLSCacheFacade: @unchecked Sendable {
     public init(
         baseDirectory: URL,
         logger: any StructuredLogger = NoopStructuredLogger(),
+        coreCacheStartupReconciliationMode: StartupReconciliationMode = .synchronous,
+        coreCacheStartupReconciliationProgressInterval: Int = 128,
         networkSession: URLSession = .shared
     ) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
         self.aliasRegistry = AliasRegistry(baseDirectory: baseDirectory, logger: logger)
         self.logger = logger
+        self.coreCacheStartupReconciliationMode = coreCacheStartupReconciliationMode
+        self.coreCacheStartupReconciliationProgressInterval = max(1, coreCacheStartupReconciliationProgressInterval)
         self.networkSession = networkSession
     }
 
@@ -634,7 +640,12 @@ public final class HLSCacheFacade: @unchecked Sendable {
         let continuityDecision: String
         let requestHeaders = asset.headers ?? [:]
         do {
-            let cache = try CoreCache(baseDirectory: baseDirectory, logger: logger)
+            let cache = try CoreCache(
+                baseDirectory: baseDirectory,
+                startupReconciliationMode: coreCacheStartupReconciliationMode,
+                startupReconciliationProgressInterval: coreCacheStartupReconciliationProgressInterval,
+                logger: logger
+            )
             coordinator = ProxyCacheCoordinator(
                 coreCache: cache,
                 transformPipeline: makeTransformPipeline()
