@@ -45,6 +45,7 @@ struct ProxyServerHTTPRequest: Sendable {
 
 enum ProxyServerHTTPBodyStreamError: Error, Sendable {
     case fallbackResponse(statusCode: Int, reasonPhrase: String, body: String)
+    case fallbackResponseWithHeaders(statusCode: Int, reasonPhrase: String, headers: [String: String], body: String)
     case streamingFailed(reason: String)
 }
 
@@ -496,6 +497,17 @@ private final class NetworkProxyServerRuntime: @unchecked Sendable {
                 statusCode: statusCode,
                 reasonPhrase: reasonPhrase,
                 headers: ["Content-Type": "text/plain; charset=utf-8"],
+                bodyData: Data(body.utf8)
+            )
+        case let .fallbackResponseWithHeaders(statusCode, reasonPhrase, headers, body):
+            var resolvedHeaders = headers
+            if resolvedHeaders["Content-Type"] == nil {
+                resolvedHeaders["Content-Type"] = "text/plain; charset=utf-8"
+            }
+            return FallbackHTTPResponse(
+                statusCode: statusCode,
+                reasonPhrase: reasonPhrase,
+                headers: resolvedHeaders,
                 bodyData: Data(body.utf8)
             )
         case .streamingFailed:

@@ -167,6 +167,12 @@ All HTTP responses follow correct Range semantics, including:
 - `Accept-Ranges`
 - Accurate `Content-Length`
 
+Offline-mode miss diagnostics are deterministic for machine parsing:
+
+- HTTP `503` body: `offline cache miss`
+- Headers: `X-HLSCache-Diagnostic-Schema=1`, `X-HLSCache-Error-Code=offline_cache_miss`,
+  `X-HLSCache-Offline-Mode=true`, `X-HLSCache-Missing-Start`, `X-HLSCache-Missing-End-Exclusive`
+
 ---
 
 ## Offline Download Flow
@@ -407,7 +413,7 @@ swift run HLSCacheCLI --output-format json proxy status
 
 Proxy command output contract:
 - `proxy status` emits deterministic `proxy.*` fields for automation parsing:
-  `proxy.state`, `proxy.host`, `proxy.port`, `proxy.base_url`.
+  `proxy.state`, `proxy.host`, `proxy.port`, `proxy.base_url`, `proxy.offline_mode`.
 - `proxy.state` reports lifecycle values directly: `starting`, `running`, `stopping`, `stopped`.
 - Unavailable runtime fields are explicitly rendered as `unavailable`.
 - Exit codes:
@@ -422,7 +428,7 @@ JSON output mode (`--output-format json`):
   - `aliases` array items include `alias`, `assetID`, `remoteURL`, `updated`, `cacheBytes`.
 - `proxy status` JSON payload:
   - `command` = `"proxy.status"`
-  - required fields: `state`, `host`, `port`, `baseURL`.
+  - required fields: `state`, `host`, `port`, `baseURL`, `offlineMode`.
 - `proxy restart` JSON payload:
   - `command` = `"proxy.restart"`
   - `result` (`success` or `restart_failure`), `attemptedHost`, `attemptedPort`, `startupError`, and nested `status`.
@@ -551,6 +557,7 @@ Validation command for local CLI changes:
 
 - No full buffering of large media files
 - Correct HTTP Range handling
+- Machine-parseable offline diagnostics (`X-HLSCache-*` response metadata + structured logs)
 - Thread-safe concurrent reads and writes
 - Atomic manifest updates
 - Background-safe downloading

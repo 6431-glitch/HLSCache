@@ -28,6 +28,7 @@ private struct CLIProxyStatusJSONPayload: Encodable {
     let host: String
     let port: String
     let baseURL: String
+    let offlineMode: Bool
 }
 
 private struct CLIProxyRestartJSONPayload: Encodable {
@@ -525,6 +526,7 @@ struct CLIApp {
         io.writeLine("Host: \(status.host ?? "(unavailable)")")
         io.writeLine("Port: \(status.port.map(String.init) ?? "(unavailable)")")
         io.writeLine("Base URL: \(status.baseURL?.absoluteString ?? "(unavailable)")")
+        io.writeLine("Offline mode: \(status.offlineModeEnabled ? "enabled" : "disabled")")
     }
 
     private func writeProxyStatusContract(_ status: ProxyServerStatus) {
@@ -532,6 +534,7 @@ struct CLIApp {
         io.writeLine("proxy.host=\(status.host ?? "unavailable")")
         io.writeLine("proxy.port=\(status.port.map(String.init) ?? "unavailable")")
         io.writeLine("proxy.base_url=\(status.baseURL?.absoluteString ?? "unavailable")")
+        io.writeLine("proxy.offline_mode=\(status.offlineModeEnabled)")
     }
 
     private func proxyStatusExitCode(_ status: ProxyServerStatus) -> Int32 {
@@ -551,7 +554,8 @@ struct CLIApp {
             state: status.state.rawValue,
             host: status.host ?? "unavailable",
             port: status.port.map(String.init) ?? "unavailable",
-            baseURL: status.baseURL?.absoluteString ?? "unavailable"
+            baseURL: status.baseURL?.absoluteString ?? "unavailable",
+            offlineMode: status.offlineModeEnabled
         )
     }
 

@@ -528,6 +528,7 @@ private func parseJSONObject(_ line: String) throws -> [String: Any] {
     #expect(io.outputLines.contains { $0 == "proxy.host=127.0.0.1" })
     #expect(io.outputLines.contains { $0.hasPrefix("proxy.port=") && !$0.hasSuffix("unavailable") })
     #expect(io.outputLines.contains { $0.hasPrefix("proxy.base_url=http://127.0.0.1:") })
+    #expect(io.outputLines.contains { $0 == "proxy.offline_mode=false" })
 }
 
 @Test func cliListCommand_jsonOutput_emitsVersionedSchema() throws {
@@ -573,6 +574,7 @@ private func parseJSONObject(_ line: String) throws -> [String: Any] {
     #expect(payload["host"] as? String == "127.0.0.1")
     #expect((payload["port"] as? String)?.isEmpty == false)
     #expect((payload["baseURL"] as? String)?.hasPrefix("http://127.0.0.1:") == true)
+    #expect(payload["offlineMode"] as? Bool == false)
 }
 
 @Test func cliProxyCommand_status_jsonOutput_whenUnavailable_returnsRuntimeUnavailable() throws {
@@ -596,6 +598,7 @@ private func parseJSONObject(_ line: String) throws -> [String: Any] {
     #expect(payload["host"] as? String == "unavailable")
     #expect(payload["port"] as? String == "unavailable")
     #expect(payload["baseURL"] as? String == "unavailable")
+    #expect(payload["offlineMode"] as? Bool == false)
 }
 
 @Test func cliProxyCommand_status_whenUnavailable_returnsRuntimeUnavailableCode() throws {
@@ -614,6 +617,7 @@ private func parseJSONObject(_ line: String) throws -> [String: Any] {
     #expect(io.outputLines.contains { $0 == "proxy.host=unavailable" })
     #expect(io.outputLines.contains { $0 == "proxy.port=unavailable" })
     #expect(io.outputLines.contains { $0 == "proxy.base_url=unavailable" })
+    #expect(io.outputLines.contains { $0 == "proxy.offline_mode=false" })
 }
 
 @Test func cliProxyCommand_status_whenStarting_emitsLifecycleStateInStableFields() throws {
@@ -664,6 +668,39 @@ private func parseJSONObject(_ line: String) throws -> [String: Any] {
     #expect(payload["schemaVersion"] as? String == "1")
     #expect(payload["command"] as? String == "proxy.status")
     #expect(payload["state"] as? String == "stopping")
+    #expect(payload["offlineMode"] as? Bool == false)
+}
+
+@Test func cliProxyCommand_status_whenOfflineModeEnabled_emitsEnabledStateInTextAndJSON() throws {
+    let directory = try makeCLITempDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let runningURL = try #require(URL(string: "http://127.0.0.1:8080"))
+    let enabledStatus = ProxyServerStatus(
+        isRunning: true,
+        host: "127.0.0.1",
+        port: 8080,
+        baseURL: runningURL,
+        offlineModeEnabled: true
+    )
+
+    let textContext = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory))
+    let textIO = FakeIO(inputs: [])
+    let textApp = CLIApp(context: textContext, io: textIO, proxyStatusProvider: { enabledStatus })
+    let textExitCode = textApp.run(command: .proxy(ProxyCommand(action: .status)))
+    #expect(textExitCode == 0)
+    #expect(textIO.outputLines.contains { $0 == "Offline mode: enabled" })
+    #expect(textIO.outputLines.contains { $0 == "proxy.offline_mode=true" })
+
+    let jsonContext = try CLIAppContext(arguments: CLIArguments(baseDirectory: directory, outputFormat: .json))
+    let jsonIO = FakeIO(inputs: [])
+    let jsonApp = CLIApp(context: jsonContext, io: jsonIO, proxyStatusProvider: { enabledStatus })
+    let jsonExitCode = jsonApp.run(command: .proxy(ProxyCommand(action: .status)))
+    #expect(jsonExitCode == 0)
+
+    let line = try #require(jsonIO.outputLines.last)
+    let payload = try parseJSONObject(line)
+    #expect(payload["offlineMode"] as? Bool == true)
 }
 
 @Test func cliProxyCommand_restartFailure_returnsDeterministicExitCode() throws {
@@ -744,6 +781,7 @@ private func parseJSONObject(_ line: String) throws -> [String: Any] {
     #expect(statusPayload["host"] as? String == "unavailable")
     #expect(statusPayload["port"] as? String == "unavailable")
     #expect(statusPayload["baseURL"] as? String == "unavailable")
+    #expect(statusPayload["offlineMode"] as? Bool == false)
 }
 
 @Test func cliProxyMenu_statusAction_reportsRuntimeMetadataWhenRunning() throws {
@@ -767,6 +805,7 @@ private func parseJSONObject(_ line: String) throws -> [String: Any] {
     #expect(io.outputLines.contains { $0.contains("Host: 127.0.0.1") })
     #expect(io.outputLines.contains { $0.contains("Port: \(context.serverBaseURL.port.map(String.init) ?? "(unavailable)")") })
     #expect(io.outputLines.contains { $0.contains("Base URL: \(context.serverBaseURL.absoluteString)") })
+    #expect(io.outputLines.contains { $0.contains("Offline mode: disabled") })
     #expect(io.outputLines.contains { $0.contains("Registered aliases: 1") })
 }
 
@@ -787,6 +826,7 @@ private func parseJSONObject(_ line: String) throws -> [String: Any] {
     #expect(io.outputLines.contains { $0.contains("Host: (unavailable)") })
     #expect(io.outputLines.contains { $0.contains("Port: (unavailable)") })
     #expect(io.outputLines.contains { $0.contains("Base URL: (unavailable)") })
+    #expect(io.outputLines.contains { $0.contains("Offline mode: disabled") })
     #expect(io.outputLines.contains { $0.contains("Proxy server is not running.") })
     #expect(io.outputLines.contains { $0.contains("Goodbye.") })
 }

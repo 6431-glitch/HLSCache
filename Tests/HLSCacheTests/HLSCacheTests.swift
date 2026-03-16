@@ -88,6 +88,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(initial.host == nil)
     #expect(initial.port == nil)
     #expect(initial.baseURL == nil)
+    #expect(initial.offlineModeEnabled == false)
 
     _ = try facade.startServer(host: "127.0.0.1", port: 0)
     let started = facade.proxyStatus()
@@ -97,6 +98,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect((started.port ?? 0) > 0)
     #expect(started.baseURL?.host == "127.0.0.1")
     #expect(started.baseURL?.port == started.port)
+    #expect(started.offlineModeEnabled == false)
 
     _ = try facade.startServer(host: "127.0.0.1", port: 19999)
     let restartedWithoutStop = facade.proxyStatus()
@@ -109,6 +111,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(stopped.host == nil)
     #expect(stopped.port == nil)
     #expect(stopped.baseURL == nil)
+    #expect(stopped.offlineModeEnabled == false)
 
     _ = try facade.startServer(port: 0)
     let defaultPort = facade.proxyStatus()
@@ -118,6 +121,32 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect((defaultPort.port ?? 0) > 0)
     #expect(defaultPort.baseURL?.host == "127.0.0.1")
     #expect(defaultPort.baseURL?.port == defaultPort.port)
+    #expect(defaultPort.offlineModeEnabled == false)
+}
+
+@Test func facade_proxyStatus_reportsOfflineModeEnabledAndDisabled() throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-proxy-status-offline")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let facade = HLSCacheFacade(baseDirectory: directory)
+    _ = try facade.startServer(host: "127.0.0.1", port: 0)
+    defer { facade.stopServer() }
+
+    let initiallyDisabled = facade.proxyStatus()
+    #expect(initiallyDisabled.isRunning == true)
+    #expect(initiallyDisabled.offlineModeEnabled == false)
+
+    let enabled = facade.setOfflinePlaybackMode(enabled: true)
+    #expect(enabled == true)
+    let enabledStatus = facade.proxyStatus()
+    #expect(enabledStatus.isRunning == true)
+    #expect(enabledStatus.offlineModeEnabled == true)
+
+    let disabled = facade.setOfflinePlaybackMode(enabled: false)
+    #expect(disabled == false)
+    let disabledStatus = facade.proxyStatus()
+    #expect(disabledStatus.isRunning == true)
+    #expect(disabledStatus.offlineModeEnabled == false)
 }
 
 @Test func facade_updateRemoteURL_preservesAliasProxyAndExistingCacheData() throws {
@@ -295,7 +324,8 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     }
     defer { RotationContinuityOriginURLProtocol.resetHandler() }
 
-    let facade = HLSCacheFacade(baseDirectory: directory, networkSession: originSession)
+    let logger = RecordingStructuredLogger()
+    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger, networkSession: originSession)
     _ = try facade.register(
         alias: "MDROT2",
         assetID: "asset-rotation-policy",
@@ -908,7 +938,8 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     }
     defer { ProxyRuntimeOriginURLProtocol.resetHandler() }
 
-    let facade = HLSCacheFacade(baseDirectory: directory, networkSession: originSession)
+    let logger = RecordingStructuredLogger()
+    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger, networkSession: originSession)
     _ = try facade.register(
         alias: "MDRUNTIME",
         assetID: "asset-runtime",
@@ -1042,7 +1073,8 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     }
     defer { RewrittenRouteOriginURLProtocol.resetHandler() }
 
-    let facade = HLSCacheFacade(baseDirectory: directory, networkSession: originSession)
+    let logger = RecordingStructuredLogger()
+    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger, networkSession: originSession)
     _ = try facade.register(
         alias: "MDPLAY",
         assetID: "asset-playback",
@@ -1352,7 +1384,8 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     }
     defer { OfflineModeOriginURLProtocol.resetHandler() }
 
-    let facade = HLSCacheFacade(baseDirectory: directory, networkSession: originSession)
+    let logger = RecordingStructuredLogger()
+    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger, networkSession: originSession)
     _ = try facade.register(
         alias: "MDOFFLINE",
         assetID: "asset-offline",
@@ -1395,8 +1428,29 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     let (offlineMissData, offlineMissResponse) = try await proxySession.data(from: uncachedProxyURL)
     let offlineMissHTTPResponse = try #require(offlineMissResponse as? HTTPURLResponse)
     #expect(offlineMissHTTPResponse.statusCode == 503)
+    #expect(offlineMissHTTPResponse.value(forHTTPHeaderField: "X-HLSCache-Diagnostic-Schema") == "1")
+    #expect(offlineMissHTTPResponse.value(forHTTPHeaderField: "X-HLSCache-Error-Code") == "offline_cache_miss")
+    #expect(offlineMissHTTPResponse.value(forHTTPHeaderField: "X-HLSCache-Offline-Mode") == "true")
+    #expect(offlineMissHTTPResponse.value(forHTTPHeaderField: "X-HLSCache-Missing-Start") == "0")
+    #expect(offlineMissHTTPResponse.value(forHTTPHeaderField: "X-HLSCache-Missing-End-Exclusive") == "0")
     #expect(String(data: offlineMissData, encoding: .utf8) == "offline cache miss\n")
     #expect(originRequestCounter.totalRequests(for: uncachedSegmentURL) == 0)
+
+    let events = logger.events()
+    let offlineMissEvent = events.first(where: {
+        $0.operation == "proxyRequest"
+            && $0.metadata["alias"] == "MDOFFLINE"
+            && $0.metadata["status"] == "503"
+            && $0.metadata["errorCode"] == "offline_cache_miss"
+    })
+    #expect(offlineMissEvent != nil)
+    if let offlineMissEvent {
+        #expect(offlineMissEvent.level == StructuredLogLevel.warning)
+        #expect(offlineMissEvent.metadata["offlineMode"] == "true")
+        #expect(offlineMissEvent.metadata["diagnosticSchema"] == "1")
+        #expect(offlineMissEvent.metadata["missingStart"] == "0")
+        #expect(offlineMissEvent.metadata["missingEndExclusive"] == "0")
+    }
 }
 
 private final class ProxyRuntimeOriginURLProtocol: URLProtocol, @unchecked Sendable {
