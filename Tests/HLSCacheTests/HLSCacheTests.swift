@@ -3,6 +3,10 @@ import Foundation
 import Testing
 @testable import HLSCache
 
+#if canImport(Darwin)
+import Darwin
+#endif
+
 private struct TestPlugin: HLSCachePlugin {
     let id: String
     let version: String
@@ -643,7 +647,17 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
         }
     )
 
-    let correlatedOperations = Set(events.filter { $0.correlationID == proxyEvent.correlationID }.map(\.operation))
+    var correlatedOperations = Set(events.filter { $0.correlationID == proxyEvent.correlationID }.map(\.operation))
+    if !correlatedOperations.contains("finalizeWrite") {
+        for _ in 0..<50 {
+            usleep(20_000)
+            let refreshed = logger.events()
+            correlatedOperations = Set(refreshed.filter { $0.correlationID == proxyEvent.correlationID }.map(\.operation))
+            if correlatedOperations.contains("finalizeWrite") {
+                break
+            }
+        }
+    }
     #expect(correlatedOperations.contains("plan"))
     #expect(correlatedOperations.contains("write"))
     #expect(correlatedOperations.contains("finalizeWrite"))
@@ -1127,6 +1141,134 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(keyOriginRequestsAfterCacheHitAndHEAD == keyOriginRequestsAfterFirstGET)
 }
 
+@Test func facade_proxyRuntime_streamingTransport_progressiveAcrossNetworkFillPartialHitAndCacheHit() async throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-runtime-streaming-transport")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let rootRemoteURL = try #require(URL(string: "https://origin.example.com/hls/root-streaming.m3u8"))
+    let networkFillURL = try #require(URL(string: "https://origin.example.com/hls/seg-network-fill.ts"))
+    let partialHitURL = try #require(URL(string: "https://origin.example.com/hls/seg-partial-hit.ts"))
+    let payloadSize = 786_432 // 3 x 256 KiB to force multiple range fetches.
+    let networkFillPayload = Data((0..<payloadSize).map { UInt8($0 % 251) })
+    let partialHitPayload = Data((0..<payloadSize).map { UInt8(($0 + 37) % 251) })
+    let originRequestCounter = OriginRequestCounter()
+
+    let originHeaders = ["X-Origin-Token": "token-streaming-transport"]
+    let sessionConfiguration = URLSessionConfiguration.ephemeral
+    sessionConfiguration.protocolClasses = [StreamingTransportOriginURLProtocol.self]
+    let originSession = URLSession(configuration: sessionConfiguration)
+
+    StreamingTransportOriginURLProtocol.setHandler { request in
+        #expect(request.value(forHTTPHeaderField: "X-Origin-Token") == originHeaders["X-Origin-Token"])
+        let url = try #require(request.url)
+        let method = (request.httpMethod ?? "GET").uppercased()
+        originRequestCounter.record(method: method, url: url)
+
+        let payload: Data
+        switch url {
+        case networkFillURL:
+            payload = networkFillPayload
+        case partialHitURL:
+            payload = partialHitPayload
+        default:
+            let response = try #require(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 404,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Length": "0"]
+                )
+            )
+            return (response, Data())
+        }
+
+        if method == "HEAD" {
+            let response = try #require(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: [
+                        "Content-Length": String(payload.count),
+                        "Content-Type": "video/mp2t"
+                    ]
+                )
+            )
+            return (response, Data())
+        }
+
+        let totalLength = Int64(payload.count)
+        let rangeValue = request.value(forHTTPHeaderField: "Range")
+        let parsedRange = rangeValue.flatMap { ByteRange.parseHTTPRange($0, totalLength: totalLength) }
+            ?? ByteRange(start: 0, endExclusive: totalLength)
+        let range = try #require(parsedRange)
+        usleep(600_000)
+        let start = Int(range.start)
+        let endExclusive = Int(range.endExclusive)
+        let slice = Data(payload[start..<endExclusive])
+        let statusCode = rangeValue == nil ? 200 : 206
+
+        var headerFields: [String: String] = [
+            "Content-Length": String(slice.count),
+            "Content-Type": "video/mp2t"
+        ]
+        if statusCode == 206 {
+            headerFields["Content-Range"] = "bytes \(range.start)-\(range.endExclusive - 1)/\(payload.count)"
+        }
+
+        let response = try #require(
+            HTTPURLResponse(
+                url: url,
+                statusCode: statusCode,
+                httpVersion: "HTTP/1.1",
+                headerFields: headerFields
+            )
+        )
+        return (response, slice)
+    }
+    defer { StreamingTransportOriginURLProtocol.resetHandler() }
+
+    let facade = HLSCacheFacade(baseDirectory: directory, networkSession: originSession)
+    _ = try facade.register(
+        alias: "MDSTREAM",
+        assetID: "asset-streaming-transport",
+        remoteURL: rootRemoteURL,
+        headers: originHeaders
+    )
+    _ = try facade.startServer(host: "127.0.0.1", port: 0)
+    defer { facade.stopServer() }
+
+    let networkFillProxyURL = try facade.proxyURL(for: "MDSTREAM", kind: .segment, remoteURL: networkFillURL)
+    let networkFillResult = try performStreamingProbeRequest(URLRequest(url: networkFillProxyURL))
+    #expect(networkFillResult.response.statusCode == 200)
+    #expect(networkFillResult.data == networkFillPayload)
+    #expect(networkFillResult.firstBodyByteDelay < networkFillResult.totalDuration * 0.8)
+
+    let originRequestsAfterNetworkFill = originRequestCounter.totalRequests(for: networkFillURL)
+    #expect(originRequestsAfterNetworkFill >= 3)
+
+    let cacheHitResult = try performStreamingProbeRequest(URLRequest(url: networkFillProxyURL))
+    #expect(cacheHitResult.response.statusCode == 200)
+    #expect(cacheHitResult.data == networkFillPayload)
+    #expect(originRequestCounter.totalRequests(for: networkFillURL) == originRequestsAfterNetworkFill)
+    #expect(cacheHitResult.firstBodyByteDelay < cacheHitResult.totalDuration * 0.8)
+
+    let partialHitProxyURL = try facade.proxyURL(for: "MDSTREAM", kind: .segment, remoteURL: partialHitURL)
+    var seedRequest = URLRequest(url: partialHitProxyURL)
+    seedRequest.setValue("bytes=0-262143", forHTTPHeaderField: "Range")
+    let partialSeedResult = try performStreamingProbeRequest(seedRequest)
+    #expect(partialSeedResult.response.statusCode == 206)
+    #expect(partialSeedResult.data == Data(partialHitPayload[0..<262_144]))
+
+    let originRequestsAfterPartialSeed = originRequestCounter.totalRequests(for: partialHitURL)
+
+    let partialHitResult = try performStreamingProbeRequest(URLRequest(url: partialHitProxyURL))
+    #expect(partialHitResult.response.statusCode == 200)
+    #expect(partialHitResult.data == partialHitPayload)
+    #expect(originRequestCounter.totalRequests(for: partialHitURL) > originRequestsAfterPartialSeed)
+    #expect(partialHitResult.firstBodyByteDelay < partialHitResult.totalDuration * 0.7)
+}
+
 @Test func facade_proxyRuntime_offlineMode_servesCachedDataAndFailsCacheMissWithoutNetworkFallback() async throws {
     let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-runtime-offline-transport")
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -1513,6 +1655,232 @@ private final class CorrelationTraceOriginURLProtocol: URLProtocol, @unchecked S
 }
 
 private final class LegacyFallbackOriginURLProtocol: URLProtocol, @unchecked Sendable {
+    typealias Handler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var handler: Handler?
+
+    static func setHandler(_ handler: @escaping Handler) {
+        lock.lock()
+        self.handler = handler
+        lock.unlock()
+    }
+
+    static func resetHandler() {
+        lock.lock()
+        handler = nil
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.lock.lock()
+        let handler = Self.handler
+        Self.lock.unlock()
+
+        guard let handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unknown))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if !data.isEmpty {
+                client?.urlProtocol(self, didLoad: data)
+            }
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private struct StreamingProbeResult {
+    let response: HTTPURLResponse
+    let data: Data
+    let firstBodyByteDelay: TimeInterval
+    let totalDuration: TimeInterval
+}
+
+private enum StreamingProbeError: Error {
+    case invalidRequestURL
+    case unsupportedHost(String)
+    case socketCreationFailed
+    case connectFailed
+    case sendFailed
+    case receiveFailed
+    case invalidHTTPResponse
+    case invalidStatusLine
+}
+
+private func performStreamingProbeRequest(_ request: URLRequest) throws -> StreamingProbeResult {
+    guard let url = request.url else {
+        throw StreamingProbeError.invalidRequestURL
+    }
+    guard let host = url.host else {
+        throw StreamingProbeError.invalidRequestURL
+    }
+    guard host == "127.0.0.1", let port = url.port else {
+        throw StreamingProbeError.unsupportedHost(host)
+    }
+
+    let method = (request.httpMethod ?? "GET").uppercased()
+    let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+    var path = components?.percentEncodedPath ?? url.path
+    if path.isEmpty {
+        path = "/"
+    }
+    if let query = components?.percentEncodedQuery, !query.isEmpty {
+        path += "?\(query)"
+    }
+
+    var requestLines = [
+        "\(method) \(path) HTTP/1.1",
+        "Host: \(host):\(port)",
+        "Connection: close"
+    ]
+    for key in request.allHTTPHeaderFields?.keys.sorted() ?? [] {
+        if let value = request.allHTTPHeaderFields?[key] {
+            requestLines.append("\(key): \(value)")
+        }
+    }
+    requestLines.append("")
+    requestLines.append("")
+    let requestData = Data(requestLines.joined(separator: "\r\n").utf8)
+
+    let socketFD = socket(AF_INET, SOCK_STREAM, 0)
+    guard socketFD >= 0 else {
+        throw StreamingProbeError.socketCreationFailed
+    }
+    defer { _ = close(socketFD) }
+
+    var timeout = timeval(tv_sec: 8, tv_usec: 0)
+    _ = setsockopt(
+        socketFD,
+        SOL_SOCKET,
+        SO_RCVTIMEO,
+        &timeout,
+        socklen_t(MemoryLayout<timeval>.size)
+    )
+
+    var address = sockaddr_in()
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_port = in_port_t(UInt16(port).bigEndian)
+    let ptonResult = host.withCString { cString in
+        inet_pton(AF_INET, cString, &address.sin_addr)
+    }
+    guard ptonResult == 1 else {
+        throw StreamingProbeError.unsupportedHost(host)
+    }
+
+    let connected = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+            connect(socketFD, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+    guard connected == 0 else {
+        throw StreamingProbeError.connectFailed
+    }
+
+    var bytesSent = 0
+    while bytesSent < requestData.count {
+        let sent = requestData.withUnsafeBytes { bytes in
+            send(socketFD, bytes.baseAddress!.advanced(by: bytesSent), requestData.count - bytesSent, 0)
+        }
+        guard sent > 0 else {
+            throw StreamingProbeError.sendFailed
+        }
+        bytesSent += sent
+    }
+
+    let startedAt = Date()
+    let delimiter = Data("\r\n\r\n".utf8)
+    var responseBuffer = Data()
+    var headerEndOffset: Int?
+    var firstBodyByteDelay: TimeInterval?
+
+    var receiveBuffer = [UInt8](repeating: 0, count: 16_384)
+    while true {
+        let received = receiveBuffer.withUnsafeMutableBytes { bytes in
+            recv(socketFD, bytes.baseAddress, bytes.count, 0)
+        }
+
+        if received == 0 {
+            break
+        }
+        if received < 0 {
+            throw StreamingProbeError.receiveFailed
+        }
+
+        responseBuffer.append(receiveBuffer, count: Int(received))
+        if headerEndOffset == nil, let delimiterRange = responseBuffer.range(of: delimiter) {
+            headerEndOffset = delimiterRange.upperBound
+            if responseBuffer.count > delimiterRange.upperBound {
+                firstBodyByteDelay = Date().timeIntervalSince(startedAt)
+            }
+        } else if headerEndOffset != nil, firstBodyByteDelay == nil {
+            firstBodyByteDelay = Date().timeIntervalSince(startedAt)
+        }
+    }
+
+    guard let headerEndOffset else {
+        throw StreamingProbeError.invalidHTTPResponse
+    }
+
+    guard let headerText = String(data: responseBuffer.prefix(headerEndOffset), encoding: .utf8) else {
+        throw StreamingProbeError.invalidHTTPResponse
+    }
+    let headerLines = headerText
+        .components(separatedBy: "\r\n")
+        .filter { !$0.isEmpty }
+    guard let statusLine = headerLines.first else {
+        throw StreamingProbeError.invalidStatusLine
+    }
+
+    let statusLineComponents = statusLine.split(separator: " ", omittingEmptySubsequences: true)
+    guard statusLineComponents.count >= 2, let statusCode = Int(statusLineComponents[1]) else {
+        throw StreamingProbeError.invalidStatusLine
+    }
+
+    var headerFields: [String: String] = [:]
+    for line in headerLines.dropFirst() {
+        guard let separator = line.firstIndex(of: ":") else {
+            continue
+        }
+        let name = String(line[..<separator]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = String(line[line.index(after: separator)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        headerFields[name] = value
+    }
+
+    let httpResponse = try #require(
+        HTTPURLResponse(
+            url: url,
+            statusCode: statusCode,
+            httpVersion: "HTTP/1.1",
+            headerFields: headerFields
+        )
+    )
+    let body = responseBuffer.suffix(from: headerEndOffset)
+    let totalDuration = Date().timeIntervalSince(startedAt)
+    return StreamingProbeResult(
+        response: httpResponse,
+        data: Data(body),
+        firstBodyByteDelay: firstBodyByteDelay ?? 0,
+        totalDuration: totalDuration
+    )
+}
+
+private final class StreamingTransportOriginURLProtocol: URLProtocol, @unchecked Sendable {
     typealias Handler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
 
     private static let lock = NSLock()

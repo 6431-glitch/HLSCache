@@ -43,11 +43,42 @@ struct ProxyServerHTTPRequest: Sendable {
     let headers: [String: String]
 }
 
+enum ProxyServerHTTPBodyStreamError: Error, Sendable {
+    case fallbackResponse(statusCode: Int, reasonPhrase: String, body: String)
+    case streamingFailed(reason: String)
+}
+
+enum ProxyServerHTTPBody: Sendable {
+    case data(Data)
+    case stream(
+        @Sendable (_ emitChunk: @escaping (Data) async throws -> Void) async throws -> Void
+    )
+}
+
 struct ProxyServerHTTPResponse: Sendable {
     let statusCode: Int
     let reasonPhrase: String
     let headers: [String: String]
-    let body: Data
+    let body: ProxyServerHTTPBody
+
+    init(statusCode: Int, reasonPhrase: String, headers: [String: String], body: Data) {
+        self.statusCode = statusCode
+        self.reasonPhrase = reasonPhrase
+        self.headers = headers
+        self.body = .data(body)
+    }
+
+    init(
+        statusCode: Int,
+        reasonPhrase: String,
+        headers: [String: String],
+        bodyStream: @escaping @Sendable (_ emitChunk: @escaping (Data) async throws -> Void) async throws -> Void
+    ) {
+        self.statusCode = statusCode
+        self.reasonPhrase = reasonPhrase
+        self.headers = headers
+        self.body = .stream(bodyStream)
+    }
 
     static func text(statusCode: Int, reasonPhrase: String, body: String) -> ProxyServerHTTPResponse {
         ProxyServerHTTPResponse(
@@ -269,14 +300,11 @@ private final class NetworkProxyServerRuntime: @unchecked Sendable {
                     connection.cancel()
                     return
                 }
-                let responseData = await self.httpResponse(for: buffer)
+                let preparedResponse = await self.httpResponse(for: buffer)
+                await self.send(preparedResponse, over: connection)
+                connection.cancel()
                 self.queue.async {
-                    connection.send(content: responseData, completion: .contentProcessed { _ in
-                        connection.cancel()
-                        self.queue.async {
-                            self.activeConnections.removeValue(forKey: identifier)
-                        }
-                    })
+                    self.activeConnections.removeValue(forKey: identifier)
                 }
             }
         }
@@ -327,49 +355,183 @@ private final class NetworkProxyServerRuntime: @unchecked Sendable {
         return "/" + rawPath
     }
 
-    private func httpResponse(for requestData: Data) async -> Data {
+    private func httpResponse(for requestData: Data) async -> (response: ProxyServerHTTPResponse, includeBody: Bool) {
         guard let request = parseHTTPRequest(requestData) else {
-            return makeHTTPResponse(
-                from: .text(statusCode: 400, reasonPhrase: "Bad Request", body: "bad request\n"),
-                includeBody: true
+            return (
+                .text(statusCode: 400, reasonPhrase: "Bad Request", body: "bad request\n"),
+                true
             )
         }
 
         let includeBody = request.method != "HEAD"
         if request.method != "GET", request.method != "HEAD" {
-            return makeHTTPResponse(
-                from: .text(statusCode: 405, reasonPhrase: "Method Not Allowed", body: "method not allowed\n"),
-                includeBody: includeBody
+            return (
+                .text(statusCode: 405, reasonPhrase: "Method Not Allowed", body: "method not allowed\n"),
+                includeBody
             )
         }
 
         if request.path == "/" || request.path == "/health" {
-            return makeHTTPResponse(
-                from: .text(statusCode: 200, reasonPhrase: "OK", body: "ok\n"),
-                includeBody: includeBody
+            return (
+                .text(statusCode: 200, reasonPhrase: "OK", body: "ok\n"),
+                includeBody
             )
         }
 
         if let requestHandler {
             let response = await requestHandler(request)
-            return makeHTTPResponse(from: response, includeBody: includeBody)
+            return (response, includeBody)
         }
 
-        return makeHTTPResponse(
-            from: .text(statusCode: 404, reasonPhrase: "Not Found", body: "not found\n"),
-            includeBody: includeBody
+        return (
+            .text(statusCode: 404, reasonPhrase: "Not Found", body: "not found\n"),
+            includeBody
         )
     }
 
-    private func makeHTTPResponse(from response: ProxyServerHTTPResponse, includeBody: Bool) -> Data {
-        let payload = includeBody ? response.body : Data()
-        var headers = response.headers
-        if headers["Content-Length"] == nil {
-            headers["Content-Length"] = String(response.body.count)
+    private func send(
+        _ preparedResponse: (response: ProxyServerHTTPResponse, includeBody: Bool),
+        over connection: NWConnection
+    ) async {
+        let response = preparedResponse.response
+        let includeBody = preparedResponse.includeBody
+
+        switch response.body {
+        case let .data(fullBody):
+            let payload = includeBody ? fullBody : Data()
+            let bodyLengthHint = fullBody.count
+            let responseData = makeHTTPResponse(
+                statusCode: response.statusCode,
+                reasonPhrase: response.reasonPhrase,
+                headers: response.headers,
+                payload: payload,
+                bodyLengthHint: bodyLengthHint
+            )
+            _ = try? await sendData(responseData, over: connection)
+
+        case let .stream(streamBody):
+            guard includeBody else {
+                let headersOnly = makeHTTPResponse(
+                    statusCode: response.statusCode,
+                    reasonPhrase: response.reasonPhrase,
+                    headers: response.headers,
+                    payload: Data(),
+                    bodyLengthHint: nil
+                )
+                _ = try? await sendData(headersOnly, over: connection)
+                return
+            }
+
+            let headerData = makeHTTPHeaders(
+                statusCode: response.statusCode,
+                reasonPhrase: response.reasonPhrase,
+                headers: response.headers,
+                bodyLengthHint: nil
+            )
+
+            var didSendHeaders = false
+            do {
+                try await streamBody { [weak self] chunk in
+                    guard let self else {
+                        throw ProxyServerHTTPBodyStreamError.streamingFailed(reason: "runtime deallocated")
+                    }
+                    if !didSendHeaders {
+                        try await self.sendData(headerData, over: connection)
+                        didSendHeaders = true
+                    }
+                    if !chunk.isEmpty {
+                        try await self.sendData(chunk, over: connection)
+                    }
+                }
+
+                if !didSendHeaders {
+                    _ = try? await sendData(headerData, over: connection)
+                }
+            } catch let error as ProxyServerHTTPBodyStreamError {
+                guard !didSendHeaders, let fallback = fallbackResponse(for: error) else {
+                    return
+                }
+                let fallbackData = makeHTTPResponse(
+                    statusCode: fallback.statusCode,
+                    reasonPhrase: fallback.reasonPhrase,
+                    headers: fallback.headers,
+                    payload: fallback.bodyData,
+                    bodyLengthHint: fallback.bodyData.count
+                )
+                _ = try? await sendData(fallbackData, over: connection)
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func sendData(_ data: Data, over connection: NWConnection) async throws {
+        guard !data.isEmpty else {
+            return
+        }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async {
+                connection.send(content: data, completion: .contentProcessed { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: ())
+                    }
+                })
+            }
+        }
+    }
+
+    private struct FallbackHTTPResponse {
+        let statusCode: Int
+        let reasonPhrase: String
+        let headers: [String: String]
+        let bodyData: Data
+    }
+
+    private func fallbackResponse(for error: ProxyServerHTTPBodyStreamError) -> FallbackHTTPResponse? {
+        switch error {
+        case let .fallbackResponse(statusCode, reasonPhrase, body):
+            return FallbackHTTPResponse(
+                statusCode: statusCode,
+                reasonPhrase: reasonPhrase,
+                headers: ["Content-Type": "text/plain; charset=utf-8"],
+                bodyData: Data(body.utf8)
+            )
+        case .streamingFailed:
+            return nil
+        }
+    }
+
+    private func makeHTTPResponse(
+        statusCode: Int,
+        reasonPhrase: String,
+        headers: [String: String],
+        payload: Data,
+        bodyLengthHint: Int?
+    ) -> Data {
+        let headerData = makeHTTPHeaders(
+            statusCode: statusCode,
+            reasonPhrase: reasonPhrase,
+            headers: headers,
+            bodyLengthHint: bodyLengthHint
+        )
+        return headerData + payload
+    }
+
+    private func makeHTTPHeaders(
+        statusCode: Int,
+        reasonPhrase: String,
+        headers headerFields: [String: String],
+        bodyLengthHint: Int?
+    ) -> Data {
+        var headers = headerFields
+        if headers["Content-Length"] == nil, let bodyLengthHint {
+            headers["Content-Length"] = String(bodyLengthHint)
         }
         headers["Connection"] = "close"
 
-        var lines = ["HTTP/1.1 \(response.statusCode) \(response.reasonPhrase)"]
+        var lines = ["HTTP/1.1 \(statusCode) \(reasonPhrase)"]
         for key in headers.keys.sorted() {
             if let value = headers[key] {
                 lines.append("\(key): \(value)")
@@ -378,7 +540,7 @@ private final class NetworkProxyServerRuntime: @unchecked Sendable {
         lines.append("")
         lines.append("")
         let headerData = Data(lines.joined(separator: "\r\n").utf8)
-        return headerData + payload
+        return headerData
     }
 }
 
