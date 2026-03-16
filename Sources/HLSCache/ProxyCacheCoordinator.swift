@@ -485,7 +485,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
             return
         }
 
-        if storedIntegrity == computedIntegrity {
+        if constantTimeIntegrityEquals(storedIntegrity, computedIntegrity) {
             return
         }
 
@@ -535,7 +535,7 @@ public final class ProxyCacheCoordinator: @unchecked Sendable {
         )
         let context = TransformContext(resourceID: resourceID, byteOffset: 0)
         let integrity = try transformPipeline.integrityMetadata(for: cachedPayload, context: context)
-        if integrity != record.integrity {
+        if !constantTimeIntegrityEquals(integrity, record.integrity) {
             _ = try coreCache.setResourceIntegrity(
                 resource: resourceID,
                 integrity: integrity,
