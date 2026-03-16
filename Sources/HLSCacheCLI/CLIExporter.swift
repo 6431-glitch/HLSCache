@@ -455,14 +455,15 @@ struct CLIExporter {
     }
 
     private func resolveURIAttribute(in line: String, relativeTo baseURL: URL) throws -> URL? {
-        guard let uriRange = line.range(of: "URI=\"") else {
-            return nil
-        }
-        let start = uriRange.upperBound
-        guard let end = line[start...].firstIndex(of: "\"") else {
+        let attributes: [HLSDirectiveAttribute]
+        do {
+            attributes = try HLSDirectiveAttributeParser.parseAfterDirectiveNameStrict(in: line)
+        } catch {
             throw CLIExportError.incompleteCache("Invalid playlist URI attribute in line: \(line)")
         }
-        let raw = String(line[start..<end])
+        guard let raw = attributes.first(where: { $0.key == "URI" })?.value else {
+            return nil
+        }
         guard let url = URL(string: raw, relativeTo: baseURL)?.absoluteURL else {
             throw CLIExportError.incompleteCache("Invalid playlist URI value: \(raw)")
         }
@@ -470,15 +471,12 @@ struct CLIExporter {
     }
 
     private func replacingURIAttribute(in line: String, with value: String) -> String {
-        guard let uriRange = line.range(of: "URI=\"") else {
-            return line
-        }
-        let start = uriRange.upperBound
-        guard let end = line[start...].firstIndex(of: "\"") else {
+        guard let uriAttribute = HLSDirectiveAttributeParser.parseAfterDirectiveName(in: line)
+            .first(where: { $0.key == "URI" }) else {
             return line
         }
         var rewritten = line
-        rewritten.replaceSubrange(start..<end, with: value)
+        rewritten.replaceSubrange(uriAttribute.valueRange, with: value)
         return rewritten
     }
 

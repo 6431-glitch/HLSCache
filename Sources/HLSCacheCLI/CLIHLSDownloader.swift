@@ -487,18 +487,19 @@ struct CLIHLSDownloader {
     }
 
     private func resolveURIAttribute(in line: String, relativeTo baseURL: URL) throws -> URL? {
-        guard let uriRange = line.range(of: "URI=\"") else {
-            return nil
-        }
-        let start = uriRange.upperBound
-        guard let end = line[start...].firstIndex(of: "\"") else {
+        let attributes: [HLSDirectiveAttribute]
+        do {
+            attributes = try HLSDirectiveAttributeParser.parseAfterDirectiveNameStrict(in: line)
+        } catch {
             throw CLIDownloadError.requestFailed(
                 url: baseURL,
                 statusCode: nil,
                 reason: "Invalid URI attribute in line: \(line)"
             )
         }
-        let raw = String(line[start..<end])
+        guard let raw = attributes.first(where: { $0.key == "URI" })?.value else {
+            return nil
+        }
         guard let url = URL(string: raw, relativeTo: baseURL)?.absoluteURL else {
             throw CLIDownloadError.requestFailed(
                 url: baseURL,
