@@ -44,7 +44,7 @@ public enum HLSPlaylistParser {
 
         let lines = playlist.components(separatedBy: .newlines)
         for (index, line) in lines.enumerated() {
-            let trimmed = normalizeToken(line)
+            let trimmed = HLSDirectiveAttributeParser.normalizeToken(line)
             guard !trimmed.isEmpty else {
                 continue
             }
@@ -78,11 +78,7 @@ public enum HLSPlaylistParser {
     }
 
     private static func parseKeyLine(_ line: String, lineNumber: Int, playlistURL: URL) -> HLSPlaylistKey? {
-        guard let directiveStart = line.range(of: ":")?.upperBound else {
-            return nil
-        }
-
-        let attributes = parseAttributeList(String(line[directiveStart...]))
+        let attributes = HLSDirectiveAttributeParser.attributeMap(afterDirectiveNameIn: line)
         guard let rawURI = attributes["URI"], !rawURI.isEmpty else {
             return nil
         }
@@ -96,70 +92,5 @@ public enum HLSPlaylistParser {
             uri: rawURI,
             remoteURL: remoteURL
         )
-    }
-
-    private static func parseAttributeList(_ raw: String) -> [String: String] {
-        var parts: [String] = []
-        var current = ""
-        var insideQuotes = false
-
-        for character in raw {
-            if character == "\"" {
-                insideQuotes.toggle()
-                current.append(character)
-                continue
-            }
-
-            if character == "," && !insideQuotes {
-                parts.append(current)
-                current.removeAll(keepingCapacity: true)
-                continue
-            }
-
-            current.append(character)
-        }
-
-        if !current.isEmpty {
-            parts.append(current)
-        }
-
-        var attributes: [String: String] = [:]
-        for part in parts {
-            let trimmed = normalizeToken(part)
-            guard !trimmed.isEmpty else {
-                continue
-            }
-
-            guard let equalsIndex = trimmed.firstIndex(of: "=") else {
-                continue
-            }
-
-            let rawKey = trimmed[..<equalsIndex]
-            let rawValue = trimmed[trimmed.index(after: equalsIndex)...]
-            let key = normalizeToken(String(rawKey)).uppercased()
-            guard !key.isEmpty else {
-                continue
-            }
-
-            var value = normalizeToken(String(rawValue))
-            let startsQuoted = value.hasPrefix("\"")
-            let endsQuoted = value.hasSuffix("\"")
-            if startsQuoted != endsQuoted {
-                continue
-            }
-            if startsQuoted, value.count >= 2 {
-                value = String(value.dropFirst().dropLast())
-            }
-            value = normalizeToken(value)
-
-            attributes[key] = value
-        }
-
-        return attributes
-    }
-
-    private static func normalizeToken(_ raw: String) -> String {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.hasPrefix("\u{FEFF}") ? String(trimmed.dropFirst()) : trimmed
     }
 }
