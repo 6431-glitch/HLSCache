@@ -11,6 +11,18 @@ private func makeBackgroundDownloadTempDirectory(prefix: String = "hlscache-back
     return directory
 }
 
+private func backgroundRegistryCorruptSnapshots(in directory: URL) throws -> [URL] {
+    let entries = try FileManager.default.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: [.isRegularFileKey],
+        options: [.skipsHiddenFiles]
+    )
+
+    return entries
+        .filter { $0.lastPathComponent.hasPrefix("background_download_tasks.json.corrupt.") }
+        .sorted { $0.lastPathComponent < $1.lastPathComponent }
+}
+
 private func makeBackgroundDownloadResourceID(assetID: String, suffix: String) throws -> ResourceID {
     let cacheKey = CacheKey.fromAssetID(assetID)
     let url = try #require(URL(string: "https://cdn.example.com/\(suffix)"))
@@ -127,10 +139,12 @@ private final class RecordingStructuredLogger: StructuredLogger, @unchecked Send
 
     #expect(registry.allRecords().isEmpty)
 
-    let corruptFileURL = directory.appendingPathComponent("background_download_tasks.json.corrupt")
+    let snapshots = try backgroundRegistryCorruptSnapshots(in: directory)
+    #expect(snapshots.count == 1)
+    let snapshotURL = try #require(snapshots.first)
     #expect(FileManager.default.fileExists(atPath: registryFileURL.path))
-    #expect(FileManager.default.fileExists(atPath: corruptFileURL.path))
-    #expect(try Data(contentsOf: corruptFileURL) == corruptData)
+    #expect(FileManager.default.fileExists(atPath: snapshotURL.path))
+    #expect(try Data(contentsOf: snapshotURL) == corruptData)
 
     let restoredData = try Data(contentsOf: registryFileURL)
     let restoredRecords = try JSONDecoder.withISO8601.decode([Int: BackgroundDownloadTaskRecord].self, from: restoredData)
@@ -144,8 +158,15 @@ private final class RecordingStructuredLogger: StructuredLogger, @unchecked Send
     )
     #expect(event.level == .warning)
     #expect(event.metadata["registryPath"] == registryFileURL.path)
-    #expect(event.metadata["recoveryPath"] == corruptFileURL.path)
+    let eventRecoveryPath = URL(fileURLWithPath: event.metadata["recoveryPath"] ?? "")
+        .resolvingSymlinksInPath()
+        .path
+    #expect(eventRecoveryPath == snapshotURL.resolvingSymlinksInPath().path)
     #expect(event.metadata["recoveryAction"] == "quarantine_and_reset")
+    #expect(event.metadata["retentionLimit"] == "3")
+    #expect(event.metadata["retentionAction"] == "none")
+    #expect(event.metadata["snapshotCount"] == "1")
+    #expect(event.metadata["prunedSnapshotCount"] == "0")
     #expect(!(event.metadata["error"] ?? "").isEmpty)
 }
 
@@ -166,6 +187,40 @@ private final class RecordingStructuredLogger: StructuredLogger, @unchecked Send
     #expect(restored.remoteURL == remoteURL)
 }
 
+@Test func backgroundDownloadTaskRegistry_decodeFailure_retainsTimestampedSnapshots_withBoundedRetention() throws {
+    let directory = try makeBackgroundDownloadTempDirectory(prefix: "bg-registry-decode-failure-retention")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let logger = RecordingStructuredLogger()
+    let registryFileURL = directory.appendingPathComponent("background_download_tasks.json")
+
+    for index in 0..<5 {
+        let corruptData = Data("{invalid-\(index)".utf8)
+        try corruptData.write(to: registryFileURL)
+        _ = BackgroundDownloadTaskRegistry(baseDirectory: directory, logger: logger)
+    }
+
+    let snapshots = try backgroundRegistryCorruptSnapshots(in: directory)
+    #expect(snapshots.count == 3)
+
+    let retainedPayloads = try snapshots.map { snapshotURL in
+        String(decoding: try Data(contentsOf: snapshotURL), as: UTF8.self)
+    }
+    #expect(!retainedPayloads.contains("{invalid-0"))
+    #expect(!retainedPayloads.contains("{invalid-1"))
+    #expect(retainedPayloads.contains("{invalid-4"))
+
+    let pruneEvent = try #require(
+        logger.events().first {
+            $0.operation == "loadBackgroundDownloadTaskRegistry"
+                && $0.metadata["result"] == "recovered_decode_failure"
+                && $0.metadata["retentionAction"] == "pruned_old_snapshots"
+        }
+    )
+    #expect((Int(pruneEvent.metadata["prunedSnapshotCount"] ?? "0") ?? 0) > 0)
+    #expect(!(pruneEvent.metadata["prunedSnapshotPaths"] ?? "").isEmpty)
+}
+
 @Test func backgroundDownloadTaskRegistry_loadFailure_quarantinesFaultyPathAndEmitsTelemetry() throws {
     let directory = try makeBackgroundDownloadTempDirectory(prefix: "bg-registry-load-failure")
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -178,9 +233,11 @@ private final class RecordingStructuredLogger: StructuredLogger, @unchecked Send
 
     #expect(registry.allRecords().isEmpty)
 
-    let corruptFileURL = directory.appendingPathComponent("background_download_tasks.json.corrupt")
+    let snapshots = try backgroundRegistryCorruptSnapshots(in: directory)
+    #expect(snapshots.count == 1)
+    let snapshotURL = try #require(snapshots.first)
     var isCorruptDirectory = ObjCBool(false)
-    #expect(FileManager.default.fileExists(atPath: corruptFileURL.path, isDirectory: &isCorruptDirectory))
+    #expect(FileManager.default.fileExists(atPath: snapshotURL.path, isDirectory: &isCorruptDirectory))
     #expect(isCorruptDirectory.boolValue)
     #expect(FileManager.default.fileExists(atPath: registryFileURL.path))
 
@@ -196,8 +253,15 @@ private final class RecordingStructuredLogger: StructuredLogger, @unchecked Send
     )
     #expect(event.level == .warning)
     #expect(event.metadata["registryPath"] == registryFileURL.path)
-    #expect(event.metadata["recoveryPath"] == corruptFileURL.path)
+    let eventRecoveryPath = URL(fileURLWithPath: event.metadata["recoveryPath"] ?? "")
+        .resolvingSymlinksInPath()
+        .path
+    #expect(eventRecoveryPath == snapshotURL.resolvingSymlinksInPath().path)
     #expect(event.metadata["recoveryAction"] == "quarantine_and_reset")
+    #expect(event.metadata["retentionLimit"] == "3")
+    #expect(event.metadata["retentionAction"] == "none")
+    #expect(event.metadata["snapshotCount"] == "1")
+    #expect(event.metadata["prunedSnapshotCount"] == "0")
     #expect(!(event.metadata["error"] ?? "").isEmpty)
 }
 
