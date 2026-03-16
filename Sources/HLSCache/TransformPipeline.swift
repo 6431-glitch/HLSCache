@@ -23,6 +23,14 @@ public protocol IntegrityMetadataTransformer: ByteTransformer {
     func integrityMetadata(for cachedPayload: Data, context: TransformContext) throws -> ResourceIntegrity?
 }
 
+public protocol IntegrityMetadataCompatibilityTransformer: ByteTransformer {
+    func isStoredIntegrityCompatible(
+        _ storedIntegrity: ResourceIntegrity,
+        cachedPayload: Data,
+        context: TransformContext
+    ) throws -> Bool
+}
+
 extension ByteTransformer {
     public func supports(kind: ResourceKind) -> Bool {
         true
@@ -78,6 +86,38 @@ public final class TransformPipeline: @unchecked Sendable {
                 return metadata
             }
         }
+        return nil
+    }
+
+    public func storedIntegrityMatches(
+        _ storedIntegrity: ResourceIntegrity,
+        cachedPayload: Data,
+        context: TransformContext
+    ) throws -> Bool? {
+        let applicable = transformers.filter { $0.supports(kind: context.resourceID.kind) }
+        for transformer in applicable {
+            guard let integrityTransformer = transformer as? any IntegrityMetadataTransformer else {
+                continue
+            }
+
+            guard let computedMetadata = try integrityTransformer.integrityMetadata(
+                for: cachedPayload,
+                context: context
+            ) else {
+                continue
+            }
+
+            if let compatibilityTransformer = transformer as? any IntegrityMetadataCompatibilityTransformer {
+                return try compatibilityTransformer.isStoredIntegrityCompatible(
+                    storedIntegrity,
+                    cachedPayload: cachedPayload,
+                    context: context
+                )
+            }
+
+            return computedMetadata == storedIntegrity
+        }
+
         return nil
     }
 }

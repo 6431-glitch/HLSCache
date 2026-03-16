@@ -187,8 +187,26 @@ private func makeTransformContext(kind: ResourceKind = .segment) -> TransformCon
     tampered[0] ^= 0x5A
     let tamperedIntegrity = try #require(try pipeline.integrityMetadata(for: tampered, context: context))
 
-    #expect(integrity.algorithm == "hmac-sha256-v1")
+    #expect(integrity.algorithm == "hmac-sha256-rfc2104-v1")
     #expect(integrity != tamperedIntegrity)
+}
+
+@Test func encryptAtRestPlugin_authenticatedMode_integrityMetadata_matchesDeterministicVector() throws {
+    let key = Data("vector-auth-key".utf8)
+    let plugin = EncryptAtRestPlugin(key: key, mode: .authenticatedV1)
+    let pipeline = TransformPipeline(transformers: [plugin])
+    let context = TransformContext(
+        resourceID: ResourceID(
+            cacheKey: CacheKey.fromAssetID("vector-asset-id"),
+            kind: .segment,
+            resourceKey: "resource-vector-01"
+        )
+    )
+    let cachedPayload = Data("cached-vector-payload-v1".utf8)
+
+    let integrity = try #require(try pipeline.integrityMetadata(for: cachedPayload, context: context))
+    #expect(integrity.algorithm == "hmac-sha256-rfc2104-v1")
+    #expect(integrity.digestHex == "ada1f8add90c1c445b7856a5530dd84b27eb31b2a563dc5ae429e724020e6f85")
 }
 
 @Test func encryptAtRestPlugin_emptyKey_usesRecoverableValidationError() throws {
