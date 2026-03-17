@@ -645,6 +645,7 @@ struct CLIExporter {
             "-hide_banner",
             "-loglevel", "error",
             "-nostats",
+            "-nostdin",
             "-y",
             "-progress", "pipe:2",
             "-allowed_extensions", "ALL",
@@ -662,7 +663,8 @@ struct CLIExporter {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
-        process.standardOutput = Pipe()
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
         process.standardError = stderrPipe
 
         do {
@@ -674,7 +676,8 @@ struct CLIExporter {
         let stderrHandle = stderrPipe.fileHandleForReading
         var stderrData = Data()
         var lineBuffer = Data()
-        var outTime: String?
+        var outTimeText: String?
+        var outTimeSeconds: Double?
         var speed: String?
 
         while true {
@@ -689,9 +692,9 @@ struct CLIExporter {
             }
 
             lineBuffer.append(chunk)
-            while let newline = lineBuffer.firstIndex(of: 0x0A) {
-                let lineData = lineBuffer[..<newline]
-                lineBuffer.removeSubrange(...newline)
+            while let delimiterIndex = lineBuffer.firstIndex(where: { $0 == 0x0A || $0 == 0x0D }) {
+                let lineData = lineBuffer[..<delimiterIndex]
+                lineBuffer.removeSubrange(...delimiterIndex)
                 guard let rawLine = String(data: lineData, encoding: .utf8) else {
                     continue
                 }
@@ -701,7 +704,35 @@ struct CLIExporter {
                 }
 
                 if line.hasPrefix("out_time=") {
-                    outTime = String(line.dropFirst("out_time=".count))
+                    let rawOutTime = String(line.dropFirst("out_time=".count))
+                    if rawOutTime == "N/A" {
+                        outTimeText = nil
+                        outTimeSeconds = nil
+                    } else {
+                        outTimeText = rawOutTime
+                        outTimeSeconds = parseFFmpegOutTimeToSeconds(rawOutTime)
+                    }
+                    continue
+                }
+                if line.hasPrefix("out_time_us=") {
+                    let rawMicros = String(line.dropFirst("out_time_us=".count))
+                    if let micros = Double(rawMicros), micros >= 0 {
+                        outTimeSeconds = micros / 1_000_000
+                        if outTimeText == nil, let outTimeSeconds {
+                            outTimeText = formatFFmpegOutTime(seconds: outTimeSeconds)
+                        }
+                    }
+                    continue
+                }
+                if line.hasPrefix("out_time_ms=") {
+                    // ffmpeg reports this value in microseconds for -progress output.
+                    let rawMicros = String(line.dropFirst("out_time_ms=".count))
+                    if let micros = Double(rawMicros), micros >= 0 {
+                        outTimeSeconds = micros / 1_000_000
+                        if outTimeText == nil, let outTimeSeconds {
+                            outTimeText = formatFFmpegOutTime(seconds: outTimeSeconds)
+                        }
+                    }
                     continue
                 }
                 if line.hasPrefix("speed=") {
@@ -710,22 +741,19 @@ struct CLIExporter {
                 }
                 if line == "progress=continue" || line == "progress=end" {
                     var parts: [String] = []
-                    var outTimeSeconds: Double?
-                    if let outTime, !outTime.isEmpty, outTime != "N/A" {
-                        parts.append("ffmpeg \(outTime)")
-                        outTimeSeconds = parseFFmpegOutTimeToSeconds(outTime)
+                    if let outTimeText, !outTimeText.isEmpty {
+                        parts.append("ffmpeg \(outTimeText)")
                     }
                     if let speed, !speed.isEmpty {
                         parts.append("speed \(speed)")
                     }
-                    if !parts.isEmpty {
-                        onProgress?(
-                            FFmpegProgressUpdate(
-                                detail: parts.joined(separator: " | "),
-                                outTimeSeconds: outTimeSeconds
-                            )
+                    let detail = parts.isEmpty ? "ffmpeg in progress" : parts.joined(separator: " | ")
+                    onProgress?(
+                        FFmpegProgressUpdate(
+                            detail: detail,
+                            outTimeSeconds: outTimeSeconds
                         )
-                    }
+                    )
                 }
             }
         }
@@ -809,6 +837,14 @@ struct CLIExporter {
             return nil
         }
         return hours * 3600 + minutes * 60 + seconds
+    }
+
+    private static func formatFFmpegOutTime(seconds: Double) -> String {
+        let boundedSeconds = max(seconds, 0)
+        let hours = Int(boundedSeconds / 3600)
+        let minutes = Int((boundedSeconds.truncatingRemainder(dividingBy: 3600)) / 60)
+        let secs = boundedSeconds.truncatingRemainder(dividingBy: 60)
+        return String(format: "%02d:%02d:%06.3f", hours, minutes, secs)
     }
 
     private func estimatedMediaDurationSeconds(from playlist: String) -> Double {
