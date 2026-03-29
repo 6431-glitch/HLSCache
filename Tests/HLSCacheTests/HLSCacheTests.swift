@@ -30,6 +30,24 @@ private final class RecordingStructuredLogger: StructuredLogger, @unchecked Send
     }
 }
 
+private final class RecordingLogConsumer: HLSCacheLogConsumer, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedEvents: [HLSCacheLogEvent] = []
+
+    func log(_ event: HLSCacheLogEvent) {
+        lock.lock()
+        storedEvents.append(event)
+        lock.unlock()
+    }
+
+    func events() -> [HLSCacheLogEvent] {
+        lock.lock()
+        let snapshot = storedEvents
+        lock.unlock()
+        return snapshot
+    }
+}
+
 private func makeHLSCacheTempDirectory(prefix: String = "hlscache-tests") throws -> URL {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(prefix)
@@ -74,6 +92,42 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
         remoteURL: try #require(URL(string: "https://cdn2.example.com/master.m3u8"))
     )
     #expect(updated.currentRemoteURL.absoluteString == "https://cdn2.example.com/master.m3u8")
+}
+
+@Test func facade_logConsumer_receivesDebugEvents() throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-log-consumer-debug")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let consumer = RecordingLogConsumer()
+    let facade = HLSCacheFacade(
+        baseDirectory: directory,
+        logConsumer: consumer,
+        minimumLogLevel: .debug
+    )
+
+    _ = facade.listAliases()
+
+    let event = try #require(consumer.events().first { $0.operation == "listAliases" })
+    #expect(event.subsystem == "HLSCache")
+    #expect(event.level == .debug)
+    #expect(event.metadata["count"] == "0")
+}
+
+@Test func facade_logConsumer_respectsMinimumLogLevel() throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-log-consumer-filter")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let consumer = RecordingLogConsumer()
+    let facade = HLSCacheFacade(
+        baseDirectory: directory,
+        logConsumer: consumer,
+        minimumLogLevel: .warning
+    )
+
+    _ = facade.listAliases()
+    _ = facade.proxyStatus()
+
+    #expect(consumer.events().isEmpty)
 }
 
 @Test func facade_proxyStatus_reportsDeterministicLifecycleState() throws {

@@ -25,6 +25,45 @@ The architecture cleanly separates playback proxying, storage, and background do
 - Thread-safe concurrent read/write support
 - Documented async-first API policy and Swift Concurrency ADR for migration work
 
+### Consumer Logging Protocol
+
+Consumers can inject their own logging implementation without depending on `CoreCache` logging types directly.
+
+```swift
+import Foundation
+import HLSCache
+import OSLog
+
+struct AppHLSLogger: HLSCacheLogConsumer {
+    private let logger = Logger(subsystem: "com.example.app", category: "HLSCache")
+
+    func log(_ event: HLSCacheLogEvent) {
+        let metadata = String(describing: event.metadata)
+        logger.log(
+            level: logLevel(event.level),
+            "[\(event.operation)] [\(event.correlationID)] \(metadata, privacy: .public)"
+        )
+    }
+
+    private func logLevel(_ level: HLSCacheLogLevel) -> OSLogType {
+        switch level {
+        case .debug: return .debug
+        case .info: return .info
+        case .warning: return .default
+        case .error: return .error
+        }
+    }
+}
+
+let facade = HLSCacheFacade(
+    baseDirectory: cacheDirectoryURL,
+    logConsumer: AppHLSLogger(),
+    minimumLogLevel: .debug
+)
+```
+
+If needed, you can still pass a custom `StructuredLogger` directly via `logger:` for lower-level integration.
+
 ### Metrics Semantics
 
 `CoreCacheMetrics` separates planning and serving counters:

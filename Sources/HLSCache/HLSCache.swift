@@ -81,6 +81,26 @@ public final class HLSCacheFacade: @unchecked Sendable {
         self.networkSession = networkSession
     }
 
+    public convenience init(
+        baseDirectory: URL,
+        logConsumer: any HLSCacheLogConsumer,
+        minimumLogLevel: HLSCacheLogLevel = .debug,
+        coreCacheStartupReconciliationMode: StartupReconciliationMode = .synchronous,
+        coreCacheStartupReconciliationProgressInterval: Int = 128,
+        networkSession: URLSession = .shared
+    ) {
+        self.init(
+            baseDirectory: baseDirectory,
+            logger: HLSCacheLogBridgeLogger(
+                consumer: logConsumer,
+                minimumLevel: minimumLogLevel
+            ),
+            coreCacheStartupReconciliationMode: coreCacheStartupReconciliationMode,
+            coreCacheStartupReconciliationProgressInterval: coreCacheStartupReconciliationProgressInterval,
+            networkSession: networkSession
+        )
+    }
+
     @discardableResult
     public func startServer(host: String = "127.0.0.1", port: Int = 8080) throws -> URL {
         let correlationID = UUID().uuidString
