@@ -1,5 +1,6 @@
 import CoreCache
 import Foundation
+import Logging
 import Testing
 @testable import HLSCache
 
@@ -12,11 +13,11 @@ private struct TestPlugin: HLSCachePlugin {
     let version: String
 }
 
-private final class RecordingStructuredLogger: StructuredLogger, @unchecked Sendable {
+private final class LogEventStore: @unchecked Sendable {
     private let lock = NSLock()
     private var storedEvents: [StructuredLogEvent] = []
 
-    func log(_ event: StructuredLogEvent) {
+    func append(_ event: StructuredLogEvent) {
         lock.lock()
         storedEvents.append(event)
         lock.unlock()
@@ -30,21 +31,74 @@ private final class RecordingStructuredLogger: StructuredLogger, @unchecked Send
     }
 }
 
-private final class RecordingLogConsumer: HLSCacheLogConsumer, @unchecked Sendable {
-    private let lock = NSLock()
-    private var storedEvents: [HLSCacheLogEvent] = []
+private struct RecordingLogHandler: LogHandler {
+    let store: LogEventStore
+    var metadata: Logger.Metadata = [:]
+    var logLevel: Logger.Level = .trace
 
-    func log(_ event: HLSCacheLogEvent) {
-        lock.lock()
-        storedEvents.append(event)
-        lock.unlock()
+    subscript(metadataKey key: String) -> Logger.Metadata.Value? {
+        get { metadata[key] }
+        set { metadata[key] = newValue }
     }
 
-    func events() -> [HLSCacheLogEvent] {
-        lock.lock()
-        let snapshot = storedEvents
-        lock.unlock()
-        return snapshot
+    func log(
+        level: Logger.Level,
+        message _: Logger.Message,
+        metadata: Logger.Metadata?,
+        source _: String,
+        file _: String,
+        function _: String,
+        line _: UInt
+    ) {
+        var merged = self.metadata
+        if let metadata {
+            for (key, value) in metadata {
+                merged[key] = value
+            }
+        }
+
+        store.append(
+            StructuredLogEvent(
+                subsystem: merged["subsystem"]?.stringValue ?? "",
+                operation: merged["operation"]?.stringValue ?? "",
+                level: level,
+                correlationID: merged["correlationID"]?.stringValue ?? "",
+                metadata: merged.mapValues(\.stringValue),
+                timestamp: Date()
+            )
+        )
+    }
+}
+
+private final class RecordingStructuredLogger: Loggable, @unchecked Sendable {
+    private let store: LogEventStore
+    let logger: Logger
+
+    init(label: String = "tests.hlscache", minimumLevel: Logger.Level = .trace) {
+        let store = LogEventStore()
+        self.store = store
+        var built = Logger(label: label) { _ in
+            RecordingLogHandler(store: store)
+        }
+        built.logLevel = minimumLevel
+        self.logger = built
+    }
+
+    func events() -> [StructuredLogEvent] {
+        store.events()
+    }
+}
+
+private extension Logger.MetadataValue {
+    var stringValue: String {
+        switch self {
+        case let .string(value):
+            return value
+        case let .stringConvertible(value):
+            return String(describing: value)
+        default:
+            return "\(self)"
+        }
     }
 }
 
@@ -94,40 +148,38 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(updated.currentRemoteURL.absoluteString == "https://cdn2.example.com/master.m3u8")
 }
 
-@Test func facade_logConsumer_receivesDebugEvents() throws {
-    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-log-consumer-debug")
+@Test func facade_logger_receivesDebugEvents() throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-logger-debug")
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let consumer = RecordingLogConsumer()
+    let logger = RecordingStructuredLogger()
     let facade = HLSCacheFacade(
         baseDirectory: directory,
-        logConsumer: consumer,
-        minimumLogLevel: .debug
+        logger: logger
     )
 
     _ = facade.listAliases()
 
-    let event = try #require(consumer.events().first { $0.operation == "listAliases" })
+    let event = try #require(logger.events().first { $0.operation == "listAliases" })
     #expect(event.subsystem == "HLSCache")
     #expect(event.level == .debug)
     #expect(event.metadata["count"] == "0")
 }
 
-@Test func facade_logConsumer_respectsMinimumLogLevel() throws {
-    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-log-consumer-filter")
+@Test func facade_logger_respectsMinimumLogLevel() throws {
+    let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-logger-filter")
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let consumer = RecordingLogConsumer()
+    let logger = RecordingStructuredLogger(minimumLevel: .warning)
     let facade = HLSCacheFacade(
         baseDirectory: directory,
-        logConsumer: consumer,
-        minimumLogLevel: .warning
+        logger: logger
     )
 
     _ = facade.listAliases()
     _ = facade.proxyStatus()
 
-    #expect(consumer.events().isEmpty)
+    #expect(logger.events().isEmpty)
 }
 
 @Test func facade_proxyStatus_reportsDeterministicLifecycleState() throws {

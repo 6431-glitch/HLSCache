@@ -1,5 +1,6 @@
 import CoreCache
 import Foundation
+import Logging
 
 public enum BackgroundDownloadTaskRegistryError: Error, Equatable, Sendable {
     case invalidTaskIdentifier(Int)
@@ -62,7 +63,7 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
     private let baseDirectory: URL
     private let fileURL: URL
     private let temporaryFileURL: URL
-    private let logger: any StructuredLogger
+    private let logger: Logger
     private let queue = DispatchQueue(label: "HLSCache.BackgroundDownloadTaskRegistry", attributes: .concurrent)
 
     private var records: [Int: BackgroundDownloadTaskRecord] = [:]
@@ -70,13 +71,13 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
     public init(
         baseDirectory: URL,
         fileName: String = "background_download_tasks.json",
-        logger: any StructuredLogger = NoopStructuredLogger()
+        logger: any Loggable = NoOpLoggable()
     ) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
         self.fileURL = baseDirectory.appendingPathComponent(fileName)
         self.temporaryFileURL = baseDirectory.appendingPathComponent("\(fileName).tmp")
-        self.logger = logger
+        self.logger = logger.logger
         loadFromDisk()
     }
 
@@ -313,7 +314,7 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
 public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable {
     private let fileManager: FileManager
     private let baseDirectory: URL
-    private let logger: any StructuredLogger
+    private let logger: Logger
     public let registry: BackgroundDownloadTaskRegistry
     private let diskStore: DiskStore
     private let manifestStore: ManifestStore
@@ -324,11 +325,11 @@ public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable {
         registry: BackgroundDownloadTaskRegistry? = nil,
         diskStore: DiskStore? = nil,
         manifestStore: ManifestStore? = nil,
-        logger: any StructuredLogger = NoopStructuredLogger()
+        logger: any Loggable = NoOpLoggable()
     ) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
-        self.logger = logger
+        self.logger = logger.logger
         self.registry = registry ?? BackgroundDownloadTaskRegistry(baseDirectory: baseDirectory, logger: logger)
         self.diskStore = diskStore ?? DiskStore(baseDirectory: baseDirectory)
         self.manifestStore = manifestStore ?? ManifestStore(baseDirectory: baseDirectory)

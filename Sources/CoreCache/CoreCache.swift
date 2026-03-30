@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 
 public enum ReadPlanPart: Equatable, Sendable {
     case file(ByteRange)
@@ -160,7 +161,7 @@ public final class CoreCache: @unchecked Sendable {
     private let manifestStore: ManifestStore
     private let diskQuotaBytes: Int64?
     private let evictionRecencyPolicy: EvictionRecencyPolicy
-    private let logger: any StructuredLogger
+    private let logger: Logger
     private let startupReconciliationMode: StartupReconciliationMode
     private let startupReconciliationProgressInterval: Int
     private let startupReconciliationCompletionGroup = DispatchGroup()
@@ -173,11 +174,11 @@ public final class CoreCache: @unchecked Sendable {
         evictionRecencyPolicy: EvictionRecencyPolicy = .leastRecentlyUpdated,
         startupReconciliationMode: StartupReconciliationMode = .synchronous,
         startupReconciliationProgressInterval: Int = 128,
-        logger: any StructuredLogger = NoopStructuredLogger()
+        logger: any Loggable = NoOpLoggable()
     ) throws {
         self.directoryLock = try DirectoryLock(baseDirectory: baseDirectory)
         self.diskStore = DiskStore(baseDirectory: baseDirectory)
-        self.logger = logger
+        self.logger = logger.logger
         self.manifestStore = ManifestStore(baseDirectory: baseDirectory, logger: logger)
         self.diskQuotaBytes = diskQuotaBytes.map { max($0, 0) }
         self.evictionRecencyPolicy = evictionRecencyPolicy

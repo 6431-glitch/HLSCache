@@ -1,5 +1,6 @@
 import CoreCache
 import Foundation
+import Logging
 
 #if canImport(FoundationNetworking)
 import FoundationNetworking
@@ -53,7 +54,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
     private let fileManager: FileManager
     private let baseDirectory: URL
     private let aliasRegistry: AliasRegistry
-    private let logger: any StructuredLogger
+    private let logger: Logger
     private let networkSession: URLSession
     private let coreCacheStartupReconciliationMode: StartupReconciliationMode
     private let coreCacheStartupReconciliationProgressInterval: Int
@@ -67,7 +68,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
 
     public init(
         baseDirectory: URL,
-        logger: any StructuredLogger = NoopStructuredLogger(),
+        logger: any Loggable = NoOpLoggable(label: "HLSCache.Facade"),
         coreCacheStartupReconciliationMode: StartupReconciliationMode = .synchronous,
         coreCacheStartupReconciliationProgressInterval: Int = 128,
         networkSession: URLSession = .shared
@@ -75,30 +76,10 @@ public final class HLSCacheFacade: @unchecked Sendable {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
         self.aliasRegistry = AliasRegistry(baseDirectory: baseDirectory, logger: logger)
-        self.logger = logger
+        self.logger = logger.logger
         self.coreCacheStartupReconciliationMode = coreCacheStartupReconciliationMode
         self.coreCacheStartupReconciliationProgressInterval = max(1, coreCacheStartupReconciliationProgressInterval)
         self.networkSession = networkSession
-    }
-
-    public convenience init(
-        baseDirectory: URL,
-        logConsumer: any HLSCacheLogConsumer,
-        minimumLogLevel: HLSCacheLogLevel = .debug,
-        coreCacheStartupReconciliationMode: StartupReconciliationMode = .synchronous,
-        coreCacheStartupReconciliationProgressInterval: Int = 128,
-        networkSession: URLSession = .shared
-    ) {
-        self.init(
-            baseDirectory: baseDirectory,
-            logger: HLSCacheLogBridgeLogger(
-                consumer: logConsumer,
-                minimumLevel: minimumLogLevel
-            ),
-            coreCacheStartupReconciliationMode: coreCacheStartupReconciliationMode,
-            coreCacheStartupReconciliationProgressInterval: coreCacheStartupReconciliationProgressInterval,
-            networkSession: networkSession
-        )
     }
 
     @discardableResult

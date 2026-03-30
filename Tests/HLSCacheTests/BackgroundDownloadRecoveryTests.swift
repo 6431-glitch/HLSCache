@@ -1,5 +1,6 @@
 import CoreCache
 import Foundation
+import Logging
 import Testing
 @testable import HLSCache
 
@@ -29,11 +30,11 @@ private func makeBackgroundDownloadResourceID(assetID: String, suffix: String) t
     return ResourceID(cacheKey: cacheKey, kind: .segment, resourceKey: ResourceID.makeResourceKey(from: url))
 }
 
-private final class RecordingStructuredLogger: StructuredLogger, @unchecked Sendable {
+private final class LogEventStore: @unchecked Sendable {
     private let lock = NSLock()
     private var storedEvents: [StructuredLogEvent] = []
 
-    func log(_ event: StructuredLogEvent) {
+    func append(_ event: StructuredLogEvent) {
         lock.lock()
         storedEvents.append(event)
         lock.unlock()
@@ -44,6 +45,77 @@ private final class RecordingStructuredLogger: StructuredLogger, @unchecked Send
         let snapshot = storedEvents
         lock.unlock()
         return snapshot
+    }
+}
+
+private struct RecordingLogHandler: LogHandler {
+    let store: LogEventStore
+    var metadata: Logger.Metadata = [:]
+    var logLevel: Logger.Level = .trace
+
+    subscript(metadataKey key: String) -> Logger.Metadata.Value? {
+        get { metadata[key] }
+        set { metadata[key] = newValue }
+    }
+
+    func log(
+        level: Logger.Level,
+        message _: Logger.Message,
+        metadata: Logger.Metadata?,
+        source _: String,
+        file _: String,
+        function _: String,
+        line _: UInt
+    ) {
+        var merged = self.metadata
+        if let metadata {
+            for (key, value) in metadata {
+                merged[key] = value
+            }
+        }
+
+        store.append(
+            StructuredLogEvent(
+                subsystem: merged["subsystem"]?.stringValue ?? "",
+                operation: merged["operation"]?.stringValue ?? "",
+                level: level,
+                correlationID: merged["correlationID"]?.stringValue ?? "",
+                metadata: merged.mapValues(\.stringValue),
+                timestamp: Date()
+            )
+        )
+    }
+}
+
+private final class RecordingStructuredLogger: Loggable, @unchecked Sendable {
+    private let store: LogEventStore
+    let logger: Logger
+
+    init(label: String = "tests.backgroundRecovery", minimumLevel: Logger.Level = .trace) {
+        let store = LogEventStore()
+        self.store = store
+        var built = Logger(label: label) { _ in
+            RecordingLogHandler(store: store)
+        }
+        built.logLevel = minimumLevel
+        self.logger = built
+    }
+
+    func events() -> [StructuredLogEvent] {
+        store.events()
+    }
+}
+
+private extension Logger.MetadataValue {
+    var stringValue: String {
+        switch self {
+        case let .string(value):
+            return value
+        case let .stringConvertible(value):
+            return String(describing: value)
+        default:
+            return "\(self)"
+        }
     }
 }
 

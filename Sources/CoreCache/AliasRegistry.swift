@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 
 public enum AliasRegistryError: Error, Equatable, Sendable {
     case aliasNotFound(Alias)
@@ -77,17 +78,17 @@ public final class AliasRegistry: @unchecked Sendable {
     private let baseDirectory: URL
     private let fileURL: URL
     private let temporaryFileURL: URL
-    private let logger: any StructuredLogger
+    private let logger: Logger
     private let queue = DispatchQueue(label: "CoreCache.AliasRegistry", attributes: .concurrent)
 
     private var records: [Alias: AssetRecord] = [:]
 
-    public init(baseDirectory: URL, logger: any StructuredLogger = NoopStructuredLogger()) {
+    public init(baseDirectory: URL, logger: any Loggable = NoOpLoggable()) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
         self.fileURL = baseDirectory.appendingPathComponent("alias_registry.json")
         self.temporaryFileURL = baseDirectory.appendingPathComponent("alias_registry.json.tmp")
-        self.logger = logger
+        self.logger = logger.logger
         loadFromDisk()
     }
 

@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 
 public struct StoredManifestRecord: Sendable {
     public let resourceID: ResourceID
@@ -19,17 +20,17 @@ struct ManifestResourceIDScanResult: Sendable {
 public final class ManifestStore: @unchecked Sendable {
     private let fileManager: FileManager
     private let baseDirectory: URL
-    private let logger: any StructuredLogger
+    private let logger: Logger
     private let queue = DispatchQueue(label: "CoreCache.ManifestStore", attributes: .concurrent)
 
-    public init(baseDirectory: URL, logger: any StructuredLogger = NoopStructuredLogger()) {
+    public init(baseDirectory: URL, logger: any Loggable = NoOpLoggable()) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
-        self.logger = logger
+        self.logger = logger.logger
     }
 
     public convenience init(baseDirectory: URL) {
-        self.init(baseDirectory: baseDirectory, logger: NoopStructuredLogger())
+        self.init(baseDirectory: baseDirectory, logger: NoOpLoggable())
     }
 
     public func manifestFileURL(for resourceID: ResourceID) -> URL {

@@ -27,42 +27,30 @@ The architecture cleanly separates playback proxying, storage, and background do
 
 ### Consumer Logging Protocol
 
-Consumers can inject their own logging implementation without depending on `CoreCache` logging types directly.
+`HLSCache` now uses Apple's `swift-log` (`Logging.Logger`) directly. Consumers can inject any `Loggable` implementation backed by their own logger.
 
 ```swift
 import Foundation
 import HLSCache
-import OSLog
+import Logging
 
-struct AppHLSLogger: HLSCacheLogConsumer {
-    private let logger = Logger(subsystem: "com.example.app", category: "HLSCache")
+struct AppHLSLogger: Loggable {
+    let logger: Logger
 
-    func log(_ event: HLSCacheLogEvent) {
-        let metadata = String(describing: event.metadata)
-        logger.log(
-            level: logLevel(event.level),
-            "[\(event.operation)] [\(event.correlationID)] \(metadata, privacy: .public)"
-        )
-    }
-
-    private func logLevel(_ level: HLSCacheLogLevel) -> OSLogType {
-        switch level {
-        case .debug: return .debug
-        case .info: return .info
-        case .warning: return .default
-        case .error: return .error
-        }
+    init() {
+        var logger = Logger(label: "com.example.app.hlscache")
+        logger.logLevel = .debug
+        self.logger = logger
     }
 }
 
 let facade = HLSCacheFacade(
     baseDirectory: cacheDirectoryURL,
-    logConsumer: AppHLSLogger(),
-    minimumLogLevel: .debug
+    logger: AppHLSLogger()
 )
 ```
 
-If needed, you can still pass a custom `StructuredLogger` directly via `logger:` for lower-level integration.
+If needed, you can also pass `NoOpLoggable()` to fully disable logs.
 
 ### Metrics Semantics
 

@@ -1,11 +1,7 @@
 import Foundation
+import Logging
 
-public enum StructuredLogLevel: String, Equatable, Sendable {
-    case debug
-    case info
-    case warning
-    case error
-}
+public typealias StructuredLogLevel = Logger.Level
 
 public struct StructuredLogEvent: Equatable, Sendable {
     public let subsystem: String
@@ -32,11 +28,75 @@ public struct StructuredLogEvent: Equatable, Sendable {
     }
 }
 
-public protocol StructuredLogger: Sendable {
-    func log(_ event: StructuredLogEvent)
+public protocol Loggable: Sendable {
+    var logger: Logger { get }
 }
 
-public struct NoopStructuredLogger: StructuredLogger {
+public extension Loggable {
+    static var logger: Logger {
+        Logger(label: String(reflecting: Self.self))
+    }
+
+    var logger: Logger {
+        Self.logger
+    }
+}
+
+public struct NoOpLogHandler: LogHandler {
+    public var metadata: Logger.Metadata = [:]
+    public var logLevel: Logger.Level = .critical
+
     public init() {}
-    public func log(_ event: StructuredLogEvent) {}
+
+    public subscript(metadataKey metadataKey: String) -> Logger.Metadata.Value? {
+        get { metadata[metadataKey] }
+        set { metadata[metadataKey] = newValue }
+    }
+
+    public func log(
+        level: Logger.Level,
+        message: Logger.Message,
+        metadata: Logger.Metadata?,
+        source _: String,
+        file _: String,
+        function _: String,
+        line _: UInt
+    ) {}
+}
+
+public extension Logger {
+    static func hlsNoOp(label: String) -> Logger {
+        Logger(label: label) { _ in NoOpLogHandler() }
+    }
+
+    func log(_ event: StructuredLogEvent) {
+        guard event.level >= logLevel else {
+            return
+        }
+
+        var fields: Logger.Metadata = [
+            "subsystem": .string(event.subsystem),
+            "operation": .string(event.operation),
+            "correlationID": .string(event.correlationID),
+            "timestampMs": .string(String(Int64(event.timestamp.timeIntervalSince1970 * 1_000)))
+        ]
+
+        for (key, value) in event.metadata {
+            fields[key] = .string(value)
+        }
+
+        log(level: event.level, "\(event.operation)", metadata: fields)
+    }
+}
+
+public struct NoOpLoggable: Loggable {
+    public let logger: Logger
+
+    public init(label: String = "HLSCache.NoOp") {
+        self.logger = .hlsNoOp(label: label)
+    }
+}
+
+extension Logger: Loggable {
+    public var logger: Logger { self }
 }

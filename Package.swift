@@ -20,15 +20,24 @@ let package = Package(
             targets: ["HLSCacheCLI"]
         )
     ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0")
+    ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
         // Targets can depend on other targets in this package and products from dependencies.
         .target(
             name: "HLSCache",
-            dependencies: ["CoreCache"]
+            dependencies: [
+                "CoreCache",
+                .product(name: "Logging", package: "swift-log")
+            ]
         ),
         .target(
-            name: "CoreCache"
+            name: "CoreCache",
+            dependencies: [
+                .product(name: "Logging", package: "swift-log")
+            ]
         ),
         .executableTarget(
             name: "HLSCacheCLI",
@@ -36,11 +45,17 @@ let package = Package(
         ),
         .testTarget(
             name: "HLSCacheTests",
-            dependencies: ["HLSCache"]
+            dependencies: [
+                "HLSCache",
+                .product(name: "Logging", package: "swift-log")
+            ]
         ),
         .testTarget(
             name: "CoreCacheTests",
-            dependencies: ["CoreCache"]
+            dependencies: [
+                "CoreCache",
+                .product(name: "Logging", package: "swift-log")
+            ]
         ),
         .testTarget(
             name: "HLSCacheCLITests",
