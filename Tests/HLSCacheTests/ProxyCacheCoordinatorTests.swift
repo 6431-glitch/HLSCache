@@ -574,7 +574,7 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     let plugin = StampPassThroughPlugin(id: "stamp-pass-through", version: "1.0.0")
 
     let logger = ProxyCoordinatorTestLogger()
-    let cache = try CoreCache(baseDirectory: directory, logger: logger)
+    let cache = try CoreCache(baseDirectory: directory, logger: logger.logger)
     let pipeline = TransformPipeline(transformers: [plugin])
     let coordinator = ProxyCacheCoordinator(coreCache: cache, transformPipeline: pipeline)
 
@@ -726,7 +726,7 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
     let originData = Data((0..<Int(totalLength)).map { UInt8($0 % 197) })
     let resourceID = try makeCoordinatorResourceID()
     let logger = ProxyCoordinatorTestLogger()
-    let cache = try CoreCache(baseDirectory: directory, logger: logger)
+    let cache = try CoreCache(baseDirectory: directory, logger: logger.logger)
 
     let coordinatorV100 = ProxyCacheCoordinator(
         coreCache: cache,
@@ -830,7 +830,7 @@ private func parseByteRange(from request: URLRequest) throws -> ByteRange {
         defer { try? FileManager.default.removeItem(at: directory) }
 
         let logger = ProxyCoordinatorTestLogger()
-        let cache = try CoreCache(baseDirectory: directory, logger: logger)
+        let cache = try CoreCache(baseDirectory: directory, logger: logger.logger)
         let resourceID = try makeCoordinatorResourceID()
 
         let cachedCoordinator = ProxyCacheCoordinator(

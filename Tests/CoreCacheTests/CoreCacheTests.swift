@@ -296,7 +296,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     defer { try? FileManager.default.removeItem(at: directory) }
 
     let logger = RecordingStructuredLogger()
-    let cache = try CoreCache(baseDirectory: directory, diskQuotaBytes: 10, logger: logger)
+    let cache = try CoreCache(baseDirectory: directory, diskQuotaBytes: 10, logger: logger.logger)
     let first = try makeCoreCacheResourceID(assetID: "asset-first", suffix: "lru-first.ts")
     let second = try makeCoreCacheResourceID(assetID: "asset-second", suffix: "lru-second.ts")
 
@@ -426,7 +426,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     defer { try? FileManager.default.removeItem(at: directory) }
 
     let logger = RecordingStructuredLogger()
-    let cache = try CoreCache(baseDirectory: directory, logger: logger)
+    let cache = try CoreCache(baseDirectory: directory, logger: logger.logger)
     let resource = try makeCoreCacheResourceID(suffix: "logging.ts")
 
     _ = try cache.write(Data(repeating: 7, count: 4), resource: resource, at: 0, expectedLength: 4)
@@ -496,7 +496,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     let corruptPayload = Data("{\"broken\":".utf8)
     try corruptPayload.write(to: manifestURL)
 
-    let restarted = try CoreCache(baseDirectory: directory, logger: logger)
+    let restarted = try CoreCache(baseDirectory: directory, logger: logger.logger)
     let quarantineURL = manifestURL.appendingPathExtension("corrupt")
     let diskStore = DiskStore(baseDirectory: directory)
 
@@ -560,7 +560,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     try corruptPayload.write(to: manifestURL)
 
     let logger = RecordingStructuredLogger()
-    let restarted = try CoreCache(baseDirectory: directory, logger: logger)
+    let restarted = try CoreCache(baseDirectory: directory, logger: logger.logger)
     let quarantineURL = manifestURL.appendingPathExtension("corrupt")
 
     #expect(FileManager.default.fileExists(atPath: quarantineURL.path))
@@ -587,7 +587,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     defer { try? FileManager.default.removeItem(at: directory) }
 
     let logger = RecordingStructuredLogger()
-    let cache = try CoreCache(baseDirectory: directory, logger: logger)
+    let cache = try CoreCache(baseDirectory: directory, logger: logger.logger)
     let resource = try makeCoreCacheResourceID(suffix: "runtime-corrupt.ts")
     let payload = Data("runtime-segment".utf8)
 
@@ -653,7 +653,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     #expect(try diskStore.fileLength(for: resource) == 11)
 
     let logger = RecordingStructuredLogger()
-    let cache = try CoreCache(baseDirectory: directory, logger: logger)
+    let cache = try CoreCache(baseDirectory: directory, logger: logger.logger)
 
     #expect(try diskStore.fileLength(for: resource) == 0)
     #expect(try cache.resourceRecord(for: resource) == nil)
@@ -682,7 +682,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
     try manifestStore.save(resourceID: resource, record: ResourceRecord(kind: .segment, expectedLength: 9))
 
     let logger = RecordingStructuredLogger()
-    let cache = try CoreCache(baseDirectory: directory, logger: logger)
+    let cache = try CoreCache(baseDirectory: directory, logger: logger.logger)
 
     #expect(try cache.resourceRecord(for: resource) == nil)
     #expect(try cache.metrics().assets.isEmpty)
@@ -715,7 +715,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
         baseDirectory: directory,
         startupReconciliationMode: .synchronous,
         startupReconciliationProgressInterval: 8,
-        logger: logger
+        logger: logger.logger
     )
 
     let status = cache.startupReconciliationStatus()
@@ -757,7 +757,7 @@ private func br(_ start: Int64, _ endExclusive: Int64) throws -> ByteRange {
         baseDirectory: directory,
         startupReconciliationMode: .asynchronous,
         startupReconciliationProgressInterval: 32,
-        logger: logger
+        logger: logger.logger
     )
 
     let immediateStatus = cache.startupReconciliationStatus()

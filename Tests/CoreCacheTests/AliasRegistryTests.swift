@@ -323,7 +323,7 @@ private extension Logger.MetadataValue {
     try corruptData.write(to: registryFileURL)
 
     let logger = RecordingStructuredLogger()
-    let registry = AliasRegistry(baseDirectory: directory, logger: logger)
+    let registry = AliasRegistry(baseDirectory: directory, logger: logger.logger)
 
     #expect(registry.allRecords().isEmpty)
 
@@ -365,7 +365,7 @@ private extension Logger.MetadataValue {
     for index in 0..<5 {
         let corruptData = Data("{invalid-\(index)".utf8)
         try corruptData.write(to: registryFileURL)
-        _ = AliasRegistry(baseDirectory: directory, logger: logger)
+        _ = AliasRegistry(baseDirectory: directory, logger: logger.logger)
     }
 
     let snapshots = try aliasRegistryCorruptSnapshots(in: directory)

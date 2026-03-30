@@ -53,7 +53,7 @@ public struct BackgroundDownloadRecoveryResult: Equatable, Sendable {
     }
 }
 
-public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
+public final class BackgroundDownloadTaskRegistry: @unchecked Sendable, Loggable {
     private static let corruptSnapshotRetentionLimit = 3
     private static let corruptSnapshotFilenamePrefix = "background_download_tasks.json.corrupt."
     private static let corruptSnapshotSequenceLock = NSLock()
@@ -63,7 +63,7 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
     private let baseDirectory: URL
     private let fileURL: URL
     private let temporaryFileURL: URL
-    private let logger: Logger
+    private let configuredLogger: Logger
     private let queue = DispatchQueue(label: "HLSCache.BackgroundDownloadTaskRegistry", attributes: .concurrent)
 
     private var records: [Int: BackgroundDownloadTaskRecord] = [:]
@@ -71,13 +71,13 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
     public init(
         baseDirectory: URL,
         fileName: String = "background_download_tasks.json",
-        logger: any Loggable = NoOpLoggable()
+        logger: Logger = Logger(label: String(reflecting: BackgroundDownloadTaskRegistry.self))
     ) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
         self.fileURL = baseDirectory.appendingPathComponent(fileName)
         self.temporaryFileURL = baseDirectory.appendingPathComponent("\(fileName).tmp")
-        self.logger = logger.logger
+        self.configuredLogger = logger
         loadFromDisk()
     }
 
@@ -195,7 +195,7 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
             let retainedSnapshotCount = try existingCorruptSnapshotURLsSortedByAge().count
 
             try saveToDiskAtomic()
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "loadBackgroundDownloadTaskRegistry",
@@ -215,7 +215,7 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
                 )
             )
         } catch {
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "loadBackgroundDownloadTaskRegistry",
@@ -309,12 +309,16 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable {
             throw error
         }
     }
+
+    private var activeLogger: Logger {
+        configuredLogger
+    }
 }
 
-public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable {
+public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable, Loggable {
     private let fileManager: FileManager
     private let baseDirectory: URL
-    private let logger: Logger
+    private let configuredLogger: Logger
     public let registry: BackgroundDownloadTaskRegistry
     private let diskStore: DiskStore
     private let manifestStore: ManifestStore
@@ -325,14 +329,14 @@ public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable {
         registry: BackgroundDownloadTaskRegistry? = nil,
         diskStore: DiskStore? = nil,
         manifestStore: ManifestStore? = nil,
-        logger: any Loggable = NoOpLoggable()
+        logger: Logger = Logger(label: String(reflecting: BackgroundDownloadRecoveryCoordinator.self))
     ) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
-        self.logger = logger.logger
+        self.configuredLogger = logger
         self.registry = registry ?? BackgroundDownloadTaskRegistry(baseDirectory: baseDirectory, logger: logger)
         self.diskStore = diskStore ?? DiskStore(baseDirectory: baseDirectory)
-        self.manifestStore = manifestStore ?? ManifestStore(baseDirectory: baseDirectory)
+        self.manifestStore = manifestStore ?? ManifestStore(baseDirectory: baseDirectory, logger: logger)
         queue.sync(flags: .barrier) {
             reconcileStorageOnStartup()
         }
@@ -454,7 +458,7 @@ public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable {
 
             for resourceID in orphanManifestIDs {
                 try manifestStore.delete(resourceID: resourceID)
-                logger.log(
+                activeLogger.log(
                     StructuredLogEvent(
                         subsystem: "HLSCache",
                         operation: "reconcileBackgroundStartup",
@@ -473,7 +477,7 @@ public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable {
                 let bytes = try diskStore.fileLength(for: resourceID)
                 try diskStore.remove(resourceID: resourceID)
                 purgedOrphanDataBytes += bytes
-                logger.log(
+                activeLogger.log(
                     StructuredLogEvent(
                         subsystem: "HLSCache",
                         operation: "reconcileBackgroundStartup",
@@ -493,7 +497,7 @@ public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable {
                 let bytes = (try? fileLength(at: stagingURL)) ?? 0
                 try fileManager.removeItem(at: stagingURL)
                 purgedOrphanStagingBytes += bytes
-                logger.log(
+                activeLogger.log(
                     StructuredLogEvent(
                         subsystem: "HLSCache",
                         operation: "reconcileBackgroundStartup",
@@ -508,7 +512,7 @@ public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable {
                 )
             }
 
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "reconcileBackgroundStartup",
@@ -525,7 +529,7 @@ public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable {
                 )
             )
         } catch {
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "reconcileBackgroundStartup",
@@ -630,5 +634,9 @@ public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable {
             return lhs.kind.rawValue < rhs.kind.rawValue
         }
         return lhs.resourceKey < rhs.resourceKey
+    }
+
+    private var activeLogger: Logger {
+        configuredLogger
     }
 }

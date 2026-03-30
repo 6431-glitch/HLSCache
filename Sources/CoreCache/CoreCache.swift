@@ -140,7 +140,7 @@ public struct StartupReconciliationStatus: Equatable, Sendable {
     }
 }
 
-public final class CoreCache: @unchecked Sendable {
+public final class CoreCache: @unchecked Sendable, Loggable {
     private struct PlanMetricsAccumulator {
         var totalRequests: Int64 = 0
         var fullHitRequests: Int64 = 0
@@ -159,9 +159,9 @@ public final class CoreCache: @unchecked Sendable {
     private let directoryLock: DirectoryLock
     private let diskStore: DiskStore
     private let manifestStore: ManifestStore
+    private let configuredLogger: Logger
     private let diskQuotaBytes: Int64?
     private let evictionRecencyPolicy: EvictionRecencyPolicy
-    private let logger: Logger
     private let startupReconciliationMode: StartupReconciliationMode
     private let startupReconciliationProgressInterval: Int
     private let startupReconciliationCompletionGroup = DispatchGroup()
@@ -174,12 +174,12 @@ public final class CoreCache: @unchecked Sendable {
         evictionRecencyPolicy: EvictionRecencyPolicy = .leastRecentlyUpdated,
         startupReconciliationMode: StartupReconciliationMode = .synchronous,
         startupReconciliationProgressInterval: Int = 128,
-        logger: any Loggable = NoOpLoggable()
+        logger: Logger = Logger(label: String(reflecting: CoreCache.self))
     ) throws {
         self.directoryLock = try DirectoryLock(baseDirectory: baseDirectory)
         self.diskStore = DiskStore(baseDirectory: baseDirectory)
-        self.logger = logger.logger
         self.manifestStore = ManifestStore(baseDirectory: baseDirectory, logger: logger)
+        self.configuredLogger = logger
         self.diskQuotaBytes = diskQuotaBytes.map { max($0, 0) }
         self.evictionRecencyPolicy = evictionRecencyPolicy
         self.startupReconciliationMode = startupReconciliationMode
@@ -242,7 +242,7 @@ public final class CoreCache: @unchecked Sendable {
             }
 
             recordPlanMetrics(parts: parts, requested: requested)
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "plan",
@@ -379,7 +379,7 @@ public final class CoreCache: @unchecked Sendable {
             record.touch()
             try manifestStore.save(resourceID: resource, record: record)
             try enforceDiskQuotaIfNeeded(correlationID: resolvedCorrelationID)
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "write",
@@ -405,7 +405,7 @@ public final class CoreCache: @unchecked Sendable {
         let resolvedCorrelationID = resolvedCorrelationID(correlationID)
         return try queue.sync {
             let data = try diskStore.read(resourceID: resource, range: range)
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "read",
@@ -448,7 +448,7 @@ public final class CoreCache: @unchecked Sendable {
             record.touch()
             try manifestStore.save(resourceID: resource, record: record)
             try enforceDiskQuotaIfNeeded(correlationID: resolvedCorrelationID)
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "finalizeWrite",
@@ -480,7 +480,7 @@ public final class CoreCache: @unchecked Sendable {
     ) {
         let resolvedCorrelationID = resolvedCorrelationID(correlationID)
         queue.sync {
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "pluginMigrationDecision",
@@ -511,7 +511,7 @@ public final class CoreCache: @unchecked Sendable {
             record.integrity = integrity
             record.touch()
             try manifestStore.save(resourceID: resource, record: record)
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "setResourceIntegrity",
@@ -538,7 +538,7 @@ public final class CoreCache: @unchecked Sendable {
             let bytes = try diskStore.fileLength(for: resource)
             try diskStore.remove(resourceID: resource)
             try manifestStore.delete(resourceID: resource)
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "invalidateResource",
@@ -627,7 +627,7 @@ public final class CoreCache: @unchecked Sendable {
             var purgedOrphanDataBytes: Int64 = 0
             var processedUnits = 0
 
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "reconcileStartup",
@@ -667,7 +667,7 @@ public final class CoreCache: @unchecked Sendable {
                 }
 
                 let elapsedMillis = Int64(Date().timeIntervalSince(startedAt) * 1_000)
-                logger.log(
+                activeLogger.log(
                     StructuredLogEvent(
                         subsystem: "CoreCache",
                         operation: "reconcileStartup",
@@ -701,7 +701,7 @@ public final class CoreCache: @unchecked Sendable {
                     purgedCorruptedManifestDataBytes: manifestScan.purgedCorruptedManifestDataBytes
                 )
                 emitProgressIfNeeded()
-                logger.log(
+                activeLogger.log(
                     StructuredLogEvent(
                         subsystem: "CoreCache",
                         operation: "reconcileStartup",
@@ -734,7 +734,7 @@ public final class CoreCache: @unchecked Sendable {
                     purgedCorruptedManifestDataBytes: manifestScan.purgedCorruptedManifestDataBytes
                 )
                 emitProgressIfNeeded()
-                logger.log(
+                activeLogger.log(
                     StructuredLogEvent(
                         subsystem: "CoreCache",
                         operation: "reconcileStartup",
@@ -769,7 +769,7 @@ public final class CoreCache: @unchecked Sendable {
                 purgedCorruptedManifestDataBytes: manifestScan.purgedCorruptedManifestDataBytes
             )
 
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "reconcileStartup",
@@ -809,7 +809,7 @@ public final class CoreCache: @unchecked Sendable {
                 purgedCorruptedManifestDataBytes: previous.purgedCorruptedManifestDataBytes,
                 errorDescription: String(describing: error)
             )
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "reconcileStartup",
@@ -896,7 +896,7 @@ public final class CoreCache: @unchecked Sendable {
 
                 try diskStore.remove(resourceID: resource)
                 try manifestStore.delete(resourceID: resource)
-                logger.log(
+                activeLogger.log(
                     StructuredLogEvent(
                         subsystem: "CoreCache",
                         operation: "evict",
@@ -978,5 +978,9 @@ public final class CoreCache: @unchecked Sendable {
             return lhs.kind.rawValue < rhs.kind.rawValue
         }
         return lhs.resourceKey < rhs.resourceKey
+    }
+
+    private var activeLogger: Logger {
+        configuredLogger
     }
 }

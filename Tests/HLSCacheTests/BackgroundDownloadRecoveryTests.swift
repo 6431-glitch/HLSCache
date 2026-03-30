@@ -207,7 +207,7 @@ private extension Logger.MetadataValue {
     try corruptData.write(to: registryFileURL)
 
     let logger = RecordingStructuredLogger()
-    let registry = BackgroundDownloadTaskRegistry(baseDirectory: directory, logger: logger)
+    let registry = BackgroundDownloadTaskRegistry(baseDirectory: directory, logger: logger.logger)
 
     #expect(registry.allRecords().isEmpty)
 
@@ -269,7 +269,7 @@ private extension Logger.MetadataValue {
     for index in 0..<5 {
         let corruptData = Data("{invalid-\(index)".utf8)
         try corruptData.write(to: registryFileURL)
-        _ = BackgroundDownloadTaskRegistry(baseDirectory: directory, logger: logger)
+        _ = BackgroundDownloadTaskRegistry(baseDirectory: directory, logger: logger.logger)
     }
 
     let snapshots = try backgroundRegistryCorruptSnapshots(in: directory)
@@ -301,7 +301,7 @@ private extension Logger.MetadataValue {
     try FileManager.default.createDirectory(at: registryFileURL, withIntermediateDirectories: true)
 
     let logger = RecordingStructuredLogger()
-    let registry = BackgroundDownloadTaskRegistry(baseDirectory: directory, logger: logger)
+    let registry = BackgroundDownloadTaskRegistry(baseDirectory: directory, logger: logger.logger)
 
     #expect(registry.allRecords().isEmpty)
 
@@ -363,7 +363,7 @@ private extension Logger.MetadataValue {
     try orphanStagingPayload.write(to: stagingURL)
 
     let logger = RecordingStructuredLogger()
-    _ = BackgroundDownloadRecoveryCoordinator(baseDirectory: directory, logger: logger)
+    _ = BackgroundDownloadRecoveryCoordinator(baseDirectory: directory, logger: logger.logger)
 
     #expect(FileManager.default.fileExists(atPath: diskStore.dataFileURL(for: orphanDataResource).path) == false)
     #expect(try manifestStore.load(resourceID: orphanManifestResource) == nil)
@@ -428,7 +428,7 @@ private extension Logger.MetadataValue {
     try manifestStore.save(resourceID: resourceID, record: record)
 
     let logger = RecordingStructuredLogger()
-    _ = BackgroundDownloadRecoveryCoordinator(baseDirectory: directory, logger: logger)
+    _ = BackgroundDownloadRecoveryCoordinator(baseDirectory: directory, logger: logger.logger)
 
     #expect(FileManager.default.fileExists(atPath: diskStore.dataFileURL(for: resourceID).path))
     let restored = try #require(try manifestStore.load(resourceID: resourceID))

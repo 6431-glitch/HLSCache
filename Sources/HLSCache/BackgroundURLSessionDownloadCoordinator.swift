@@ -1,5 +1,6 @@
 import CoreCache
 import Foundation
+import Logging
 
 #if canImport(FoundationNetworking)
 import FoundationNetworking
@@ -11,7 +12,7 @@ public final class BackgroundURLSessionDownloadCoordinator: @unchecked Sendable 
     public init(
         baseDirectory: URL,
         recoveryCoordinator: BackgroundDownloadRecoveryCoordinator? = nil,
-        logger: any Loggable = NoOpLoggable()
+        logger: Logger = Logger(label: String(reflecting: BackgroundURLSessionDownloadCoordinator.self))
     ) {
         self.recoveryCoordinator = recoveryCoordinator
             ?? BackgroundDownloadRecoveryCoordinator(baseDirectory: baseDirectory, logger: logger)

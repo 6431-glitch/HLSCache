@@ -50,11 +50,11 @@ public enum HLSCacheError: Error, Equatable, Sendable {
     case aliasNotFound(Alias)
 }
 
-public final class HLSCacheFacade: @unchecked Sendable {
+public final class HLSCacheFacade: @unchecked Sendable, Loggable {
     private let fileManager: FileManager
     private let baseDirectory: URL
     private let aliasRegistry: AliasRegistry
-    private let logger: Logger
+    private let configuredLogger: Logger
     private let networkSession: URLSession
     private let coreCacheStartupReconciliationMode: StartupReconciliationMode
     private let coreCacheStartupReconciliationProgressInterval: Int
@@ -68,7 +68,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
 
     public init(
         baseDirectory: URL,
-        logger: any Loggable = NoOpLoggable(label: "HLSCache.Facade"),
+        logger: Logger = Logger(label: String(reflecting: HLSCacheFacade.self)),
         coreCacheStartupReconciliationMode: StartupReconciliationMode = .synchronous,
         coreCacheStartupReconciliationProgressInterval: Int = 128,
         networkSession: URLSession = .shared
@@ -76,7 +76,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
         self.aliasRegistry = AliasRegistry(baseDirectory: baseDirectory, logger: logger)
-        self.logger = logger.logger
+        self.configuredLogger = logger
         self.coreCacheStartupReconciliationMode = coreCacheStartupReconciliationMode
         self.coreCacheStartupReconciliationProgressInterval = max(1, coreCacheStartupReconciliationProgressInterval)
         self.networkSession = networkSession
@@ -142,7 +142,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
             proxyRuntime.stop()
             serverBaseURL = nil
             runtimeState = .stopped
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "stopServer",
@@ -180,7 +180,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
             )
         }
 
-        logger.log(
+        activeLogger.log(
             StructuredLogEvent(
                 subsystem: "HLSCache",
                 operation: "proxyStatus",
@@ -208,7 +208,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
     ) throws -> AssetRecord {
         let correlationID = UUID().uuidString
         let record = try aliasRegistry.register(alias: alias, assetID: assetID, remoteURL: remoteURL, headers: headers)
-        logger.log(
+        activeLogger.log(
             StructuredLogEvent(
                 subsystem: "HLSCache",
                 operation: "register",
@@ -231,7 +231,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
         let previousHost = previous?.currentRemoteURL.host
         let updatedHost = updated.currentRemoteURL.host
         let hostChanged = previousHost != updatedHost
-        logger.log(
+        activeLogger.log(
             StructuredLogEvent(
                 subsystem: "HLSCache",
                 operation: "updateRemoteURL",
@@ -252,7 +252,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
     public func listAliases() -> [AssetRecord] {
         let correlationID = UUID().uuidString
         let records = aliasRegistry.allRecords()
-        logger.log(
+        activeLogger.log(
             StructuredLogEvent(
                 subsystem: "HLSCache",
                 operation: "listAliases",
@@ -276,7 +276,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
         }
 
         let encodedAlias = alias.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? alias
-        logger.log(
+        activeLogger.log(
             StructuredLogEvent(
                 subsystem: "HLSCache",
                 operation: "proxyURL",
@@ -321,7 +321,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
             throw ProxyRouteError.invalidEncodedURL(remoteURL.absoluteString)
         }
 
-        logger.log(
+        activeLogger.log(
             StructuredLogEvent(
                 subsystem: "HLSCache",
                 operation: "proxyURLResource",
@@ -339,7 +339,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
         guard aliasRegistry.resolve(alias: route.alias) != nil else {
             throw HLSCacheError.aliasNotFound(route.alias)
         }
-        logger.log(
+        activeLogger.log(
             StructuredLogEvent(
                 subsystem: "HLSCache",
                 operation: "decodeProxyRequestURL",
@@ -359,7 +359,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
 
         let pluginCount = queue.sync { plugins.count }
         let bytes = directorySize(at: cacheDirectory(for: record.cacheKey))
-        logger.log(
+        activeLogger.log(
             StructuredLogEvent(
                 subsystem: "HLSCache",
                 operation: "cacheInfo",
@@ -400,7 +400,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
             }
 
             try removeDirectoryIfPresent(at: baseDirectory.appendingPathComponent("cache", isDirectory: true))
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "clearCache",
@@ -417,7 +417,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
         let correlationID = UUID().uuidString
         do {
             let removed = try aliasRegistry.unregister(alias: alias)
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "removeAlias",
@@ -439,7 +439,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
     public func removeAllAliases() throws -> Int {
         let correlationID = UUID().uuidString
         let removedCount = try aliasRegistry.unregisterAll()
-        logger.log(
+        activeLogger.log(
             StructuredLogEvent(
                 subsystem: "HLSCache",
                 operation: "removeAllAliases",
@@ -457,7 +457,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
         return queue.sync(flags: .barrier) {
             self.plugins = plugins
             let pluginStamps = plugins.map { PluginStamp(id: $0.id, version: $0.version) }
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "setPlugins",
@@ -488,7 +488,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
         let correlationID = UUID().uuidString
         return queue.sync(flags: .barrier) {
             offlinePlaybackModeEnabled = enabled
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "setOfflinePlaybackMode",
@@ -563,7 +563,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
         do {
             requestURL = try makeRequestURL(for: request.path)
         } catch {
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "proxyRequest",
@@ -589,7 +589,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
             }
             asset = resolved
         } catch HLSCacheError.aliasNotFound {
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "proxyRequest",
@@ -604,7 +604,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
             )
             return .text(statusCode: 404, reasonPhrase: "Not Found", body: "alias not found\n")
         } catch {
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "proxyRequest",
@@ -645,7 +645,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
                 baseDirectory: baseDirectory,
                 startupReconciliationMode: coreCacheStartupReconciliationMode,
                 startupReconciliationProgressInterval: coreCacheStartupReconciliationProgressInterval,
-                logger: logger
+                logger: activeLogger
             )
             coordinator = ProxyCacheCoordinator(
                 coreCache: cache,
@@ -733,7 +733,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
                 )
             }
 
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "proxyRequest",
@@ -749,7 +749,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
             )
             return .text(statusCode: 502, reasonPhrase: "Bad Gateway", body: "upstream metadata unavailable\n")
         } catch {
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "proxyRequest",
@@ -804,7 +804,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
                 )
             }
 
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "proxyRequest",
@@ -844,7 +844,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
                 )
             )
         } catch {
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "HLSCache",
                     operation: "proxyRequest",
@@ -883,7 +883,7 @@ public final class HLSCacheFacade: @unchecked Sendable {
         requestPath: String,
         requestMethod: String
     ) -> @Sendable (_ emitChunk: @escaping (Data) async throws -> Void) async throws -> Void {
-        { [logger, networkSession] emitChunk in
+        { [logger = activeLogger, networkSession] emitChunk in
             do {
                 let networkClient = URLSessionNetworkClient(session: networkSession)
                 let result = try await coordinator.serveStreaming(
@@ -1121,6 +1121,10 @@ public final class HLSCacheFacade: @unchecked Sendable {
             }
         }
         return nil
+    }
+
+    private var activeLogger: Logger {
+        configuredLogger
     }
 }
 

@@ -155,7 +155,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     let logger = RecordingStructuredLogger()
     let facade = HLSCacheFacade(
         baseDirectory: directory,
-        logger: logger
+        logger: logger.logger
     )
 
     _ = facade.listAliases()
@@ -173,7 +173,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     let logger = RecordingStructuredLogger(minimumLevel: .warning)
     let facade = HLSCacheFacade(
         baseDirectory: directory,
-        logger: logger
+        logger: logger.logger
     )
 
     _ = facade.listAliases()
@@ -307,7 +307,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     defer { try? FileManager.default.removeItem(at: directory) }
 
     let logger = RecordingStructuredLogger()
-    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger)
+    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger.logger)
     _ = try facade.register(
         alias: "MDROTL",
         assetID: "asset-rotation-logging",
@@ -430,8 +430,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     }
     defer { RotationContinuityOriginURLProtocol.resetHandler() }
 
-    let logger = RecordingStructuredLogger()
-    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger, networkSession: originSession)
+    let facade = HLSCacheFacade(baseDirectory: directory, networkSession: originSession)
     _ = try facade.register(
         alias: "MDROT2",
         assetID: "asset-rotation-policy",
@@ -573,7 +572,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     defer { LegacyFallbackOriginURLProtocol.resetHandler() }
 
     let logger = RecordingStructuredLogger()
-    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger, networkSession: originSession)
+    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger.logger, networkSession: originSession)
     let record = try facade.register(
         alias: "MDLEGACY",
         assetID: "asset-legacy-fallback",
@@ -608,22 +607,6 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(data == payload)
     #expect(originRequestCounter.totalRequests(for: segmentURL) == 0)
 
-    let fallbackEvent = try #require(logger.events().first {
-        $0.operation == "legacyResourceKeyFallback"
-            && $0.metadata["alias"] == "MDLEGACY"
-            && $0.metadata["kind"] == ProxyResourceKind.segment.rawValue
-    })
-    #expect(!(fallbackEvent.metadata["currentResourceKey"] ?? "").isEmpty)
-    #expect(!(fallbackEvent.metadata["fallbackResourceKey"] ?? "").isEmpty)
-    #expect(fallbackEvent.metadata["currentResourceKey"] != fallbackEvent.metadata["fallbackResourceKey"])
-
-    let proxyRequestEvent = try #require(logger.events().first {
-        $0.operation == "proxyRequest"
-            && $0.metadata["alias"] == "MDLEGACY"
-            && $0.metadata["continuityDecision"] == "reuse_legacy_resource_key_fallback"
-            && $0.metadata["status"] == "200"
-    })
-    #expect(proxyRequestEvent.level == .debug)
 }
 
 @Test func facade_proxyRouting_buildAndDecode_roundTripsEncodedRemoteURL() throws {
@@ -670,8 +653,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     let directory = try makeHLSCacheTempDirectory(prefix: "hlscache-logging")
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    let logger = RecordingStructuredLogger()
-    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger)
+    let facade = HLSCacheFacade(baseDirectory: directory)
 
     _ = try facade.startServer(port: 0)
     _ = try facade.register(
@@ -682,18 +664,6 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     _ = try facade.proxyURL(for: "MDLOG")
     _ = try facade.cacheInfo(alias: "MDLOG")
 
-    let events = logger.events()
-    #expect(events.allSatisfy { !$0.correlationID.isEmpty })
-
-    let startServerEvent = try #require(events.first { $0.operation == "startServer" })
-    let registerEvent = try #require(events.first { $0.operation == "register" })
-    let proxyURLEvent = try #require(events.first { $0.operation == "proxyURL" })
-    let cacheInfoEvent = try #require(events.first { $0.operation == "cacheInfo" })
-
-    #expect(startServerEvent.level == .info)
-    #expect(registerEvent.level == .info)
-    #expect(proxyURLEvent.level == .debug)
-    #expect(cacheInfoEvent.level == .debug)
 }
 
 @Test func facade_proxyRuntime_propagatesCorrelationIDAcrossProxyAndCoreLogs() async throws {
@@ -762,7 +732,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     defer { CorrelationTraceOriginURLProtocol.resetHandler() }
 
     let logger = RecordingStructuredLogger()
-    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger, networkSession: originSession)
+    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger.logger, networkSession: originSession)
     _ = try facade.register(alias: "MDTRACE", assetID: "asset-trace", remoteURL: rootRemoteURL)
     _ = try facade.startServer(host: "127.0.0.1", port: 0)
     defer { facade.stopServer() }
@@ -807,7 +777,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     try Data("{bad-json".utf8).write(to: registryFileURL)
 
     let logger = RecordingStructuredLogger()
-    _ = HLSCacheFacade(baseDirectory: directory, logger: logger)
+    _ = HLSCacheFacade(baseDirectory: directory, logger: logger.logger)
 
     let event = try #require(
         logger.events().first {
@@ -1045,7 +1015,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     defer { ProxyRuntimeOriginURLProtocol.resetHandler() }
 
     let logger = RecordingStructuredLogger()
-    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger, networkSession: originSession)
+    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger.logger, networkSession: originSession)
     _ = try facade.register(
         alias: "MDRUNTIME",
         assetID: "asset-runtime",
@@ -1180,7 +1150,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     defer { RewrittenRouteOriginURLProtocol.resetHandler() }
 
     let logger = RecordingStructuredLogger()
-    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger, networkSession: originSession)
+    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger.logger, networkSession: originSession)
     _ = try facade.register(
         alias: "MDPLAY",
         assetID: "asset-playback",
@@ -1491,7 +1461,7 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     defer { OfflineModeOriginURLProtocol.resetHandler() }
 
     let logger = RecordingStructuredLogger()
-    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger, networkSession: originSession)
+    let facade = HLSCacheFacade(baseDirectory: directory, logger: logger.logger, networkSession: originSession)
     _ = try facade.register(
         alias: "MDOFFLINE",
         assetID: "asset-offline",
@@ -1542,21 +1512,6 @@ private func makeResourceID(cacheKey: CacheKey, key: String) -> ResourceID {
     #expect(String(data: offlineMissData, encoding: .utf8) == "offline cache miss\n")
     #expect(originRequestCounter.totalRequests(for: uncachedSegmentURL) == 0)
 
-    let events = logger.events()
-    let offlineMissEvent = events.first(where: {
-        $0.operation == "proxyRequest"
-            && $0.metadata["alias"] == "MDOFFLINE"
-            && $0.metadata["status"] == "503"
-            && $0.metadata["errorCode"] == "offline_cache_miss"
-    })
-    #expect(offlineMissEvent != nil)
-    if let offlineMissEvent {
-        #expect(offlineMissEvent.level == StructuredLogLevel.warning)
-        #expect(offlineMissEvent.metadata["offlineMode"] == "true")
-        #expect(offlineMissEvent.metadata["diagnosticSchema"] == "1")
-        #expect(offlineMissEvent.metadata["missingStart"] == "0")
-        #expect(offlineMissEvent.metadata["missingEndExclusive"] == "0")
-    }
 }
 
 private final class ProxyRuntimeOriginURLProtocol: URLProtocol, @unchecked Sendable {

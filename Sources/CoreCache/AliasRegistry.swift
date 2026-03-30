@@ -68,7 +68,7 @@ public struct AssetRecord: Codable, Hashable, Sendable {
     }
 }
 
-public final class AliasRegistry: @unchecked Sendable {
+public final class AliasRegistry: @unchecked Sendable, Loggable {
     private static let corruptSnapshotRetentionLimit = 3
     private static let corruptSnapshotFilenamePrefix = "alias_registry.json.corrupt."
     private static let corruptSnapshotSequenceLock = NSLock()
@@ -78,17 +78,20 @@ public final class AliasRegistry: @unchecked Sendable {
     private let baseDirectory: URL
     private let fileURL: URL
     private let temporaryFileURL: URL
-    private let logger: Logger
+    private let configuredLogger: Logger
     private let queue = DispatchQueue(label: "CoreCache.AliasRegistry", attributes: .concurrent)
 
     private var records: [Alias: AssetRecord] = [:]
 
-    public init(baseDirectory: URL, logger: any Loggable = NoOpLoggable()) {
+    public init(
+        baseDirectory: URL,
+        logger: Logger = Logger(label: String(reflecting: AliasRegistry.self))
+    ) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
         self.fileURL = baseDirectory.appendingPathComponent("alias_registry.json")
         self.temporaryFileURL = baseDirectory.appendingPathComponent("alias_registry.json.tmp")
-        self.logger = logger.logger
+        self.configuredLogger = logger
         loadFromDisk()
     }
 
@@ -195,7 +198,7 @@ public final class AliasRegistry: @unchecked Sendable {
             recoverFromDecodeFailure(decodeError)
         } catch {
             records = [:]
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "loadAliasRegistry",
@@ -221,7 +224,7 @@ public final class AliasRegistry: @unchecked Sendable {
             let prunedSnapshots = try enforceCorruptSnapshotRetention()
 
             try saveToDiskAtomic()
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "loadAliasRegistry",
@@ -240,7 +243,7 @@ public final class AliasRegistry: @unchecked Sendable {
                 )
             )
         } catch {
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "loadAliasRegistry",
@@ -334,5 +337,9 @@ public final class AliasRegistry: @unchecked Sendable {
             try? fileManager.removeItem(at: temporaryFileURL)
             throw error
         }
+    }
+
+    private var activeLogger: Logger {
+        configuredLogger
     }
 }

@@ -17,20 +17,19 @@ struct ManifestResourceIDScanResult: Sendable {
     let purgedCorruptedManifestDataBytes: Int64
 }
 
-public final class ManifestStore: @unchecked Sendable {
+public final class ManifestStore: @unchecked Sendable, Loggable {
     private let fileManager: FileManager
     private let baseDirectory: URL
-    private let logger: Logger
+    private let configuredLogger: Logger
     private let queue = DispatchQueue(label: "CoreCache.ManifestStore", attributes: .concurrent)
 
-    public init(baseDirectory: URL, logger: any Loggable = NoOpLoggable()) {
+    public init(
+        baseDirectory: URL,
+        logger: Logger = Logger(label: String(reflecting: ManifestStore.self))
+    ) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
-        self.logger = logger.logger
-    }
-
-    public convenience init(baseDirectory: URL) {
-        self.init(baseDirectory: baseDirectory, logger: NoOpLoggable())
+        self.configuredLogger = logger
     }
 
     public func manifestFileURL(for resourceID: ResourceID) -> URL {
@@ -278,7 +277,7 @@ public final class ManifestStore: @unchecked Sendable {
                 try fileManager.removeItem(at: dataFileURL)
             }
 
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "manifestDecodeRecovery",
@@ -300,7 +299,7 @@ public final class ManifestStore: @unchecked Sendable {
             )
             return purgedDataBytes
         } catch {
-            logger.log(
+            activeLogger.log(
                 StructuredLogEvent(
                     subsystem: "CoreCache",
                     operation: "manifestDecodeRecovery",
@@ -366,5 +365,9 @@ public final class ManifestStore: @unchecked Sendable {
             kind: kind,
             resourceKey: resourceKey
         )
+    }
+
+    private var activeLogger: Logger {
+        configuredLogger
     }
 }
