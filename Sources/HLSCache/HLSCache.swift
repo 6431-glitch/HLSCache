@@ -50,12 +50,12 @@ public enum HLSCacheError: Error, Equatable, Sendable {
     case aliasNotFound(Alias)
 }
 
-public final class HLSCacheFacade: @unchecked Sendable, Loggable {
+public final class HLSCacheFacade: @unchecked Sendable, HLSLoggable {
     private let fileManager: FileManager
     private let baseDirectory: URL
     private let aliasRegistry: AliasRegistry
-    private let configuredLogger: Logger
-    private let networkSession: URLSession
+    private let overrideLogger: Logger?
+    private let networkClient: any NetworkClient
     private let coreCacheStartupReconciliationMode: StartupReconciliationMode
     private let coreCacheStartupReconciliationProgressInterval: Int
     private let queue = DispatchQueue(label: "HLSCache.Facade", attributes: .concurrent)
@@ -68,23 +68,26 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
 
     public init(
         baseDirectory: URL,
-        logger: Logger = Logger(label: String(reflecting: HLSCacheFacade.self)),
+        logger: Logger? = nil,
         coreCacheStartupReconciliationMode: StartupReconciliationMode = .synchronous,
         coreCacheStartupReconciliationProgressInterval: Int = 128,
-        networkSession: URLSession = .shared
+        networkSession: URLSession = .shared,
+        networkClient: (any NetworkClient)? = nil
     ) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
         self.aliasRegistry = AliasRegistry(baseDirectory: baseDirectory, logger: logger)
-        self.configuredLogger = logger
+        self.overrideLogger = logger
         self.coreCacheStartupReconciliationMode = coreCacheStartupReconciliationMode
         self.coreCacheStartupReconciliationProgressInterval = max(1, coreCacheStartupReconciliationProgressInterval)
-        self.networkSession = networkSession
+        self.networkClient = networkClient ?? GetNetworkClient.pulseEnabled(
+            sessionConfiguration: networkSession.configuration,
+            sessionDelegate: networkSession.delegate
+        )
     }
 
     @discardableResult
     public func startServer(host: String = "127.0.0.1", port: Int = 8080) throws -> URL {
-        let correlationID = UUID().uuidString
         return try queue.sync(flags: .barrier) {
             if runtimeState == .running, let existing = serverBaseURL {
                 return existing
@@ -99,63 +102,28 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
                 )
                 serverBaseURL = resolvedURL
                 runtimeState = .running
-                logger.log(
-                    StructuredLogEvent(
-                        subsystem: "HLSCache",
-                        operation: "startServer",
-                        level: .info,
-                        correlationID: correlationID,
-                        metadata: [
-                            "host": resolvedURL.host ?? host,
-                            "port": resolvedURL.port.map(String.init) ?? String(port),
-                            "state": runtimeState.rawValue
-                        ]
-                    )
-                )
+                logger.info("Proxy server started at \(resolvedURL.absoluteString)")
                 return resolvedURL
             } catch {
                 runtimeState = .stopped
                 serverBaseURL = nil
-                logger.log(
-                    StructuredLogEvent(
-                        subsystem: "HLSCache",
-                        operation: "startServer",
-                        level: .error,
-                        correlationID: correlationID,
-                        metadata: [
-                            "host": host,
-                            "port": String(port),
-                            "state": runtimeState.rawValue,
-                            "error": String(describing: error)
-                        ]
-                    )
-                )
+                logger.error("Failed to start proxy server: \(error.localizedDescription)")
                 throw error
             }
         }
     }
 
     public func stopServer() {
-        let correlationID = UUID().uuidString
         queue.sync(flags: .barrier) {
             runtimeState = .stopping
             proxyRuntime.stop()
             serverBaseURL = nil
             runtimeState = .stopped
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "stopServer",
-                    level: .info,
-                    correlationID: correlationID,
-                    metadata: ["state": runtimeState.rawValue]
-                )
-            )
+            activeLogger.info("Proxy server stopped.")
         }
     }
 
     public func proxyStatus() -> ProxyServerStatus {
-        let correlationID = UUID().uuidString
         let status = queue.sync {
             let state = runtimeState
             let offlineModeEnabled = offlinePlaybackModeEnabled
@@ -180,20 +148,8 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
             )
         }
 
-        activeLogger.log(
-            StructuredLogEvent(
-                subsystem: "HLSCache",
-                operation: "proxyStatus",
-                level: .debug,
-                correlationID: correlationID,
-                metadata: [
-                    "running": String(status.isRunning),
-                    "state": status.state.rawValue,
-                    "host": status.host ?? "",
-                    "port": status.port.map(String.init) ?? "",
-                    "offlineMode": String(status.offlineModeEnabled)
-                ]
-            )
+        activeLogger.debug(
+            "Proxy status is \(status.state.rawValue), running=\(status.isRunning), offlineMode=\(status.offlineModeEnabled)"
         )
 
         return status
@@ -206,17 +162,8 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
         remoteURL: URL,
         headers: [String: String]? = nil
     ) throws -> AssetRecord {
-        let correlationID = UUID().uuidString
         let record = try aliasRegistry.register(alias: alias, assetID: assetID, remoteURL: remoteURL, headers: headers)
-        activeLogger.log(
-            StructuredLogEvent(
-                subsystem: "HLSCache",
-                operation: "register",
-                level: .info,
-                correlationID: correlationID,
-                metadata: ["alias": alias, "assetID": assetID]
-            )
-        )
+        activeLogger.info("Registered alias \(alias) for remote URL \(remoteURL.absoluteString)")
         return record
     }
 
@@ -225,71 +172,60 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
     /// Resource-byte continuity remains strict URL-based, so cross-origin or otherwise different canonical
     /// resource URLs are treated as cache misses and fetched under new resource keys.
     public func updateRemoteURL(alias: Alias, remoteURL: URL) throws -> AssetRecord {
-        let correlationID = UUID().uuidString
         let previous = aliasRegistry.resolve(alias: alias)
         let updated = try aliasRegistry.updateRemoteURL(alias: alias, remoteURL: remoteURL)
         let previousHost = previous?.currentRemoteURL.host
         let updatedHost = updated.currentRemoteURL.host
         let hostChanged = previousHost != updatedHost
-        activeLogger.log(
-            StructuredLogEvent(
-                subsystem: "HLSCache",
-                operation: "updateRemoteURL",
-                level: .info,
-                correlationID: correlationID,
-                metadata: [
-                    "alias": alias,
-                    "oldHost": previousHost ?? "",
-                    "newHost": updatedHost ?? "",
-                    "hostChanged": String(hostChanged),
-                    "rotationPolicy": "cacheKey_stable_resourceKey_strict_url_match"
-                ]
-            )
+        activeLogger.info(
+            "Updated remote URL for alias \(alias) from \(previous?.currentRemoteURL.absoluteString ?? "none") to \(updated.currentRemoteURL.absoluteString); hostChanged=\(hostChanged)"
         )
         return updated
     }
 
     public func listAliases() -> [AssetRecord] {
-        let correlationID = UUID().uuidString
         let records = aliasRegistry.allRecords()
-        activeLogger.log(
-            StructuredLogEvent(
-                subsystem: "HLSCache",
-                operation: "listAliases",
-                level: .debug,
-                correlationID: correlationID,
-                metadata: ["count": String(records.count)]
-            )
-        )
+        activeLogger.debug("Listing aliases returned \(records.count) record(s).")
         return records
     }
 
     public func proxyURL(for alias: Alias) throws -> URL {
-        let correlationID = UUID().uuidString
         let base = queue.sync { serverBaseURL }
         guard let base else {
             throw HLSCacheError.serverNotRunning
         }
 
-        guard aliasRegistry.resolve(alias: alias) != nil else {
+        guard let record = aliasRegistry.resolve(alias: alias) else {
             throw HLSCacheError.aliasNotFound(alias)
         }
 
-        let encodedAlias = alias.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? alias
-        activeLogger.log(
-            StructuredLogEvent(
-                subsystem: "HLSCache",
-                operation: "proxyURL",
-                level: .debug,
-                correlationID: correlationID,
-                metadata: ["alias": alias]
-            )
-        )
-        return base.appendingPathComponent(encodedAlias)
+        let route = ProxyRoute(alias: alias, kind: .raw, remoteURL: record.currentRemoteURL)
+        guard var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else {
+            throw ProxyRouteError.invalidEncodedURL(base.absoluteString)
+        }
+
+        let basePath = components.percentEncodedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let routePath = try [
+            route.encodedAlias(),
+            ProxyResourceKind.raw.rawValue,
+            route.encodedRemoteURL()
+        ].joined(separator: "/")
+
+        if basePath.isEmpty {
+            components.percentEncodedPath = "/" + routePath
+        } else {
+            components.percentEncodedPath = "/" + basePath + "/" + routePath
+        }
+
+        guard let url = components.url else {
+            throw ProxyRouteError.invalidEncodedURL(record.currentRemoteURL.absoluteString)
+        }
+
+        activeLogger.debug("Generated proxy URL for alias \(alias) using raw route.")
+        return url
     }
 
     public func proxyURL(for alias: Alias, kind: ProxyResourceKind, remoteURL: URL) throws -> URL {
-        let correlationID = UUID().uuidString
         let base = queue.sync { serverBaseURL }
         guard let base else {
             throw HLSCacheError.serverNotRunning
@@ -321,53 +257,27 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
             throw ProxyRouteError.invalidEncodedURL(remoteURL.absoluteString)
         }
 
-        activeLogger.log(
-            StructuredLogEvent(
-                subsystem: "HLSCache",
-                operation: "proxyURLResource",
-                level: .debug,
-                correlationID: correlationID,
-                metadata: ["alias": alias, "kind": kind.rawValue]
-            )
-        )
+        activeLogger.debug("Generated proxy URL for alias \(alias), kind \(kind.rawValue).")
         return url
     }
 
     public func decodeProxyRequestURL(_ requestURL: URL) throws -> ProxyRoute {
-        let correlationID = UUID().uuidString
         let route = try ProxyRoute.from(url: requestURL)
         guard aliasRegistry.resolve(alias: route.alias) != nil else {
             throw HLSCacheError.aliasNotFound(route.alias)
         }
-        activeLogger.log(
-            StructuredLogEvent(
-                subsystem: "HLSCache",
-                operation: "decodeProxyRequestURL",
-                level: .debug,
-                correlationID: correlationID,
-                metadata: ["alias": route.alias, "kind": route.kind.rawValue]
-            )
-        )
+        activeLogger.debug("Decoded proxy request URL for alias \(route.alias), kind \(route.kind.rawValue).")
         return route
     }
 
     public func cacheInfo(alias: Alias) throws -> CacheInfo {
-        let correlationID = UUID().uuidString
         guard let record = aliasRegistry.resolve(alias: alias) else {
             throw HLSCacheError.aliasNotFound(alias)
         }
 
         let pluginCount = queue.sync { plugins.count }
         let bytes = directorySize(at: cacheDirectory(for: record.cacheKey))
-        activeLogger.log(
-            StructuredLogEvent(
-                subsystem: "HLSCache",
-                operation: "cacheInfo",
-                level: .debug,
-                correlationID: correlationID,
-                metadata: ["alias": alias, "bytes": String(bytes)]
-            )
-        )
+        activeLogger.debug("Loaded cache info for alias \(alias) with \(bytes) bytes on disk.")
 
         return CacheInfo(
             alias: record.alias,
@@ -380,52 +290,26 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
     }
 
     public func clearCache(alias: Alias? = nil) throws {
-        let correlationID = UUID().uuidString
         try queue.sync(flags: .barrier) {
             if let alias {
                 guard let record = aliasRegistry.resolve(alias: alias) else {
                     throw HLSCacheError.aliasNotFound(alias)
                 }
                 try removeDirectoryIfPresent(at: cacheDirectory(for: record.cacheKey))
-                logger.log(
-                    StructuredLogEvent(
-                        subsystem: "HLSCache",
-                        operation: "clearCache",
-                        level: .warning,
-                        correlationID: correlationID,
-                        metadata: ["alias": alias]
-                    )
-                )
+                logger.warning("Cleared cache files for alias \(alias).")
                 return
             }
 
             try removeDirectoryIfPresent(at: baseDirectory.appendingPathComponent("cache", isDirectory: true))
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "clearCache",
-                    level: .warning,
-                    correlationID: correlationID,
-                    metadata: ["alias": "all"]
-                )
-            )
+            activeLogger.warning("Cleared all cache files.")
         }
     }
 
     @discardableResult
     public func removeAlias(alias: Alias) throws -> AssetRecord {
-        let correlationID = UUID().uuidString
         do {
             let removed = try aliasRegistry.unregister(alias: alias)
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "removeAlias",
-                    level: .warning,
-                    correlationID: correlationID,
-                    metadata: ["alias": alias]
-                )
-            )
+            activeLogger.warning("Removed alias \(alias) from registry.")
             return removed
         } catch let error as AliasRegistryError {
             switch error {
@@ -437,35 +321,17 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
 
     @discardableResult
     public func removeAllAliases() throws -> Int {
-        let correlationID = UUID().uuidString
         let removedCount = try aliasRegistry.unregisterAll()
-        activeLogger.log(
-            StructuredLogEvent(
-                subsystem: "HLSCache",
-                operation: "removeAllAliases",
-                level: .warning,
-                correlationID: correlationID,
-                metadata: ["count": String(removedCount)]
-            )
-        )
+        activeLogger.warning("Removed all aliases (\(removedCount) record(s)).")
         return removedCount
     }
 
     @discardableResult
     public func setPlugins(_ plugins: [any HLSCachePlugin]) -> [PluginStamp] {
-        let correlationID = UUID().uuidString
         return queue.sync(flags: .barrier) {
             self.plugins = plugins
             let pluginStamps = plugins.map { PluginStamp(id: $0.id, version: $0.version) }
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "setPlugins",
-                    level: .info,
-                    correlationID: correlationID,
-                    metadata: ["count": String(pluginStamps.count)]
-                )
-            )
+            activeLogger.info("Updated active plugins to \(pluginStamps.count) plugin(s).")
             return pluginStamps
         }
     }
@@ -485,18 +351,9 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
 
     @discardableResult
     public func setOfflinePlaybackMode(enabled: Bool) -> Bool {
-        let correlationID = UUID().uuidString
         return queue.sync(flags: .barrier) {
             offlinePlaybackModeEnabled = enabled
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "setOfflinePlaybackMode",
-                    level: .info,
-                    correlationID: correlationID,
-                    metadata: ["enabled": String(enabled)]
-                )
-            )
+            activeLogger.info("Offline playback mode is now \(enabled).")
             return offlinePlaybackModeEnabled
         }
     }
@@ -563,20 +420,7 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
         do {
             requestURL = try makeRequestURL(for: request.path)
         } catch {
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "proxyRequest",
-                    level: .warning,
-                    correlationID: correlationID,
-                    metadata: [
-                        "path": request.path,
-                        "method": request.method,
-                        "status": "400",
-                        "error": String(describing: error)
-                    ]
-                )
-            )
+            activeLogger.warning("Proxy request rejected because route path is invalid: \(request.path)")
             return .text(statusCode: 400, reasonPhrase: "Bad Request", body: "invalid route\n")
         }
 
@@ -588,37 +432,25 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
                 throw HLSCacheError.aliasNotFound(route.alias)
             }
             asset = resolved
-        } catch HLSCacheError.aliasNotFound {
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "proxyRequest",
-                    level: .warning,
-                    correlationID: correlationID,
-                    metadata: [
-                        "path": request.path,
-                        "method": request.method,
-                        "status": "404"
-                    ]
-                )
-            )
+        } catch let HLSCacheError.aliasNotFound(missingAlias) {
+            activeLogger.warning("Proxy request rejected because alias \(missingAlias) was not found.")
             return .text(statusCode: 404, reasonPhrase: "Not Found", body: "alias not found\n")
         } catch {
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "proxyRequest",
-                    level: .warning,
-                    correlationID: correlationID,
-                    metadata: [
-                        "path": request.path,
-                        "method": request.method,
-                        "status": "400",
-                        "error": String(describing: error)
-                    ]
-                )
-            )
+            activeLogger.warning("Proxy request rejected because route decoding failed: \(request.path)")
             return .text(statusCode: 400, reasonPhrase: "Bad Request", body: "invalid route\n")
+        }
+
+        let requestHeaders = asset.headers ?? [:]
+        if !offlineModeEnabled,
+           request.headers["range"] == nil,
+           (request.method == "GET" || request.method == "HEAD"),
+           looksLikePlaylistURL(route.remoteURL) {
+            return await proxyResponseForPlaylistRequest(
+                route: route,
+                requestPath: request.path,
+                requestMethod: request.method,
+                requestHeaders: requestHeaders
+            )
         }
 
         let primaryResourceID = ResourceID(
@@ -639,7 +471,6 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
         let totalLength: Int64
         let contentType: String?
         let continuityDecision: String
-        let requestHeaders = asset.headers ?? [:]
         do {
             let cache = try CoreCache(
                 baseDirectory: baseDirectory,
@@ -666,20 +497,7 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
                     selectedResourceID = legacyResourceID
                     selectedCachedRecord = fallbackRecord
                     selectedContinuityDecision = "reuse_legacy_resource_key_fallback"
-                    logger.log(
-                        StructuredLogEvent(
-                            subsystem: "HLSCache",
-                            operation: "legacyResourceKeyFallback",
-                            level: .info,
-                            correlationID: correlationID,
-                            metadata: [
-                                "alias": route.alias,
-                                "kind": route.kind.rawValue,
-                                "currentResourceKey": primaryResourceID.resourceKey,
-                                "fallbackResourceKey": legacyResourceID.resourceKey
-                            ]
-                        )
-                    )
+                    logger.info("Using legacy cached resource key for URL \(route.remoteURL.absoluteString)")
                     break
                 }
             }
@@ -698,32 +516,15 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
                     cachedRecord: selectedCachedRecord,
                     remoteURL: route.remoteURL,
                     requestHeaders: requestHeaders,
-                    networkClient: URLSessionNetworkClient(session: networkSession)
+                    networkClient: networkClient
                 )
                 totalLength = metadata.totalLength
                 contentType = metadata.contentType
             }
         } catch let error as ProxyCacheCoordinatorError {
             if case let .offlineCacheMiss(range) = error {
-                logger.log(
-                    StructuredLogEvent(
-                        subsystem: "HLSCache",
-                        operation: "proxyRequest",
-                        level: .warning,
-                        correlationID: correlationID,
-                        metadata: [
-                            "alias": route.alias,
-                            "kind": route.kind.rawValue,
-                            "path": request.path,
-                            "method": request.method,
-                            "status": "503",
-                            "offlineMode": "true",
-                            "diagnosticSchema": "1",
-                            "errorCode": "offline_cache_miss",
-                            "missingStart": String(range.start),
-                            "missingEndExclusive": String(range.endExclusive)
-                        ]
-                    )
+                logger.warning(
+                    "Proxy request offline cache miss for \(route.remoteURL.absoluteString), missing bytes \(range.start)-\(range.endExclusive)"
                 )
                 return ProxyServerHTTPResponse(
                     statusCode: 503,
@@ -733,37 +534,10 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
                 )
             }
 
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "proxyRequest",
-                    level: .error,
-                    correlationID: correlationID,
-                    metadata: [
-                        "path": request.path,
-                        "method": request.method,
-                        "status": "502",
-                        "error": String(describing: error)
-                    ]
-                )
-            )
+            activeLogger.error("Proxy request failed while preparing metadata: \(error.localizedDescription)")
             return .text(statusCode: 502, reasonPhrase: "Bad Gateway", body: "upstream metadata unavailable\n")
         } catch {
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "proxyRequest",
-                    level: .error,
-                    correlationID: correlationID,
-                    metadata: [
-                        "path": request.path,
-                        "method": request.method,
-                        "status": "502",
-                        "offlineMode": String(offlineModeEnabled),
-                        "error": String(describing: error)
-                    ]
-                )
-            )
+            activeLogger.error("Proxy request failed while preparing metadata: \(error.localizedDescription)")
             return .text(statusCode: 502, reasonPhrase: "Bad Gateway", body: "upstream metadata unavailable\n")
         }
 
@@ -779,22 +553,7 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
             }
 
             if request.method == "HEAD" || response.statusCode == 416 {
-                logger.log(
-                    StructuredLogEvent(
-                        subsystem: "HLSCache",
-                        operation: "proxyRequest",
-                        level: .debug,
-                        correlationID: correlationID,
-                        metadata: [
-                            "alias": route.alias,
-                            "kind": route.kind.rawValue,
-                            "status": String(response.statusCode),
-                            "bytes": headers["Content-Length"] ?? "0",
-                            "continuityDecision": continuityDecision,
-                            "offlineMode": String(offlineModeEnabled)
-                        ]
-                    )
-                )
+                logger.debug("Proxy request \(request.method) \(request.path) responded with status \(response.statusCode) without body.")
 
                 return ProxyServerHTTPResponse(
                     statusCode: response.statusCode,
@@ -804,22 +563,7 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
                 )
             }
 
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "proxyRequest",
-                    level: .debug,
-                    correlationID: correlationID,
-                    metadata: [
-                        "alias": route.alias,
-                        "kind": route.kind.rawValue,
-                        "status": String(response.statusCode),
-                        "bytes": headers["Content-Length"] ?? "0",
-                        "continuityDecision": continuityDecision,
-                        "offlineMode": String(offlineModeEnabled)
-                    ]
-                )
-            )
+            activeLogger.debug("Starting proxy response stream for \(request.method) \(request.path).")
 
             return ProxyServerHTTPResponse(
                 statusCode: response.statusCode,
@@ -844,23 +588,74 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
                 )
             )
         } catch {
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "proxyRequest",
-                    level: .error,
-                    correlationID: correlationID,
-                    metadata: [
-                        "alias": route.alias,
-                        "kind": route.kind.rawValue,
-                        "path": request.path,
-                        "method": request.method,
-                        "status": "502",
-                        "offlineMode": String(offlineModeEnabled),
-                        "error": String(describing: error)
-                    ]
+            activeLogger.error("Proxy request failed before streaming response body: \(error.localizedDescription)")
+            return .text(statusCode: 502, reasonPhrase: "Bad Gateway", body: "proxy upstream error\n")
+        }
+    }
+
+    @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+    private func proxyResponseForPlaylistRequest(
+        route: ProxyRoute,
+        requestPath: String,
+        requestMethod: String,
+        requestHeaders: [String: String]
+    ) async -> ProxyServerHTTPResponse {
+        var upstreamRequest = URLRequest(url: route.remoteURL)
+        upstreamRequest.httpMethod = "GET"
+        for (name, value) in requestHeaders {
+            upstreamRequest.setValue(value, forHTTPHeaderField: name)
+        }
+
+        do {
+            let (upstreamData, upstreamResponse) = try await networkClient.data(for: upstreamRequest)
+            guard let httpResponse = upstreamResponse as? HTTPURLResponse else {
+                activeLogger.error("Proxy playlist request failed with non-HTTP response: \(route.remoteURL.absoluteString)")
+                return .text(statusCode: 502, reasonPhrase: "Bad Gateway", body: "proxy upstream error\n")
+            }
+
+            let contentType = headerValue("Content-Type", in: httpResponse) ?? "application/vnd.apple.mpegurl"
+            guard (200...299).contains(httpResponse.statusCode) else {
+                let body = requestMethod == "HEAD" ? Data() : upstreamData
+                return ProxyServerHTTPResponse(
+                    statusCode: httpResponse.statusCode,
+                    reasonPhrase: reasonPhrase(for: httpResponse.statusCode),
+                    headers: [
+                        "Content-Type": contentType,
+                        "Content-Length": String(upstreamData.count),
+                        "Accept-Ranges": "bytes"
+                    ],
+                    body: body
                 )
+            }
+
+            let rewrittenData: Data
+            if let playlist = String(data: upstreamData, encoding: .utf8) {
+                let rewritten = try HLSPlaylistRewriter.rewrite(
+                    playlist,
+                    alias: route.alias,
+                    playlistURL: route.remoteURL
+                ) { [self] alias, kind, remoteURL in
+                    try proxyURL(for: alias, kind: kind, remoteURL: remoteURL)
+                }
+                rewrittenData = Data(rewritten.utf8)
+            } else {
+                rewrittenData = upstreamData
+            }
+
+            let responseBody = requestMethod == "HEAD" ? Data() : rewrittenData
+            activeLogger.debug("Proxy playlist rewrite succeeded for \(requestPath).")
+            return ProxyServerHTTPResponse(
+                statusCode: 200,
+                reasonPhrase: "OK",
+                headers: [
+                    "Content-Type": contentType,
+                    "Content-Length": String(rewrittenData.count),
+                    "Accept-Ranges": "bytes"
+                ],
+                body: responseBody
             )
+        } catch {
+            activeLogger.error("Proxy playlist rewrite failed for \(requestPath): \(error.localizedDescription)")
             return .text(statusCode: 502, reasonPhrase: "Bad Gateway", body: "proxy upstream error\n")
         }
     }
@@ -883,9 +678,8 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
         requestPath: String,
         requestMethod: String
     ) -> @Sendable (_ emitChunk: @escaping (Data) async throws -> Void) async throws -> Void {
-        { [logger = activeLogger, networkSession] emitChunk in
+        { [logger = activeLogger, networkClient] emitChunk in
             do {
-                let networkClient = URLSessionNetworkClient(session: networkSession)
                 let result = try await coordinator.serveStreaming(
                     resourceID: resourceID,
                     remoteURL: remoteURL,
@@ -900,45 +694,15 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
                     try await emitChunk(chunk)
                 }
 
-                logger.log(
-                    StructuredLogEvent(
-                        subsystem: "HLSCache",
-                        operation: "proxyRequest",
-                        level: .debug,
-                        correlationID: correlationID,
-                        metadata: [
-                            "alias": alias,
-                            "kind": kind,
-                            "status": String(result.response.statusCode),
-                            "bytes": String(result.totalBytesStreamed),
-                            "continuityDecision": continuityDecision,
-                            "offlineMode": String(offlineModeEnabled)
-                        ]
-                    )
+                logger.debug(
+                    "Proxy stream completed for alias \(alias) (\(kind)) with \(result.totalBytesStreamed) byte(s) over \(result.chunks.count) chunk(s)."
                 )
             } catch let error as ProxyServerHTTPBodyStreamError {
                 throw error
             } catch let error as ProxyCacheCoordinatorError {
                 if case let .offlineCacheMiss(range) = error {
-                    logger.log(
-                        StructuredLogEvent(
-                            subsystem: "HLSCache",
-                            operation: "proxyRequest",
-                            level: .warning,
-                            correlationID: correlationID,
-                            metadata: [
-                                "alias": alias,
-                                "kind": kind,
-                                "path": requestPath,
-                                "method": requestMethod,
-                                "status": "503",
-                                "offlineMode": "true",
-                                "diagnosticSchema": "1",
-                                "errorCode": "offline_cache_miss",
-                                "missingStart": String(range.start),
-                                "missingEndExclusive": String(range.endExclusive)
-                            ]
-                        )
+                    logger.warning(
+                        "Proxy stream offline cache miss for alias \(alias), missing bytes \(range.start)-\(range.endExclusive)."
                     )
                     throw ProxyServerHTTPBodyStreamError.fallbackResponseWithHeaders(
                         statusCode: 503,
@@ -948,46 +712,14 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
                     )
                 }
 
-                logger.log(
-                    StructuredLogEvent(
-                        subsystem: "HLSCache",
-                        operation: "proxyRequest",
-                        level: .error,
-                        correlationID: correlationID,
-                        metadata: [
-                            "alias": alias,
-                            "kind": kind,
-                            "path": requestPath,
-                            "method": requestMethod,
-                            "status": "502",
-                            "offlineMode": String(offlineModeEnabled),
-                            "error": String(describing: error)
-                        ]
-                    )
-                )
+                logger.error("Proxy stream failed for alias \(alias): \(error.localizedDescription)")
                 throw ProxyServerHTTPBodyStreamError.fallbackResponse(
                     statusCode: 502,
                     reasonPhrase: "Bad Gateway",
                     body: "proxy upstream error\n"
                 )
             } catch {
-                logger.log(
-                    StructuredLogEvent(
-                        subsystem: "HLSCache",
-                        operation: "proxyRequest",
-                        level: .error,
-                        correlationID: correlationID,
-                        metadata: [
-                            "alias": alias,
-                            "kind": kind,
-                            "path": requestPath,
-                            "method": requestMethod,
-                            "status": "502",
-                            "offlineMode": String(offlineModeEnabled),
-                            "error": String(describing: error)
-                        ]
-                    )
-                )
+                logger.error("Proxy stream failed for alias \(alias): \(error.localizedDescription)")
                 throw ProxyServerHTTPBodyStreamError.fallbackResponse(
                     statusCode: 502,
                     reasonPhrase: "Bad Gateway",
@@ -995,6 +727,10 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
                 )
             }
         }
+    }
+
+    private func looksLikePlaylistURL(_ remoteURL: URL) -> Bool {
+        remoteURL.path.lowercased().contains(".m3u8")
     }
 
     private func makeRequestURL(for path: String) throws -> URL {
@@ -1124,7 +860,7 @@ public final class HLSCacheFacade: @unchecked Sendable, Loggable {
     }
 
     private var activeLogger: Logger {
-        configuredLogger
+        overrideLogger ?? logger
     }
 }
 
