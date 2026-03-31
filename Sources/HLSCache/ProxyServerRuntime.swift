@@ -303,7 +303,7 @@ private final class NetworkProxyServerRuntime: @unchecked Sendable {
                 }
                 let preparedResponse = await self.httpResponse(for: buffer)
                 await self.send(preparedResponse, over: connection)
-                connection.cancel()
+                await self.finishConnection(connection)
                 self.queue.async {
                     self.activeConnections.removeValue(forKey: identifier)
                 }
@@ -349,6 +349,12 @@ private final class NetworkProxyServerRuntime: @unchecked Sendable {
     }
 
     private func pathFromRequestTarget(_ target: String) -> String {
+        if let absoluteURL = URL(string: target), absoluteURL.scheme != nil,
+           let components = URLComponents(url: absoluteURL, resolvingAgainstBaseURL: false) {
+            let path = components.percentEncodedPath
+            return path.isEmpty ? "/" : path
+        }
+
         let rawPath = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? target
         if rawPath.hasPrefix("/") {
             return rawPath
@@ -478,6 +484,17 @@ private final class NetworkProxyServerRuntime: @unchecked Sendable {
                     } else {
                         continuation.resume(returning: ())
                     }
+                })
+            }
+        }
+    }
+
+    private func finishConnection(_ connection: NWConnection) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async {
+                connection.send(content: nil, completion: .contentProcessed { _ in
+                    connection.cancel()
+                    continuation.resume(returning: ())
                 })
             }
         }

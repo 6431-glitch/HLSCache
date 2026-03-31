@@ -17,19 +17,19 @@ struct ManifestResourceIDScanResult: Sendable {
     let purgedCorruptedManifestDataBytes: Int64
 }
 
-public final class ManifestStore: @unchecked Sendable, Loggable {
+public final class ManifestStore: @unchecked Sendable, HLSLoggable {
     private let fileManager: FileManager
     private let baseDirectory: URL
-    private let configuredLogger: Logger
+    private let overrideLogger: Logger?
     private let queue = DispatchQueue(label: "CoreCache.ManifestStore", attributes: .concurrent)
 
     public init(
         baseDirectory: URL,
-        logger: Logger = Logger(label: String(reflecting: ManifestStore.self))
+        logger: Logger? = nil
     ) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
-        self.configuredLogger = logger
+        self.overrideLogger = logger
     }
 
     public func manifestFileURL(for resourceID: ResourceID) -> URL {
@@ -255,7 +255,6 @@ public final class ManifestStore: @unchecked Sendable, Loggable {
     ) -> Int64? {
         let quarantineURL = fileURL.appendingPathExtension("corrupt")
         let dataFileURL = dataFileURL(for: resourceID)
-        let correlationID = UUID().uuidString
 
         do {
             if fileManager.fileExists(atPath: quarantineURL.path) {
@@ -277,47 +276,13 @@ public final class ManifestStore: @unchecked Sendable, Loggable {
                 try fileManager.removeItem(at: dataFileURL)
             }
 
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "CoreCache",
-                    operation: "manifestDecodeRecovery",
-                    level: .warning,
-                    correlationID: correlationID,
-                    metadata: [
-                        "result": "recovered_decode_failure",
-                        "source": source,
-                        "cacheKey": resourceID.cacheKey.rawValue,
-                        "kind": resourceID.kind.rawValue,
-                        "resourceKey": resourceID.resourceKey,
-                        "manifestPath": fileURL.path,
-                        "quarantinePath": quarantineURL.path,
-                        "recoveryAction": "quarantine_manifest_and_purge_data",
-                        "purgedDataBytes": String(purgedDataBytes),
-                        "error": String(describing: decodeError)
-                    ]
-                )
+            activeLogger.warning(
+                "Recovered corrupted manifest at \(fileURL.lastPathComponent) from \(source); purged \(purgedDataBytes) byte(s) of data after error: \(decodeError.localizedDescription)"
             )
             return purgedDataBytes
         } catch {
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "CoreCache",
-                    operation: "manifestDecodeRecovery",
-                    level: .error,
-                    correlationID: correlationID,
-                    metadata: [
-                        "result": "recovery_failed",
-                        "source": source,
-                        "cacheKey": resourceID.cacheKey.rawValue,
-                        "kind": resourceID.kind.rawValue,
-                        "resourceKey": resourceID.resourceKey,
-                        "manifestPath": fileURL.path,
-                        "quarantinePath": quarantineURL.path,
-                        "recoveryAction": "quarantine_manifest_and_purge_data",
-                        "error": String(describing: decodeError),
-                        "recoveryError": String(describing: error)
-                    ]
-                )
+            activeLogger.error(
+                "Failed to recover corrupted manifest at \(fileURL.lastPathComponent) from \(source): \(error.localizedDescription)"
             )
             return nil
         }
@@ -368,6 +333,6 @@ public final class ManifestStore: @unchecked Sendable, Loggable {
     }
 
     private var activeLogger: Logger {
-        configuredLogger
+        overrideLogger ?? logger
     }
 }

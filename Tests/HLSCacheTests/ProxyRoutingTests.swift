@@ -26,6 +26,17 @@ import Testing
     #expect(route.remoteURL.absoluteString == "https://cdn.example.com/v.ts?token=abc")
 }
 
+@Test func proxyRoute_from_unescapedRemoteURLPath_parsesExpandedRemoteSegments() throws {
+    let unescapedURL = try #require(
+        URL(string: "http://127.0.0.1:8080/MD0534/raw/https://cdn.example.com/path/to/master.m3u8")
+    )
+
+    let route = try ProxyRoute.from(url: unescapedURL)
+    #expect(route.alias == "MD0534")
+    #expect(route.kind == .raw)
+    #expect(route.remoteURL.absoluteString == "https://cdn.example.com/path/to/master.m3u8")
+}
+
 @Test func proxyRoute_from_invalidPath_throws() throws {
     let invalidURL = try #require(URL(string: "http://127.0.0.1:8080/MD0534/seg"))
 

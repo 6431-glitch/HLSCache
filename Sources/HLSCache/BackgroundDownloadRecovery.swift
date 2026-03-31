@@ -53,7 +53,7 @@ public struct BackgroundDownloadRecoveryResult: Equatable, Sendable {
     }
 }
 
-public final class BackgroundDownloadTaskRegistry: @unchecked Sendable, Loggable {
+public final class BackgroundDownloadTaskRegistry: @unchecked Sendable, HLSLoggable {
     private static let corruptSnapshotRetentionLimit = 3
     private static let corruptSnapshotFilenamePrefix = "background_download_tasks.json.corrupt."
     private static let corruptSnapshotSequenceLock = NSLock()
@@ -63,7 +63,7 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable, Loggable
     private let baseDirectory: URL
     private let fileURL: URL
     private let temporaryFileURL: URL
-    private let configuredLogger: Logger
+    private let overrideLogger: Logger?
     private let queue = DispatchQueue(label: "HLSCache.BackgroundDownloadTaskRegistry", attributes: .concurrent)
 
     private var records: [Int: BackgroundDownloadTaskRecord] = [:]
@@ -71,13 +71,13 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable, Loggable
     public init(
         baseDirectory: URL,
         fileName: String = "background_download_tasks.json",
-        logger: Logger = Logger(label: String(reflecting: BackgroundDownloadTaskRegistry.self))
+        logger: Logger? = nil
     ) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
         self.fileURL = baseDirectory.appendingPathComponent(fileName)
         self.temporaryFileURL = baseDirectory.appendingPathComponent("\(fileName).tmp")
-        self.configuredLogger = logger
+        self.overrideLogger = logger
         loadFromDisk()
     }
 
@@ -195,40 +195,11 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable, Loggable
             let retainedSnapshotCount = try existingCorruptSnapshotURLsSortedByAge().count
 
             try saveToDiskAtomic()
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "loadBackgroundDownloadTaskRegistry",
-                    level: .warning,
-                    metadata: [
-                        "result": result,
-                        "registryPath": fileURL.path,
-                        "recoveryPath": snapshotURL.path,
-                        "recoveryAction": "quarantine_and_reset",
-                        "retentionLimit": String(Self.corruptSnapshotRetentionLimit),
-                        "retentionAction": prunedSnapshots.isEmpty ? "none" : "pruned_old_snapshots",
-                        "snapshotCount": String(retainedSnapshotCount),
-                        "prunedSnapshotCount": String(prunedSnapshots.count),
-                        "prunedSnapshotPaths": prunedSnapshots.map(\.path).joined(separator: ","),
-                        "error": String(describing: loadError)
-                    ]
-                )
+            activeLogger.warning(
+                "Recovered background task registry (\(result)); snapshot=\(snapshotURL.lastPathComponent), retained=\(retainedSnapshotCount), pruned=\(prunedSnapshots.count), error=\(loadError.localizedDescription)"
             )
         } catch {
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "loadBackgroundDownloadTaskRegistry",
-                    level: .error,
-                    metadata: [
-                        "result": "recovery_failed",
-                        "registryPath": fileURL.path,
-                        "recoveryPath": snapshotURL.path,
-                        "error": String(describing: loadError),
-                        "recoveryError": String(describing: error)
-                    ]
-                )
-            )
+            activeLogger.error("Failed to recover background task registry: \(error.localizedDescription)")
         }
     }
 
@@ -311,14 +282,14 @@ public final class BackgroundDownloadTaskRegistry: @unchecked Sendable, Loggable
     }
 
     private var activeLogger: Logger {
-        configuredLogger
+        overrideLogger ?? logger
     }
 }
 
-public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable, Loggable {
+public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable, HLSLoggable {
     private let fileManager: FileManager
     private let baseDirectory: URL
-    private let configuredLogger: Logger
+    private let overrideLogger: Logger?
     public let registry: BackgroundDownloadTaskRegistry
     private let diskStore: DiskStore
     private let manifestStore: ManifestStore
@@ -329,11 +300,11 @@ public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable, L
         registry: BackgroundDownloadTaskRegistry? = nil,
         diskStore: DiskStore? = nil,
         manifestStore: ManifestStore? = nil,
-        logger: Logger = Logger(label: String(reflecting: BackgroundDownloadRecoveryCoordinator.self))
+        logger: Logger? = nil
     ) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
-        self.configuredLogger = logger
+        self.overrideLogger = logger
         self.registry = registry ?? BackgroundDownloadTaskRegistry(baseDirectory: baseDirectory, logger: logger)
         self.diskStore = diskStore ?? DiskStore(baseDirectory: baseDirectory)
         self.manifestStore = manifestStore ?? ManifestStore(baseDirectory: baseDirectory, logger: logger)
@@ -443,8 +414,6 @@ public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable, L
     }
 
     private func reconcileStorageOnStartup() {
-        let correlationID = UUID().uuidString
-
         do {
             let manifestIDs = Set(manifestStore.allRecords().map(\.resourceID))
             let dataIDs = Set(allStoredResourceIDs())
@@ -458,89 +427,30 @@ public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable, L
 
             for resourceID in orphanManifestIDs {
                 try manifestStore.delete(resourceID: resourceID)
-                activeLogger.log(
-                    StructuredLogEvent(
-                        subsystem: "HLSCache",
-                        operation: "reconcileBackgroundStartup",
-                        level: .warning,
-                        correlationID: correlationID,
-                        metadata: [
-                            "action": "purgeOrphanManifest",
-                            "cacheKey": resourceID.cacheKey.rawValue,
-                            "kind": resourceID.kind.rawValue
-                        ]
-                    )
-                )
+                activeLogger.warning("Removed orphan background manifest for resource \(resourceID.resourceKey).")
             }
 
             for resourceID in orphanDataIDs {
                 let bytes = try diskStore.fileLength(for: resourceID)
                 try diskStore.remove(resourceID: resourceID)
                 purgedOrphanDataBytes += bytes
-                activeLogger.log(
-                    StructuredLogEvent(
-                        subsystem: "HLSCache",
-                        operation: "reconcileBackgroundStartup",
-                        level: .warning,
-                        correlationID: correlationID,
-                        metadata: [
-                            "action": "purgeOrphanData",
-                            "cacheKey": resourceID.cacheKey.rawValue,
-                            "kind": resourceID.kind.rawValue,
-                            "bytes": String(bytes)
-                        ]
-                    )
-                )
+                activeLogger.warning("Removed orphan background data for resource \(resourceID.resourceKey), \(bytes) byte(s).")
             }
 
             for stagingURL in orphanStagingURLs {
                 let bytes = (try? fileLength(at: stagingURL)) ?? 0
                 try fileManager.removeItem(at: stagingURL)
                 purgedOrphanStagingBytes += bytes
-                activeLogger.log(
-                    StructuredLogEvent(
-                        subsystem: "HLSCache",
-                        operation: "reconcileBackgroundStartup",
-                        level: .warning,
-                        correlationID: correlationID,
-                        metadata: [
-                            "action": "purgeOrphanDownloadStaging",
-                            "path": stagingURL.path,
-                            "bytes": String(bytes)
-                        ]
-                    )
+                activeLogger.warning(
+                    "Removed orphan background staging file \(stagingURL.lastPathComponent), \(bytes) byte(s)."
                 )
             }
 
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "reconcileBackgroundStartup",
-                    level: .info,
-                    correlationID: correlationID,
-                    metadata: [
-                        "action": "summary",
-                        "orphanManifestCount": String(orphanManifestIDs.count),
-                        "orphanDataCount": String(orphanDataIDs.count),
-                        "orphanDownloadStagingCount": String(orphanStagingURLs.count),
-                        "purgedOrphanDataBytes": String(purgedOrphanDataBytes),
-                        "purgedOrphanDownloadStagingBytes": String(purgedOrphanStagingBytes)
-                    ]
-                )
+            activeLogger.info(
+                "Background startup reconciliation completed; removed \(orphanManifestIDs.count) manifest(s), \(orphanDataIDs.count) data file(s), and \(orphanStagingURLs.count) staging file(s)."
             )
         } catch {
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "HLSCache",
-                    operation: "reconcileBackgroundStartup",
-                    level: .error,
-                    correlationID: correlationID,
-                    metadata: [
-                        "action": "failed",
-                        "error": String(describing: error)
-                    ]
-                )
-            )
+            activeLogger.error("Background startup reconciliation failed: \(error.localizedDescription)")
         }
     }
 
@@ -637,6 +547,6 @@ public final class BackgroundDownloadRecoveryCoordinator: @unchecked Sendable, L
     }
 
     private var activeLogger: Logger {
-        configuredLogger
+        overrideLogger ?? logger
     }
 }

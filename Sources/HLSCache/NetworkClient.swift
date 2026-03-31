@@ -1,5 +1,7 @@
 import CoreCache
 import Foundation
+import Get
+import Pulse
 
 #if canImport(FoundationNetworking)
 import FoundationNetworking
@@ -58,6 +60,63 @@ public struct URLSessionNetworkClient: NetworkClient, @unchecked Sendable {
             }
             task.resume()
         }
+    }
+}
+
+@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+public struct GetNetworkClient: NetworkClient, @unchecked Sendable {
+    private let client: APIClient
+
+    public init(client: APIClient) {
+        self.client = client
+    }
+
+    public init(
+        sessionConfiguration: URLSessionConfiguration = .default,
+        sessionDelegate: URLSessionDelegate? = nil,
+        networkLogger: NetworkLogger = .shared
+    ) {
+        let copiedConfiguration = (sessionConfiguration.copy() as? URLSessionConfiguration) ?? sessionConfiguration
+        let proxyDelegate = URLSessionProxyDelegate(logger: networkLogger, delegate: sessionDelegate)
+        self.client = APIClient(baseURL: nil) {
+            $0.sessionConfiguration = copiedConfiguration
+            $0.sessionDelegate = proxyDelegate
+        }
+    }
+
+    public static func pulseEnabled(
+        sessionConfiguration: URLSessionConfiguration = .default,
+        sessionDelegate: URLSessionDelegate? = nil
+    ) -> GetNetworkClient {
+        let logger = NetworkLogger(store: .shared)
+        NetworkLogger.shared = logger
+        return GetNetworkClient(
+            sessionConfiguration: sessionConfiguration,
+            sessionDelegate: sessionDelegate,
+            networkLogger: logger
+        )
+    }
+
+    public func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        guard let url = request.url else {
+            throw URLError(.badURL)
+        }
+
+        let method = HTTPMethod(rawValue: request.httpMethod ?? HTTPMethod.get.rawValue)
+        let getRequest = Request<Data>(
+            url: url,
+            method: method,
+            headers: request.allHTTPHeaderFields
+        )
+
+        let response = try await client.data(for: getRequest) { mutableRequest in
+            mutableRequest.httpBody = request.httpBody
+            mutableRequest.httpBodyStream = request.httpBodyStream
+            mutableRequest.cachePolicy = request.cachePolicy
+            mutableRequest.timeoutInterval = request.timeoutInterval
+        }
+
+        return (response.value, response.response)
     }
 }
 

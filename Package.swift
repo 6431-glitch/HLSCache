@@ -5,6 +5,13 @@ import PackageDescription
 
 let package = Package(
     name: "HLSCache",
+    platforms: [
+        .iOS(.v15),
+        .tvOS(.v15),
+        .macOS(.v13),
+        .watchOS(.v9),
+        .visionOS(.v1)
+    ],
     products: [
         // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
@@ -21,7 +28,9 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0")
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0"),
+        .package(url: "https://github.com/kean/Get.git", from: "2.0.0"),
+        .package(url: "https://github.com/kean/Pulse.git", from: "5.0.0")
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -30,7 +39,9 @@ let package = Package(
             name: "HLSCache",
             dependencies: [
                 "CoreCache",
-                .product(name: "Logging", package: "swift-log")
+                .product(name: "Get", package: "Get"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "Pulse", package: "Pulse")
             ]
         ),
         .target(

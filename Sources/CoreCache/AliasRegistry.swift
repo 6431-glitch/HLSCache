@@ -68,7 +68,7 @@ public struct AssetRecord: Codable, Hashable, Sendable {
     }
 }
 
-public final class AliasRegistry: @unchecked Sendable, Loggable {
+public final class AliasRegistry: @unchecked Sendable, HLSLoggable {
     private static let corruptSnapshotRetentionLimit = 3
     private static let corruptSnapshotFilenamePrefix = "alias_registry.json.corrupt."
     private static let corruptSnapshotSequenceLock = NSLock()
@@ -78,20 +78,20 @@ public final class AliasRegistry: @unchecked Sendable, Loggable {
     private let baseDirectory: URL
     private let fileURL: URL
     private let temporaryFileURL: URL
-    private let configuredLogger: Logger
+    private let overrideLogger: Logger?
     private let queue = DispatchQueue(label: "CoreCache.AliasRegistry", attributes: .concurrent)
 
     private var records: [Alias: AssetRecord] = [:]
 
     public init(
         baseDirectory: URL,
-        logger: Logger = Logger(label: String(reflecting: AliasRegistry.self))
+        logger: Logger? = nil
     ) {
         self.fileManager = .default
         self.baseDirectory = baseDirectory
         self.fileURL = baseDirectory.appendingPathComponent("alias_registry.json")
         self.temporaryFileURL = baseDirectory.appendingPathComponent("alias_registry.json.tmp")
-        self.configuredLogger = logger
+        self.overrideLogger = logger
         loadFromDisk()
     }
 
@@ -198,18 +198,7 @@ public final class AliasRegistry: @unchecked Sendable, Loggable {
             recoverFromDecodeFailure(decodeError)
         } catch {
             records = [:]
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "CoreCache",
-                    operation: "loadAliasRegistry",
-                    level: .error,
-                    metadata: [
-                        "result": "load_failed",
-                        "registryPath": fileURL.path,
-                        "error": String(describing: error)
-                    ]
-                )
-            )
+            activeLogger.error("Load failed for path \(fileURL.path) due to \(String(describing: error))")
         }
     }
 
@@ -224,39 +213,11 @@ public final class AliasRegistry: @unchecked Sendable, Loggable {
             let prunedSnapshots = try enforceCorruptSnapshotRetention()
 
             try saveToDiskAtomic()
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "CoreCache",
-                    operation: "loadAliasRegistry",
-                    level: .warning,
-                    metadata: [
-                        "result": "recovered_decode_failure",
-                        "registryPath": fileURL.path,
-                        "recoveryPath": snapshotURL.path,
-                        "recoveryAction": "quarantine_and_reset",
-                        "retentionLimit": String(Self.corruptSnapshotRetentionLimit),
-                        "retentionAction": prunedSnapshots.isEmpty ? "none" : "pruned_old_snapshots",
-                        "prunedSnapshotCount": String(prunedSnapshots.count),
-                        "prunedSnapshotPaths": prunedSnapshots.map(\.path).joined(separator: ","),
-                        "error": String(describing: decodeError)
-                    ]
-                )
+            activeLogger.warning(
+                "Recovered alias registry after decode failure; snapshot saved at \(snapshotURL.lastPathComponent), pruned \(prunedSnapshots.count) old snapshot(s): \(decodeError.localizedDescription)"
             )
         } catch {
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "CoreCache",
-                    operation: "loadAliasRegistry",
-                    level: .error,
-                    metadata: [
-                        "result": "recovery_failed",
-                        "registryPath": fileURL.path,
-                        "recoveryPath": "",
-                        "error": String(describing: decodeError),
-                        "recoveryError": String(describing: error)
-                    ]
-                )
-            )
+            activeLogger.error("Failed to recover alias registry after decode error: \(error.localizedDescription)")
         }
     }
 
@@ -340,6 +301,6 @@ public final class AliasRegistry: @unchecked Sendable, Loggable {
     }
 
     private var activeLogger: Logger {
-        configuredLogger
+        overrideLogger ?? logger
     }
 }

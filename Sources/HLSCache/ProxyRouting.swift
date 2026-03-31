@@ -49,33 +49,64 @@ public struct ProxyRoute: Equatable, Sendable {
 
     // Route-prefix policy:
     // The parser accepts optional leading deployment prefixes and interprets
-    // the trailing 3 components as `<alias>/<kind>/<encoded-remote-url>`.
+    // a trailing route shape `<alias>/<kind>/<remote-url>`, where the remote URL
+    // may be percent-encoded as one path component or expanded with "/" separators.
     static func parse(pathComponents: [Substring], originalPath: String) throws -> ProxyRoute {
-        guard pathComponents.count >= 3 else {
+        let nonEmptyComponents = pathComponents.filter { !$0.isEmpty }
+        guard nonEmptyComponents.count >= 3 else {
             throw ProxyRouteError.invalidRoutePath(originalPath)
         }
 
-        let routeTail = pathComponents.suffix(3)
-        let aliasComponent = String(routeTail[routeTail.startIndex])
-        let kindComponent = String(routeTail[routeTail.index(routeTail.startIndex, offsetBy: 1)])
-        let remoteComponent = String(routeTail[routeTail.index(routeTail.startIndex, offsetBy: 2)])
+        var sawKnownKind = false
+        var invalidRemoteComponent: String?
 
-        let alias = try decodePathComponent(aliasComponent)
-        guard let kind = ProxyResourceKind(rawValue: kindComponent) else {
-            throw ProxyRouteError.unsupportedRouteKind(kindComponent)
+        for index in pathComponents.indices.reversed() {
+            guard let kind = ProxyResourceKind(rawValue: String(pathComponents[index])) else {
+                continue
+            }
+            sawKnownKind = true
+            guard index > pathComponents.startIndex else {
+                continue
+            }
+
+            let aliasIndex = pathComponents.index(before: index)
+            let aliasComponent = String(pathComponents[aliasIndex])
+            guard !aliasComponent.isEmpty else {
+                continue
+            }
+
+            let remoteStart = pathComponents.index(after: index)
+            guard remoteStart < pathComponents.endIndex else {
+                continue
+            }
+
+            let remoteComponent = pathComponents[remoteStart...].map(String.init).joined(separator: "/")
+            guard !remoteComponent.isEmpty else {
+                continue
+            }
+
+            let alias = try decodePathComponent(aliasComponent)
+            let decodedRemoteURLString = remoteComponent.removingPercentEncoding ?? remoteComponent
+            guard let remoteURL = URL(string: decodedRemoteURLString), remoteURL.scheme != nil else {
+                invalidRemoteComponent = remoteComponent
+                continue
+            }
+
+            return ProxyRoute(alias: alias, kind: kind, remoteURL: remoteURL)
         }
 
-        let decodedURL = try decodePathComponent(remoteComponent)
-        guard let remoteURL = URL(string: decodedURL), remoteURL.scheme != nil else {
-            throw ProxyRouteError.invalidEncodedURL(remoteComponent)
+        if sawKnownKind {
+            throw ProxyRouteError.invalidEncodedURL(invalidRemoteComponent ?? originalPath)
         }
 
-        return ProxyRoute(alias: alias, kind: kind, remoteURL: remoteURL)
+        let fallbackKindIndex = nonEmptyComponents.index(nonEmptyComponents.endIndex, offsetBy: -2)
+        let fallbackKindComponent = String(nonEmptyComponents[fallbackKindIndex])
+        throw ProxyRouteError.unsupportedRouteKind(fallbackKindComponent)
     }
 
     public static func from(url: URL) throws -> ProxyRoute {
         let percentEncodedPath = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath ?? url.path
-        let components = percentEncodedPath.split(separator: "/", omittingEmptySubsequences: true)
+        let components = percentEncodedPath.split(separator: "/", omittingEmptySubsequences: false)
         return try parse(pathComponents: components, originalPath: percentEncodedPath)
     }
 

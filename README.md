@@ -27,14 +27,14 @@ The architecture cleanly separates playback proxying, storage, and background do
 
 ### Consumer Logging Protocol
 
-`HLSCache` now uses Apple's `swift-log` (`Logging.Logger`) directly. Consumers can inject any `Loggable` implementation backed by their own logger.
+`HLSCache` now uses Apple's `swift-log` (`Logging.Logger`) directly. Consumers can inject any `HLSLoggable` implementation backed by their own logger.
 
 ```swift
 import Foundation
 import HLSCache
 import Logging
 
-struct AppHLSLogger: Loggable {
+struct AppHLSLogger: HLSLoggable {
     let logger: Logger
 
     init() {
@@ -50,7 +50,7 @@ let facade = HLSCacheFacade(
 )
 ```
 
-If needed, you can also pass `NoOpLoggable()` to fully disable logs.
+If needed, you can also pass `NoOpHLSLoggable()` to fully disable logs.
 
 ### Metrics Semantics
 

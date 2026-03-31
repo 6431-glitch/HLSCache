@@ -12,7 +12,7 @@ public final class BackgroundURLSessionDownloadCoordinator: @unchecked Sendable 
     public init(
         baseDirectory: URL,
         recoveryCoordinator: BackgroundDownloadRecoveryCoordinator? = nil,
-        logger: Logger = Logger(label: String(reflecting: BackgroundURLSessionDownloadCoordinator.self))
+        logger: Logger? = nil
     ) {
         self.recoveryCoordinator = recoveryCoordinator
             ?? BackgroundDownloadRecoveryCoordinator(baseDirectory: baseDirectory, logger: logger)

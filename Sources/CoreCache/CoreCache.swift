@@ -140,7 +140,7 @@ public struct StartupReconciliationStatus: Equatable, Sendable {
     }
 }
 
-public final class CoreCache: @unchecked Sendable, Loggable {
+public final class CoreCache: @unchecked Sendable, HLSLoggable {
     private struct PlanMetricsAccumulator {
         var totalRequests: Int64 = 0
         var fullHitRequests: Int64 = 0
@@ -159,7 +159,7 @@ public final class CoreCache: @unchecked Sendable, Loggable {
     private let directoryLock: DirectoryLock
     private let diskStore: DiskStore
     private let manifestStore: ManifestStore
-    private let configuredLogger: Logger
+    private let overrideLogger: Logger?
     private let diskQuotaBytes: Int64?
     private let evictionRecencyPolicy: EvictionRecencyPolicy
     private let startupReconciliationMode: StartupReconciliationMode
@@ -174,12 +174,12 @@ public final class CoreCache: @unchecked Sendable, Loggable {
         evictionRecencyPolicy: EvictionRecencyPolicy = .leastRecentlyUpdated,
         startupReconciliationMode: StartupReconciliationMode = .synchronous,
         startupReconciliationProgressInterval: Int = 128,
-        logger: Logger = Logger(label: String(reflecting: CoreCache.self))
+        logger: Logger? = nil
     ) throws {
         self.directoryLock = try DirectoryLock(baseDirectory: baseDirectory)
         self.diskStore = DiskStore(baseDirectory: baseDirectory)
         self.manifestStore = ManifestStore(baseDirectory: baseDirectory, logger: logger)
-        self.configuredLogger = logger
+        self.overrideLogger = logger
         self.diskQuotaBytes = diskQuotaBytes.map { max($0, 0) }
         self.evictionRecencyPolicy = evictionRecencyPolicy
         self.startupReconciliationMode = startupReconciliationMode
@@ -218,7 +218,6 @@ public final class CoreCache: @unchecked Sendable, Loggable {
         requested: ByteRange,
         correlationID: String? = nil
     ) throws -> [ReadPlanPart] {
-        let resolvedCorrelationID = resolvedCorrelationID(correlationID)
         // Planning mutates aggregate counters, so it runs as a barrier mutation.
         return try queue.sync(flags: .barrier) {
             guard requested.length > 0 else {
@@ -242,19 +241,7 @@ public final class CoreCache: @unchecked Sendable, Loggable {
             }
 
             recordPlanMetrics(parts: parts, requested: requested)
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "CoreCache",
-                    operation: "plan",
-                    level: .debug,
-                    correlationID: resolvedCorrelationID,
-                    metadata: [
-                        "cacheKey": resource.cacheKey.rawValue,
-                        "kind": resource.kind.rawValue,
-                        "parts": String(parts.count)
-                    ]
-                )
-            )
+            activeLogger.debug("Planned read for resource \(resource.resourceKey) with \(parts.count) segment(s).")
             return parts
         }
     }
@@ -356,7 +343,6 @@ public final class CoreCache: @unchecked Sendable, Loggable {
         pluginsApplied: [PluginStamp]? = nil,
         correlationID: String? = nil
     ) throws -> ByteRange {
-        let resolvedCorrelationID = resolvedCorrelationID(correlationID)
         return try queue.sync(flags: .barrier) {
             let writtenRange = try diskStore.write(data, for: resource, at: offset)
 
@@ -378,20 +364,9 @@ public final class CoreCache: @unchecked Sendable, Loggable {
             try record.validateInvariants()
             record.touch()
             try manifestStore.save(resourceID: resource, record: record)
-            try enforceDiskQuotaIfNeeded(correlationID: resolvedCorrelationID)
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "CoreCache",
-                    operation: "write",
-                    level: .info,
-                    correlationID: resolvedCorrelationID,
-                    metadata: [
-                        "cacheKey": resource.cacheKey.rawValue,
-                        "kind": resource.kind.rawValue,
-                        "bytes": String(data.count),
-                        "offset": String(offset)
-                    ]
-                )
+            try enforceDiskQuotaIfNeeded()
+            activeLogger.info(
+                "Wrote \(data.count) byte(s) to resource \(resource.resourceKey) at offset \(offset)."
             )
             return writtenRange
         }
@@ -402,24 +377,9 @@ public final class CoreCache: @unchecked Sendable, Loggable {
         range: ByteRange,
         correlationID: String? = nil
     ) throws -> Data {
-        let resolvedCorrelationID = resolvedCorrelationID(correlationID)
         return try queue.sync {
             let data = try diskStore.read(resourceID: resource, range: range)
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "CoreCache",
-                    operation: "read",
-                    level: .debug,
-                    correlationID: resolvedCorrelationID,
-                    metadata: [
-                        "cacheKey": resource.cacheKey.rawValue,
-                        "kind": resource.kind.rawValue,
-                        "bytes": String(data.count),
-                        "start": String(range.start),
-                        "endExclusive": String(range.endExclusive)
-                    ]
-                )
-            )
+            activeLogger.debug("Read \(data.count) byte(s) from resource \(resource.resourceKey).")
             return data
         }
     }
@@ -431,7 +391,6 @@ public final class CoreCache: @unchecked Sendable, Loggable {
         pluginsApplied: [PluginStamp]? = nil,
         correlationID: String? = nil
     ) throws -> ResourceRecord {
-        let resolvedCorrelationID = resolvedCorrelationID(correlationID)
         return try queue.sync(flags: .barrier) {
             var record = try manifestStore.load(resourceID: resource) ?? ResourceRecord(kind: resource.kind)
 
@@ -447,19 +406,8 @@ public final class CoreCache: @unchecked Sendable, Loggable {
             try record.validateInvariants()
             record.touch()
             try manifestStore.save(resourceID: resource, record: record)
-            try enforceDiskQuotaIfNeeded(correlationID: resolvedCorrelationID)
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "CoreCache",
-                    operation: "finalizeWrite",
-                    level: .info,
-                    correlationID: resolvedCorrelationID,
-                    metadata: [
-                        "cacheKey": resource.cacheKey.rawValue,
-                        "kind": resource.kind.rawValue
-                    ]
-                )
-            )
+            try enforceDiskQuotaIfNeeded()
+            activeLogger.info("Finalized write for resource \(resource.resourceKey).")
             return record
         }
     }
@@ -478,23 +426,9 @@ public final class CoreCache: @unchecked Sendable, Loggable {
         activeStamps: [PluginStamp],
         correlationID: String? = nil
     ) {
-        let resolvedCorrelationID = resolvedCorrelationID(correlationID)
         queue.sync {
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "CoreCache",
-                    operation: "pluginMigrationDecision",
-                    level: .info,
-                    correlationID: resolvedCorrelationID,
-                    metadata: [
-                        "cacheKey": resource.cacheKey.rawValue,
-                        "kind": resource.kind.rawValue,
-                        "decision": decision,
-                        "reason": reason,
-                        "cachedStamps": cachedStamps.map { "\($0.id)@\($0.version)" }.joined(separator: ","),
-                        "activeStamps": activeStamps.map { "\($0.id)@\($0.version)" }.joined(separator: ",")
-                    ]
-                )
+            activeLogger.info(
+                "Plugin migration decision for resource \(resource.resourceKey): \(decision) (\(reason))."
             )
         }
     }
@@ -505,25 +439,12 @@ public final class CoreCache: @unchecked Sendable, Loggable {
         integrity: ResourceIntegrity?,
         correlationID: String? = nil
     ) throws -> ResourceRecord {
-        let resolvedCorrelationID = resolvedCorrelationID(correlationID)
         return try queue.sync(flags: .barrier) {
             var record = try manifestStore.load(resourceID: resource) ?? ResourceRecord(kind: resource.kind)
             record.integrity = integrity
             record.touch()
             try manifestStore.save(resourceID: resource, record: record)
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "CoreCache",
-                    operation: "setResourceIntegrity",
-                    level: .info,
-                    correlationID: resolvedCorrelationID,
-                    metadata: [
-                        "cacheKey": resource.cacheKey.rawValue,
-                        "kind": resource.kind.rawValue,
-                        "algorithm": integrity?.algorithm ?? "none"
-                    ]
-                )
-            )
+            activeLogger.info("Updated integrity metadata for resource \(resource.resourceKey).")
             return record
         }
     }
@@ -533,24 +454,12 @@ public final class CoreCache: @unchecked Sendable, Loggable {
         reason: String? = nil,
         correlationID: String? = nil
     ) throws {
-        let resolvedCorrelationID = resolvedCorrelationID(correlationID)
         try queue.sync(flags: .barrier) {
             let bytes = try diskStore.fileLength(for: resource)
             try diskStore.remove(resourceID: resource)
             try manifestStore.delete(resourceID: resource)
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "CoreCache",
-                    operation: "invalidateResource",
-                    level: .warning,
-                    correlationID: resolvedCorrelationID,
-                    metadata: [
-                        "cacheKey": resource.cacheKey.rawValue,
-                        "kind": resource.kind.rawValue,
-                        "bytes": String(bytes),
-                        "reason": reason ?? "unspecified"
-                    ]
-                )
+            activeLogger.warning(
+                "Invalidated resource \(resource.resourceKey), removed \(bytes) byte(s), reason: \(reason ?? "unspecified")."
             )
         }
     }
@@ -563,13 +472,6 @@ public final class CoreCache: @unchecked Sendable, Loggable {
 
         // Never emit invalid planning output; fallback is coherent and safe.
         return [.network(requested)]
-    }
-
-    private func resolvedCorrelationID(_ correlationID: String?) -> String {
-        if let correlationID, !correlationID.isEmpty {
-            return correlationID
-        }
-        return UUID().uuidString
     }
 
     private func recordPlanMetrics(parts: [ReadPlanPart], requested: ByteRange) {
@@ -601,7 +503,6 @@ public final class CoreCache: @unchecked Sendable, Loggable {
     }
 
     private func runStartupReconciliation() {
-        let correlationID = UUID().uuidString
         let startedAt = Date()
 
         // Initialization enters the completion group once; every path must leave exactly once.
@@ -627,22 +528,7 @@ public final class CoreCache: @unchecked Sendable, Loggable {
             var purgedOrphanDataBytes: Int64 = 0
             var processedUnits = 0
 
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "CoreCache",
-                    operation: "reconcileStartup",
-                    level: .info,
-                    correlationID: correlationID,
-                    metadata: [
-                        "action": "start",
-                        "mode": startupReconciliationMode.rawValue,
-                        "state": StartupReconciliationState.running.rawValue,
-                        "totalUnits": String(totalUnits),
-                        "orphanManifestCount": String(orphanManifestIDs.count),
-                        "orphanDataCount": String(orphanDataIDs.count)
-                    ]
-                )
-            )
+            activeLogger.info("Startup reconciliation started.")
 
             startupReconciliationStatusValue = StartupReconciliationStatus(
                 mode: startupReconciliationMode,
@@ -667,21 +553,8 @@ public final class CoreCache: @unchecked Sendable, Loggable {
                 }
 
                 let elapsedMillis = Int64(Date().timeIntervalSince(startedAt) * 1_000)
-                activeLogger.log(
-                    StructuredLogEvent(
-                        subsystem: "CoreCache",
-                        operation: "reconcileStartup",
-                        level: .info,
-                        correlationID: correlationID,
-                        metadata: [
-                            "action": "progress",
-                            "mode": startupReconciliationMode.rawValue,
-                            "state": StartupReconciliationState.running.rawValue,
-                            "processedUnits": String(processedUnits),
-                            "totalUnits": String(totalUnits),
-                            "elapsedMilliseconds": String(elapsedMillis)
-                        ]
-                    )
+                activeLogger.info(
+                    "Startup reconciliation progress: \(processedUnits)/\(totalUnits) unit(s) in \(elapsedMillis) ms."
                 )
             }
 
@@ -701,19 +574,7 @@ public final class CoreCache: @unchecked Sendable, Loggable {
                     purgedCorruptedManifestDataBytes: manifestScan.purgedCorruptedManifestDataBytes
                 )
                 emitProgressIfNeeded()
-                activeLogger.log(
-                    StructuredLogEvent(
-                        subsystem: "CoreCache",
-                        operation: "reconcileStartup",
-                        level: .warning,
-                        correlationID: correlationID,
-                        metadata: [
-                            "action": "purgeOrphanManifest",
-                            "cacheKey": resourceID.cacheKey.rawValue,
-                            "kind": resourceID.kind.rawValue
-                        ]
-                    )
-                )
+                activeLogger.warning("Removed orphan manifest for resource \(resourceID.resourceKey).")
             }
 
             for resourceID in orphanDataIDs {
@@ -734,20 +595,7 @@ public final class CoreCache: @unchecked Sendable, Loggable {
                     purgedCorruptedManifestDataBytes: manifestScan.purgedCorruptedManifestDataBytes
                 )
                 emitProgressIfNeeded()
-                activeLogger.log(
-                    StructuredLogEvent(
-                        subsystem: "CoreCache",
-                        operation: "reconcileStartup",
-                        level: .warning,
-                        correlationID: correlationID,
-                        metadata: [
-                            "action": "purgeOrphanData",
-                            "cacheKey": resourceID.cacheKey.rawValue,
-                            "kind": resourceID.kind.rawValue,
-                            "bytes": String(bytes)
-                        ]
-                    )
-                )
+                activeLogger.warning("Removed orphan data file for resource \(resourceID.resourceKey), \(bytes) byte(s).")
             }
 
             emitProgressIfNeeded(force: true)
@@ -769,26 +617,8 @@ public final class CoreCache: @unchecked Sendable, Loggable {
                 purgedCorruptedManifestDataBytes: manifestScan.purgedCorruptedManifestDataBytes
             )
 
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "CoreCache",
-                    operation: "reconcileStartup",
-                    level: .info,
-                    correlationID: correlationID,
-                    metadata: [
-                        "action": "summary",
-                        "mode": startupReconciliationMode.rawValue,
-                        "state": StartupReconciliationState.completed.rawValue,
-                        "durationMilliseconds": String(durationMillis),
-                        "processedUnits": String(processedUnits),
-                        "totalUnits": String(totalUnits),
-                        "orphanManifestCount": String(orphanManifestIDs.count),
-                        "orphanDataCount": String(orphanDataIDs.count),
-                        "purgedOrphanDataBytes": String(purgedOrphanDataBytes),
-                        "recoveredCorruptedManifestCount": String(manifestScan.recoveredCorruptedManifestCount),
-                        "purgedCorruptedManifestDataBytes": String(manifestScan.purgedCorruptedManifestDataBytes)
-                    ]
-                )
+            activeLogger.info(
+                "Startup reconciliation completed in \(durationMillis) ms with \(processedUnits) cleaned unit(s)."
             )
         } catch {
             let completedAt = Date()
@@ -809,27 +639,11 @@ public final class CoreCache: @unchecked Sendable, Loggable {
                 purgedCorruptedManifestDataBytes: previous.purgedCorruptedManifestDataBytes,
                 errorDescription: String(describing: error)
             )
-            activeLogger.log(
-                StructuredLogEvent(
-                    subsystem: "CoreCache",
-                    operation: "reconcileStartup",
-                    level: .error,
-                    correlationID: correlationID,
-                    metadata: [
-                        "action": "failed",
-                        "mode": startupReconciliationMode.rawValue,
-                        "state": StartupReconciliationState.failed.rawValue,
-                        "durationMilliseconds": String(durationMillis),
-                        "processedUnits": String(previous.processedUnits),
-                        "totalUnits": String(previous.totalUnits),
-                        "error": String(describing: error)
-                    ]
-                )
-            )
+            activeLogger.error("Startup reconciliation failed: \(error.localizedDescription)")
         }
     }
 
-    private func enforceDiskQuotaIfNeeded(correlationID: String) throws {
+    private func enforceDiskQuotaIfNeeded() throws {
         guard let diskQuotaBytes else {
             return
         }
@@ -896,20 +710,7 @@ public final class CoreCache: @unchecked Sendable, Loggable {
 
                 try diskStore.remove(resourceID: resource)
                 try manifestStore.delete(resourceID: resource)
-                activeLogger.log(
-                    StructuredLogEvent(
-                        subsystem: "CoreCache",
-                        operation: "evict",
-                        level: .warning,
-                        correlationID: correlationID,
-                        metadata: [
-                            "cacheKey": resource.cacheKey.rawValue,
-                            "kind": resource.kind.rawValue,
-                            "bytes": String(length),
-                            "evictionPolicy": evictionRecencyPolicy.rawValue
-                        ]
-                    )
-                )
+                activeLogger.warning("Evicted resource \(resource.resourceKey) to enforce disk quota, removed \(length) byte(s).")
             }
 
             totalBytes -= asset.totalBytes
@@ -981,6 +782,6 @@ public final class CoreCache: @unchecked Sendable, Loggable {
     }
 
     private var activeLogger: Logger {
-        configuredLogger
+        overrideLogger ?? logger
     }
 }
